@@ -1,0 +1,1120 @@
+---
+title: "Semi-manuel Annotation Subset 3"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+# Goal
+The aim of this script is subcluster questionable annotation of T and NK cells and to introduce adapt Hao and Hao et. al annotation where required.
+
+# Load libraries
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(Signac)
+library(readxl)
+library(ArchR)
+library(tidyverse)
+library(ggforce)
+library(ggpubr)
+library(RColorBrewer)
+library(ggalluvial)
+library(ggrepel)
+library(VennDiagram)
+library(factoextra)
+library(pheatmap)
+library(parallel)
+library(SeuratDisk)
+library(Seurat)
+library(glue)
+```
+
+
+```{r Run_parameters}
+set.seed(1)
+addArchRThreads(threads = 1)
+```
+
+# Set paths
+```{r define_directories }
+source("config_paths.R")
+result_dir <- file.path(project_dir, "results")
+data_dir <- file.path(project_dir, "data")
+analysis_dir <- file.path(result_dir, "ArchR_celltype_annotation")
+RDS_dir <- file.path(analysis_dir, "RDS_Objects")
+ArchR_dir <- file.path("ArchR_Subset3")
+
+ArchR_dir_Annotation <- file.path(project_dir_ext, "ArchR_Projects_4_Annotation")
+ArchR_result_dir <- file.path(ArchR_dir_Annotation, ArchR_dir)
+plotting_dir <- file.path(ArchR_result_dir, "Plots")
+subset_result_dir <- file.path(ArchR_dir_Annotation, "ArchR_Healthy_Subset3")
+subset_nb_result_dir <- file.path(ArchR_dir_Annotation, "ArchR_Healthy_NonB_Subset3")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r Load_ArchR_Project }
+setwd(file.path(project_dir, "results"))
+CLLProj <- loadArchRProject(path = ArchR_result_dir)
+
+# if(!file.exists("scRNA-PBMcs_Hao_and_Hao_et_2021.h5seurat")){
+#     download.file(
+#         url = "https://atlas.fredhutch.org/data/nygc/multimodal/pbmc_multimodal.h5seurat",
+#         destfile = file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat"
+#     ))
+# }
+
+Hao_seRNA <- LoadH5Seurat(file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat"))
+Hao_seRNA
+```
+
+# Analysis
+## Hao and Hao et al Subcluster annotation
+```{r Create_RNA_reference_assay, fig.width=2, fig.height=2}
+# As this dataset does not have an RNA assay, the non-SCT values need to be reconstructed to an RNA assay for the reference
+rna_counts <- CreateAssayObject(Hao_seRNA@assays$SCT$counts)
+
+NormalizeData(
+  rna_counts,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000,
+  margin = 1,
+  verbose = TRUE
+)
+
+Hao_seRNA@assays$RNA <- rna_counts
+```
+
+## Subclustering Healthy cells
+```{r Subset_ArchR_project_healthy_cells}
+# subset_healthy_pass<-which(CLLProj@cellColData$Clusters_0.6_IterativeLSI %in% c("C10", "C11"))
+# subset_healthy_cells_pass<-CLLProj$cellNames[subset_healthy_pass]
+#
+# CLLProj_Subset <- subsetArchRProject(
+#   ArchRProj = CLLProj,
+#   cells = subset_healthy_cells_pass,
+#   outputDirectory = subset_result_dir,
+#   dropCells = TRUE
+# )
+
+CLLProj_Subset <- loadArchRProject(path = subset_result_dir)
+```
+
+### Iterative LSI
+```{r LSI_0.2_and_0.4}
+CLLProj_Subset <- addIterativeLSI(
+  ArchRProj = CLLProj_Subset,
+  useMatrix = "TileMatrix",
+  name = "Subset_IterativeLSI",
+  iterations = 2,
+  clusterParams = list(
+    resolution = c(0.2),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30
+)
+
+CLLProj_Subset <- addIterativeLSI(
+  ArchRProj = CLLProj_Subset,
+  useMatrix = "TileMatrix",
+  name = "Subset_IterativeLSI_0.4",
+  iterations = 2,
+  clusterParams = list(
+    resolution = c(0.4),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30
+)
+
+saveArchRProject(ArchRProj = CLLProj_Subset, outputDirectory = subset_result_dir, load = FALSE, overwrite = TRUE)
+```
+
+### Add Clusters of different resolution
+```{r Clustering_0.2_to_0.6}
+# Try combinations between different LSI resolutions and clustering resolutions
+param_combinations_subset <- tidyr::expand_grid(
+  dimred = c("Subset_IterativeLSI", "Subset_IterativeLSI_0.4"),
+  resolution = c(0.2, 0.3, 0.4, 0.6)
+)
+
+for (row in 1:nrow(param_combinations_subset)) {
+  resolution <- param_combinations_subset$resolution[[row]]
+  dimred <- param_combinations_subset$dimred[[row]]
+
+  CLLProj_Subset <- addClusters(
+    input = CLLProj_Subset,
+    reducedDims = dimred,
+    method = "Seurat",
+    name = glue("Subset_Clusters_{resolution}_{dimred}"),
+    resolution = resolution
+  )
+}
+
+saveArchRProject(ArchRProj = CLLProj_Subset, outputDirectory = subset_result_dir, load = FALSE, overwrite = TRUE)
+```
+
+### Add UMAP embedding
+```{r UMAP}
+CLLProj_Subset <- addUMAP(
+  ArchRProj = CLLProj_Subset,
+  reducedDims = "Subset_IterativeLSI",
+  name = "Subset_UMAP_Subset_IterativeLSI",
+  nNeighbors = 30,
+  minDist = 0.5,
+  metric = "cosine"
+)
+
+CLLProj_Subset <- addUMAP(
+  ArchRProj = CLLProj_Subset,
+  reducedDims = "Subset_IterativeLSI_0.4",
+  name = "Subset_UMAP_Subset_IterativeLSI_0.4",
+  nNeighbors = 30,
+  minDist = 0.5,
+  metric = "cosine"
+)
+
+saveArchRProject(ArchRProj = CLLProj_Subset, outputDirectory = subset_result_dir, load = FALSE, overwrite = TRUE)
+```
+
+### Plot embedding
+```{r}
+sample_IterativeLSI <- plotEmbedding(
+  plotAs = "points",
+  embedding = "Subset_UMAP_Subset_IterativeLSI",
+  CLLProj_Subset,
+  colorBy = "cellColData",
+  name = "Sample",
+  pal = c(my_paired_colours_named, my_unpaired_colours_named)
+) +
+  geom_point(size = 1) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+sample_IterativeLSI_0.4 <- plotEmbedding(
+  plotAs = "points",
+  embedding = "Subset_UMAP_Subset_IterativeLSI_0.4",
+  CLLProj_Subset,
+  colorBy = "cellColData",
+  name = "Sample",
+  pal = c(my_paired_colours_named, my_unpaired_colours_named)
+) +
+  geom_point(size = 1) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+```
+
+```{r Plot_clusterings, fig.width=30, fig.height=12}
+all_cluster_plots <- list()
+
+for (row in 1:nrow(param_combinations_subset)) {
+  resolution <- param_combinations_subset$resolution[[row]]
+  dimred <- param_combinations_subset$dimred[[row]]
+  print(resolution)
+  print(dimred)
+
+  cluster_plots <- plotEmbedding(
+    ArchRProj = CLLProj_Subset,
+    colorBy = "cellColData",
+    name = glue("Subset_Clusters_{resolution}_{dimred}"),
+    embedding = glue("Subset_UMAP_{dimred}"),
+    plotAs = "points"
+  ) +
+    geom_point(size = 1) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+
+  all_cluster_plots[[row]] <- cluster_plots
+}
+
+
+cowplot::plot_grid(
+  ggarrange(sample_IterativeLSI, sample_IterativeLSI_0.4,
+    nrow = 2
+  ),
+  ggarrange(
+    plotlist = all_cluster_plots,
+    nrow = 2,
+    ncol = 4
+  ),
+  ncol = 2,
+  rel_widths = c(1, 4)
+)
+
+cowplot::plot_grid(ggarrange(sample_IterativeLSI, sample_IterativeLSI_0.4, nrow = 2),
+  ggarrange(
+    plotlist = all_cluster_plots,
+    nrow = 2,
+    ncol = 4
+  ),
+  ncol = 2,
+  rel_widths = c(1, 4)
+) %>%
+  ggsave(
+    plot = ., filename = file.path(plotting_dir, "Plot-UMAP-Healthy-Cells-Subclustering-Res-0.2-0.6.pdf"),
+    width = 90,
+    height = 30,
+    unit = "cm"
+  )
+#
+# clustering_0.3_IterativeLSI_0.4 <- plotEmbedding(
+#   ArchRProj = CLLProj_Subset,
+#   colorBy = "cellColData",
+#   name = "Subset_Clusters_0.3_Subset_IterativeLSI_0.4",
+#   embedding = "Subset_UMAP_Subset_IterativeLSI_0.4",
+#   plotAs = "points"
+# )
+#
+# clustering_0.4_IterativeLSI <- plotEmbedding(
+#   ArchRProj = CLLProj_Subset,
+#   colorBy = "cellColData",
+#   name = "Subset_Clusters_0.4_Subset_IterativeLSI",
+#   embedding = "Subset_UMAP_Subset_IterativeLSI",
+#   plotAs = "points"
+# )
+#
+# ggAlignPlots(clustering_0.3_IterativeLSI_0.4, clustering_0.4_IterativeLSI, type = "h")
+```
+
+### Bridge Integration at different LSI resolutions
+```{r Bridge_Integration_Subset}
+CLLProj_Subset <- addGeneIntegrationMatrix(
+  ArchRProj = CLLProj_Subset,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "Subset_GeneIntegrationMatrix_IterativeLSI",
+  reducedDims = "Subset_IterativeLSI",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "Subset_predictedCell_Un_Hao_IterativeLSI_,",
+  nameGroup = "Subset_predictedGroup_Un_Hao_IterativeLSI",
+  nameScore = "Subset_predictedScore_Un_Hao_IterativeLSI",
+  threads = 1, force = TRUE
+)
+
+CLLProj_Subset <- addGeneIntegrationMatrix(
+  ArchRProj = CLLProj_Subset,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "Subset_GeneIntegrationMatrix_IterativeLSI_0.4",
+  reducedDims = "Subset_IterativeLSI_0.4",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "Subset_predictedCell_Un_Hao_IterativeLSI_0.4,",
+  nameGroup = "Subset_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  nameScore = "Subset_predictedScore_Un_Hao_IterativeLSI_0.4",
+  threads = 1, force = TRUE
+)
+
+saveArchRProject(ArchRProj = CLLProj_Subset, outputDirectory = subset_result_dir, load = FALSE, overwrite = TRUE)
+```
+
+### Plot annotations
+```{r Plot_annotion_LSI_0.2, fig.height=8, fig.width=20}
+annotation_IterativeLSI_subset <- plotEmbedding(
+  plotAs = "points",
+  embedding = "Subset_UMAP_Subset_IterativeLSI",
+  CLLProj_Subset,
+  colorBy = "cellColData",
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 1) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+ggAlignPlots(sample_IterativeLSI, all_cluster_plots[[1]], annotation_IterativeLSI_subset, type = "h")
+```
+
+```{r Plot_annotation_LSI_0.4, fig.height=8, fig.width=20}
+annotation_IterativeLSI_0.4_subset <- plotEmbedding(
+  plotAs = "points",
+  embedding = "Subset_UMAP_Subset_IterativeLSI_0.4",
+  CLLProj_Subset,
+  colorBy = "cellColData",
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 1) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+ggAlignPlots(sample_IterativeLSI_0.4, all_cluster_plots[[5]], annotation_IterativeLSI_0.4_subset, type = "h")
+```
+
+```{r, Compare_LSI_resolutions_fig.width=70, fig.height=15}
+cowplot::plot_grid(
+  ggarrange(sample_IterativeLSI,
+    all_cluster_plots[[1]],
+    annotation_IterativeLSI_subset,
+    ncol = 3
+  ),
+  ggarrange(sample_IterativeLSI_0.4,
+    all_cluster_plots[[5]],
+    annotation_IterativeLSI_0.4_subset,
+    ncol = 3
+  ),
+  nrow = 2
+)
+
+cowplot::plot_grid(
+  ggarrange(sample_IterativeLSI,
+    all_cluster_plots[[1]],
+    annotation_IterativeLSI_subset,
+    ncol = 3
+  ),
+  ggarrange(sample_IterativeLSI_0.4,
+    all_cluster_plots[[5]],
+    annotation_IterativeLSI_0.4_subset,
+    ncol = 3
+  ),
+  nrow = 2
+) %>%
+  ggsave(
+    plot = ., filename = file.path(plotting_dir, "Plot-UMAP-Healthy-Cells-Subclustering-Annotation.pdf"),
+    width = 50,
+    height = 30,
+    unit = "cm"
+  )
+```
+
+
+```{r}
+# Show annotation in inital UMAP embedding of all cells --> clustering does not work very well and sample bias present
+plotEmbedding(
+  plotAs = "points",
+  embedding = "UMAP",
+  CLLProj_Subset,
+  colorBy = "cellColData",
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 1) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+
+plotEmbedding(
+  plotAs = "points",
+  embedding = "UMAP",
+  CLLProj_Subset,
+  colorBy = "cellColData",
+  name = "Sample",
+  pal = c(my_paired_colours_named, my_unpaired_colours_named)
+) +
+  geom_point(size = 1) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+```
+
+## Subclustering non-B cell healthy immune cells
+```{r Subset_ArchR_proj_to_non_healthy_Bcells}
+# subset_healthy_nb_pass <- which(CLLProj_Subset@cellColData$Clusters_0.6_IterativeLSI %in% c("C10"))
+# subset_healthy_nb_cells_pass <- CLLProj_Subset$cellNames[subset_healthy_nb_pass]
+#
+# CLLProj_Subset_nb <- subsetArchRProject(
+#   ArchRProj = CLLProj_Subset,
+#   cells = subset_healthy_nb_cells_pass,
+#   outputDirectory = subset_nb_result_dir,
+#   dropCells = TRUE
+# )
+
+CLLProj_Subset_nb <- loadArchRProject(path = subset_nb_result_dir)
+```
+
+### Iterative LSI
+```{r Subset_nb_LSIs}
+CLLProj_Subset_nb <- addIterativeLSI(
+  ArchRProj = CLLProj_Subset_nb,
+  useMatrix = "TileMatrix",
+  name = "Subset_nB_IterativeLSI",
+  iterations = 2,
+  clusterParams = list(
+    resolution = c(0.2),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30
+)
+
+CLLProj_Subset_nb <- addIterativeLSI(
+  ArchRProj = CLLProj_Subset_nb,
+  useMatrix = "TileMatrix",
+  name = "Subset_nB_IterativeLSI_0.4",
+  iterations = 2,
+  clusterParams = list(
+    resolution = c(0.4),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30
+)
+
+saveArchRProject(ArchRProj = CLLProj_Subset_nb, outputDirectory = subset_nb_result_dir, load = FALSE, overwrite = TRUE)
+```
+
+### Add Clusters of different resolution
+```{r Clustering_subset_nb}
+# Try combinations between different LSI resolutions and clustering resolutions
+param_combinations_subset_nb <- tidyr::expand_grid(
+  dimred = c("Subset_nB_IterativeLSI", "Subset_nB_IterativeLSI_0.4"),
+  resolution = c(0.1, 0.2, 0.3, 0.4, 0.6)
+)
+
+for (row in 1:nrow(param_combinations_subset_nb)) {
+  resolution <- param_combinations_subset_nb$resolution[[row]]
+  dimred <- param_combinations_subset_nb$dimred[[row]]
+
+  CLLProj_Subset_nb <- addClusters(
+    input = CLLProj_Subset_nb,
+    reducedDims = dimred,
+    method = "Seurat",
+    name = glue("Subset_nB_Clusters_{resolution}_{dimred}"),
+    resolution = resolution,
+    force = TRUE
+  )
+}
+
+saveArchRProject(ArchRProj = CLLProj_Subset_nb, outputDirectory = subset_nb_result_dir, load = FALSE, overwrite = TRUE)
+```
+
+### Add UMAP embedding
+```{r UMAP_subset_nb}
+CLLProj_Subset_nb <- addUMAP(
+  ArchRProj = CLLProj_Subset_nb,
+  reducedDims = "Subset_nB_IterativeLSI",
+  name = "Subset_nB_UMAP_Subset_nB_IterativeLSI",
+  nNeighbors = 30,
+  minDist = 0.5,
+  metric = "cosine"
+)
+
+CLLProj_Subset_nb <- addUMAP(
+  ArchRProj = CLLProj_Subset_nb,
+  reducedDims = "Subset_nB_IterativeLSI_0.4",
+  name = "Subset_nB_UMAP_Subset_nB_IterativeLSI_0.4",
+  nNeighbors = 30,
+  minDist = 0.5,
+  metric = "cosine"
+)
+
+saveArchRProject(ArchRProj = CLLProj_Subset_nb, outputDirectory = subset_nb_result_dir, load = FALSE, overwrite = TRUE)
+```
+
+### Plot embedding
+```{r Plot_subset_nb_sample}
+subset_nb_sample_IterativeLSI <- plotEmbedding(
+  plotAs = "points",
+  embedding = "Subset_nB_UMAP_Subset_nB_IterativeLSI",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "Sample",
+  pal = c(my_paired_colours_named, my_unpaired_colours_named)
+) +
+  geom_point(size = 1) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+subset_nb_sample_IterativeLSI_0.4 <- plotEmbedding(
+  plotAs = "points",
+  embedding = "Subset_nB_UMAP_Subset_nB_IterativeLSI_0.4",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "Sample",
+  pal = c(my_paired_colours_named, my_unpaired_colours_named)
+) +
+  geom_point(size = 1) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+```
+
+```{r Plot_Clustering_subset_nb, fig.width=30, fig.height=12}
+all_subcluster_plots <- list()
+
+for (row in 1:nrow(param_combinations_subset_nb)) {
+  resolution <- param_combinations_subset_nb$resolution[[row]]
+  dimred <- param_combinations_subset_nb$dimred[[row]]
+  print(resolution)
+  print(dimred)
+
+  subcluster_plots <- plotEmbedding(
+    ArchRProj = CLLProj_Subset_nb,
+    colorBy = "cellColData",
+    name = glue("Subset_nB_Clusters_{resolution}_{dimred}"),
+    embedding = glue("Subset_nB_UMAP_{dimred}"),
+    plotAs = "points"
+  ) +
+    geom_point(size = 1) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+
+  all_subcluster_plots[[row]] <- subcluster_plots
+}
+
+cowplot::plot_grid(
+  ggarrange(subset_nb_sample_IterativeLSI,
+    subset_nb_sample_IterativeLSI_0.4,
+    nrow = 2
+  ),
+  ggarrange(
+    plotlist = all_subcluster_plots,
+    nrow = 2,
+    ncol = 5
+  ),
+  ncol = 2,
+  rel_widths = c(1, 5)
+)
+
+cowplot::plot_grid(
+  ggarrange(subset_nb_sample_IterativeLSI,
+    subset_nb_sample_IterativeLSI_0.4,
+    nrow = 2
+  ),
+  ggarrange(
+    plotlist = all_subcluster_plots,
+    nrow = 2, ncol = 5
+  ),
+  ncol = 2,
+  rel_widths = c(1, 5)
+) %>%
+  ggsave(
+    plot = .,
+    filename = file.path(plotting_dir, "Plot-UMAP-Healthy-NonB-Cells-Subclustering-Res-0.2-0.6.pdf"),
+    width = 108,
+    height = 30,
+    unit = "cm"
+  )
+
+
+# subset_nb_clustering_0.3_subset_nb_IterativeLSI_ <- plotEmbedding(
+#   ArchRProj = CLLProj_Subset_nb,
+#   colorBy = "cellColData",
+#   name = "Subset_nB_Clusters_0.3_Subset_nB_IterativeLSI",
+#   embedding = "Subset_nB_UMAP_Subset_nB_IterativeLSI",
+#   plotAs = "points"
+# )
+#
+# subset_nb_clustering_0.4_subset_nb_IterativeLSI <- plotEmbedding(
+#   ArchRProj = CLLProj_Subset_nb,
+#   colorBy = "cellColData",
+#   name = "Subset_nB_Clusters_0.4_Subset_nB_IterativeLSI",
+#   embedding = "Subset_nB_UMAP_Subset_nB_IterativeLSI",
+#   plotAs = "points"
+# )
+#
+# subset_nb_clustering_0.4_subset_nb_IterativeLSI_0.4 <- plotEmbedding(
+#   ArchRProj = CLLProj_Subset_nb,
+#   colorBy = "cellColData",
+#   name = "Subset_nB_Clusters_0.4_Subset_nB_IterativeLSI_0.4",
+#   embedding = "Subset_nB_UMAP_Subset_nB_IterativeLSI_0.4",
+#   plotAs = "points"
+# )
+#
+#
+# ggAlignPlots(subset_nb_clustering_0.3_subset_nb_IterativeLSI_, subset_nb_clustering_0.4_subset_nb_IterativeLSI, subset_nb_clustering_0.4_subset_nb_IterativeLSI_0.4, type = "h")
+```
+
+### Bridge Integration at different LSI resolutions
+```{r Bridge_integration_subset_nb}
+CLLProj_Subset_nb <- addGeneIntegrationMatrix(
+  ArchRProj = CLLProj_Subset_nb,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "Subset_nB_GeneIntegrationMatrix_IterativeLSI",
+  reducedDims = "Subset_nB_IterativeLSI",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "Subset_nB_predictedCell_Un_Hao_IterativeLSI",
+  nameGroup = "Subset_nB_predictedGroup_Un_Hao_IterativeLSI",
+  nameScore = "Subset_nB_predictedScore_Un_Hao_IterativeLSI",
+  threads = 1
+)
+
+CLLProj_Subset_nb <- addGeneIntegrationMatrix(
+  ArchRProj = CLLProj_Subset_nb,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "Subset_nB_GeneIntegrationMatrix_IterativeLSI_0.4",
+  reducedDims = "Subset_nB_IterativeLSI_0.4",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "Subset_nB_predictedCell_Un_Hao_IterativeLSI_0.4,",
+  nameGroup = "Subset_nB_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  nameScore = "Subset_nB_predictedScore_Un_Hao_IterativeLSI_0.4",
+  threads = 1
+)
+
+saveArchRProject(ArchRProj = CLLProj_Subset_nb, outputDirectory = subset_nb_result_dir, load = FALSE, overwrite = TRUE)
+```
+
+### Plot annotations
+```{r Plot_annotation_subset_nb_LSI, fig.height=8, fig.width=20}
+annotation_IterativeLSI_subset_nb <- plotEmbedding(
+  plotAs = "points",
+  embedding = "Subset_nB_UMAP_Subset_nB_IterativeLSI",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "Subset_nB_predictedGroup_Un_Hao_IterativeLSI",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 1) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+ggAlignPlots(subset_nb_sample_IterativeLSI, all_subcluster_plots[[1]], annotation_IterativeLSI_subset_nb, type = "h")
+```
+
+```{r Plot_annotation_subset_nb_LSI_0.4, fig.height=8, fig.width=20}
+annotation_IterativeLSI_0.4_subset_nb <- plotEmbedding(
+  plotAs = "points",
+  embedding = "Subset_nB_UMAP_Subset_nB_IterativeLSI_0.4",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "Subset_nB_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 2) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+ggAlignPlots(subset_nb_sample_IterativeLSI_0.4, all_subcluster_plots[[6]], annotation_IterativeLSI_0.4_subset_nb, type = "h")
+```
+
+```{r, fig.width=30, fig.height=10}
+cowplot::plot_grid(
+  ggarrange(subset_nb_sample_IterativeLSI,
+    all_subcluster_plots[[1]],
+    annotation_IterativeLSI_subset_nb,
+    ncol = 3
+  ),
+  ggarrange(subset_nb_sample_IterativeLSI_0.4,
+    all_subcluster_plots[[5]],
+    annotation_IterativeLSI_0.4_subset_nb,
+    ncol = 3
+  ),
+  nrow = 2
+)
+
+cowplot::plot_grid(
+  ggarrange(subset_nb_sample_IterativeLSI,
+    all_subcluster_plots[[1]],
+    annotation_IterativeLSI_subset_nb,
+    ncol = 3
+  ),
+  ggarrange(subset_nb_sample_IterativeLSI_0.4,
+    all_subcluster_plots[[5]],
+    annotation_IterativeLSI_0.4_subset_nb,
+    ncol = 3
+  ),
+  nrow = 2
+) %>%
+  ggsave(
+    plot = .,
+    filename = file.path(plotting_dir, "Plot-UMAP-Healthy-NonB-Cells-Subclustering-Annotation.pdf"),
+    width = 50,
+    height = 30,
+    unit = "cm"
+  )
+```
+
+
+
+```{r, fig.width=10, fig.height=5}
+# Check if different UMAP parameters resolve cell type structures better
+CLLProj <- addUMAP(
+  ArchRProj = CLLProj,
+  reducedDims = "IterativeLSI",
+  name = "UMAP_0.3_minDist",
+  nNeighbors = 30,
+  minDist = 0.3,
+  metric = "cosine"
+)
+
+CLLProj <- addUMAP(
+  ArchRProj = CLLProj,
+  reducedDims = "IterativeLSI",
+  name = "UMAP_20_nN_0.5_minDist",
+  nNeighbors = 20,
+  minDist = 0.5,
+  metric = "cosine", force = TRUE
+)
+
+cowplot::plot_grid(
+  plotEmbedding(
+    embedding = "UMAP",
+    plotAs = "point",
+    size = 0.5,
+    CLLProj,
+    colorBy = "cellColData",
+    name = "predictedGroup_Un_Hao"
+  ),
+  plotEmbedding(
+    embedding = "UMAP_0.3_minDist",
+    plotAs = "point",
+    size = 0.5,
+    CLLProj,
+    colorBy = "cellColData",
+    name = "predictedGroup_Un_Hao"
+  ),
+  plotEmbedding(
+    embedding = "UMAP_20_nN_0.5_minDist",
+    plotAs = "point",
+    size = 0.5,
+    CLLProj,
+    colorBy = "cellColData",
+    name = "predictedGroup_Un_Hao"
+  ),
+  nrow = 1
+)
+
+## Does not change much
+```
+
+```{r Plot_Subset_Annotation_in_initial_UMAP_context, fig.width=20, fig.height=10}
+annotation_full_set <- plotEmbedding(
+  plotAs = "points",
+  embedding = "UMAP",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "predictedGroup_Un_Hao",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 2) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+annotation_full_set_LSI_0.4 <- plotEmbedding(
+  plotAs = "points",
+  embedding = "UMAP",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "predictedGroup_Un_Hao_IterativeLSI_0.4",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 2) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+annotation_subset <- plotEmbedding(
+  plotAs = "points",
+  embedding = "UMAP",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 2) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+annotation_subset_LSI_0.4 <- plotEmbedding(
+  plotAs = "points",
+  embedding = "UMAP",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 2) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+annotation_subset_nb <- plotEmbedding(
+  plotAs = "points",
+  embedding = "UMAP",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "Subset_nB_predictedGroup_Un_Hao_IterativeLSI",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 2) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+annotation_subset_nb_LSI_0.4 <- plotEmbedding(
+  plotAs = "points",
+  embedding = "UMAP",
+  CLLProj_Subset_nb,
+  colorBy = "cellColData",
+  name = "Subset_nB_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 2) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+ggarrange(annotation_full_set, annotation_subset, annotation_subset_nb,
+  annotation_full_set_LSI_0.4, annotation_subset_LSI_0.4, annotation_subset_nb_LSI_0.4,
+  nrow = 2, ncol = 3
+)
+```
+```{r}
+ggarrange(annotation_full_set,
+  annotation_subset,
+  annotation_subset_nb,
+  annotation_full_set_LSI_0.4,
+  annotation_subset_LSI_0.4,
+  annotation_subset_nb_LSI_0.4,
+  nrow = 2,
+  ncol = 3
+) %>%
+  ggsave(
+    plot = .,
+    filename = file.path(ArchR_result_dir, "Plots/Plot-UMAP-Healthy-NonB-Cells-Subclustering-Annotation_Projection.pdf"),
+    width = 50,
+    height = 30,
+    unit = "cm"
+  )
+```
+
+
+
+## Annotate
+```{r Distinguish_benign_malignant_cells, fig.width=8}
+# Check where non-CLL/MBL cells are distributed
+MBL_CLL_index <- which(CLLProj$Clusters_0.6_IterativeLSI %in% c("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C12", "C13"))
+MBL_CLL <- CLLProj$cellNames[MBL_CLL_index]
+
+CLLProj@cellColData$MBL_CLL_cells <- CLLProj$cellNames %in% MBL_CLL
+
+plotEmbedding(
+  plotAs = "point",
+  size = 1,
+  embedding = "UMAP",
+  CLLProj,
+  colorBy = "cellColData",
+  name = "MBL_CLL_cells"
+)
+
+plotEmbedding(
+  plotAs = "point",
+  size = 1,
+  embedding = "UMAP",
+  CLLProj,
+  colorBy = "cellColData",
+  name = "Clusters_0.6_IterativeLSI"
+)
+```
+
+```{r Define_annotation}
+My_Annotation <- tibble(
+  label_cellbarcode = CLLProj$cellNames,
+  `Clusters_0.6_IterativeLSI` = CLLProj$`Clusters_0.6_IterativeLSI`
+) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+  left_join(tibble(
+    label_cellbarcode = CLLProj_Subset$cellNames,
+    Subset_predictedGroup_Un_Hao_IterativeLSI_0.4 = CLLProj_Subset$Subset_predictedGroup_Un_Hao_IterativeLSI_0.4
+  )) %>%
+  mutate("My_Annotation" = case_when(str_ends(label, "\\.1") ~ "MBL_B_Cells",
+    # str_starts(label, "MBL") ~ "MBL_B_Cells",
+    str_starts(label, paste0(c("MBL3", "MBL4"), collapse = "|")) ~ "CLL_B_Cells",
+    str_starts(label, paste0(paste0("MBL", c(1:2, 6:9)), collapse = "|")) ~ "MBL_B_Cells",
+    str_ends(label, "\\.2") ~ "CLL_B_Cells",
+    .default = NA
+  )) %>%
+  mutate(My_Annotation = case_when(Clusters_0.6_IterativeLSI %in% c("C10", "C11") ~ Subset_predictedGroup_Un_Hao_IterativeLSI_0.4,
+    .default = My_Annotation
+  ))
+```
+
+```{r Add_annotation_column}
+# Add Subset_predictedGroup_Un_Hao_IterativeLSI_0.4 annotation to completete CLLProj as metadata according to barcode as this is now default annotation for subclusters
+
+CLLProj <- addCellColData(
+  ArchRProj = CLLProj,
+  data = CLLProj_Subset@cellColData$Subset_predictedGroup_Un_Hao_IterativeLSI_0.4,
+  cells = CLLProj_Subset$cellNames,
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  force = TRUE
+)
+
+
+# Assign annotations to new column
+CLLProj@cellColData$My_Annotation <- My_Annotation$My_Annotation
+
+# Summarize CD4 and CD8-Tcells to only T-cells
+CLLProj@cellColData$My_Annotation <- case_when(CLLProj@cellColData$My_Annotation %in% c("CD4 T", "CD8 T", "other T") ~ "T",
+  .default = CLLProj@cellColData$My_Annotation
+)
+
+final_annotation <- plotEmbedding(
+  plotAs = "point",
+  embedding = "UMAP",
+  CLLProj,
+  colorBy = "cellColData",
+  name = "My_Annotation",
+  pal = annotation_colours_named
+) +
+  geom_point(size = 0.5) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+final_annotation
+
+saveRDS(final_annotation, file.path(RDS_dir, "final_annotation_subset3.RDS"))
+saveArchRProject(ArchRProj = CLLProj, 
+                 outputDirectory = ArchR_result_dir, 
+                 overwrite = TRUE, 
+                 load = FALSE)
+```
+
+```{r Export_full_annotation}
+plotPDF(final_annotation,
+  name = "Plot-UMAP-RNA-Hao-Manual_Integration.pdf",
+  ArchRProj = CLLProj,
+  addDOC = FALSE,
+  width = 6,
+  height = 6
+)
+
+saveArchRProject(ArchRProj = CLLProj, outputDirectory = ArchR_result_dir, load = FALSE, overwrite = TRUE)
+```

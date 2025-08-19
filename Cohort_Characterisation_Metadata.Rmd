@@ -1,0 +1,361 @@
+---
+title: "Cohort characterisation by metadata"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+# Goal
+The aim of this script is to characterise the MBL-CLL cohort based on WBC, age, sex and progression.
+
+# Load libraries
+```{r}
+library(readxl)
+library(tidyverse)
+library(patchwork)
+```
+
+# Set paths
+
+```{r define_directories }
+source("config_paths.R")
+
+data_dir <- file.path(project_dir, "data")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "Clinical_data_analysis")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+plotting_dir <- file.path(analysis_dir, "Plots")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+## Metadata
+```{r Load_metadata }
+metadata <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata_atac.tsv"))
+metadata_all <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv"))
+```
+
+# Analysis
+## Age
+```{r Age_barplot}
+age_mbl_barplot <- metadata_all %>%
+  dplyr::filter(label != "MBL7dup") %>%
+  dplyr::select(label, patient_id, plotting_id, disease, sample_date, date_of_birth, MBL_subtype) %>%
+  unique() %>%
+  dplyr::mutate(
+    age_mbl = lubridate::time_length(difftime(sample_date, date_of_birth), "years"),
+    patient_id = factor(plotting_id, levels = c(paste0("P", 1:25))),
+    progression = str_starts(label, "CLL")
+  ) %>%
+  relocate(progression, .after = disease) %>%
+  dplyr::filter(disease == "MBL") %>%
+  dplyr::arrange(desc(MBL_subtype), desc(age_mbl)) %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  mutate(patient_id = factor(patient_id, patient_id), ) %>%
+  ggplot(aes(x = patient_id, y = age_mbl, fill = MBL_CLL_subtype)) +
+  geom_bar(position = "dodge", stat = "identity", colour = "black") +
+  labs(y = "Age [years]", x = "Patient", title = "Age at MBL sample") +
+  theme_pub() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(name = "MBL Subtype", values = my_MBL_CLL_colours_named, labels = c("HC_MBL" = "High-count MBL", "LC_MBL" = "Low-count MBL")) +
+  theme(
+    panel.grid.minor.y = element_line(),
+    panel.grid.major.y = element_line(),
+    axis.text.x = element_text(angle = 45, hjust=0.5, vjust=0.5),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+age_mbl_barplot
+```
+
+```{r Age_at_progression_barplot}
+age_CLL_barplot <- metadata_all %>%
+  dplyr::filter(label != "MBL7dup") %>%
+  dplyr::select(label, patient_id, plotting_id, sample_date, date_of_birth, disease) %>%
+  unique() %>%
+  dplyr::mutate(
+    age_CLL = lubridate::time_length(difftime(sample_date, date_of_birth), "years"),
+    patient_id = factor(plotting_id, levels = c(paste0("P", 1:25))),
+    progression = str_detect(label, paste(c("CLL", "MBL3", "MBL4"), collapse = "|"))
+  ) %>%
+  relocate(progression, .after = disease) %>%
+  dplyr::filter(disease == "CLL") %>%
+  arrange(-age_CLL) %>%
+  mutate(patient_id = factor(patient_id, patient_id)) %>%
+  ggplot(aes(x = patient_id, y = age_CLL, fill = progression)) +
+  geom_bar(position = "dodge", stat = "identity", colour = "black") +
+  labs(y = "Age [years]", x = "Patient", title = "Age at CLL sample") +
+  theme_pub() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(name = "", values = "#66C2A5") +
+  theme(
+    panel.grid.minor.y = element_line(),
+    panel.grid.major.y = element_line(),
+    axis.text.x = element_text(angle = 45, hjust=0.5, vjust=0.5),
+    legend.position = "none"
+  )
+age_CLL_barplot
+```
+
+```{r age_histogram, fig.width=4, fig.height=4}
+age_diagnosis_histogram <- metadata_all %>%
+  dplyr::filter(label != "MBL7dup") %>%
+  dplyr::select(label, patient_id, date_of_MBL_diagnosis, date_of_birth, plotting_id, disease, MBL_subtype) %>%
+  unique() %>%
+  dplyr::mutate(
+    age_at_diagnosis = lubridate::time_length(difftime(date_of_MBL_diagnosis, date_of_birth), "years"),
+    patient_id = factor(plotting_id, levels = c(paste0("P", 1:24)))
+  ) %>%
+  dplyr::filter(disease == "MBL") %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  ggplot(aes(y = age_at_diagnosis, fill = MBL_CLL_subtype)) +
+  geom_histogram(binwidth = 5, boundary = 50, colour = "black") +
+  coord_flip() +
+  labs(y = "Age [years]", x = "Patient counts", title = "Age at MBL diagnosis") +
+  theme_pub() +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(name = "MBL Subtype", values = my_MBL_CLL_colours_named, labels = c("HC_MBL" = "High-count MBL", "LC_MBL" = "Low-count MBL")) +
+  theme(
+    panel.grid.major.y = element_line(),
+    panel.grid.minor.y = element_line(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+age_diagnosis_histogram
+```
+
+## WBC
+```{r WBC, fig.width=3, fig.height=4}
+wbc_plot <- metadata_all %>%
+  dplyr::filter(label != "MBL7dup") %>%
+  dplyr::select(label, patient_id, MBL_subtype, disease, `WBC_[cells/nl]`) %>%
+  unique() %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  dplyr::mutate(MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL"))) %>%
+  ggplot(aes(x = MBL_CLL_subtype, y = `WBC_[cells/nl]`, colour = MBL_CLL_subtype)) +
+  geom_jitter() +
+  geom_violin(scale = "width", show.legend = FALSE, color = "lightgrey", fill = NA) +
+  theme_pub() +
+  scale_colour_manual(
+    name = "'Condition", values = my_MBL_CLL_colours_named,
+    labels = c("LC_MBL" = "LC MBL", "HC_MBL" = "HC MBL", "CLL" = "CLL")
+  ) +
+  scale_x_discrete(labels = c("LC_MBL" = "LC MBL", "HC_MBL" = "HC MBL", "CLL" = "CLL")) +
+  labs(title = "White blood cell count", y = "WBC [cells/nl]", x = "") +
+  theme(
+    panel.grid.major.y = element_line(),
+    panel.grid.minor.y = element_line(),
+    legend.position = "none"
+  )
+
+wbc_plot
+```
+
+# Swimmersplot
+```{r, fig.height=5, fig.width=5}
+input_swimmerplot <- metadata_all %>%
+  dplyr::filter(label != "MBL7dup") %>%
+  dplyr::rename("date_of_death" = death) %>%
+  dplyr::select(patient_id, plotting_id, disease, MBL_subtype, date_of_birth, sample_date, date_of_MBL_diagnosis, date_of_CLL_diagnosis, date_of_death, last_status) %>%
+  unique() %>%
+  dplyr::mutate(
+    "date_of_MBL_diagnosis" = if_else(condition = disease == "MBL" & sample_date < date_of_MBL_diagnosis, true = sample_date, false = date_of_MBL_diagnosis)
+  ) %>% # if MBL sample was taken before official diagnosis, sample date is set as diagnosis date
+  dplyr::mutate(
+    "MBL diagnosis" = lubridate::time_length(difftime(date_of_MBL_diagnosis, date_of_MBL_diagnosis), "years"),
+    "CLL diagnosis" = lubridate::time_length(difftime(date_of_CLL_diagnosis, date_of_MBL_diagnosis), "years"),
+    "last check-up" = lubridate::time_length(difftime(last_status, date_of_MBL_diagnosis), "years"),
+    "decease" = lubridate::time_length(difftime(date_of_death, date_of_MBL_diagnosis), "years")
+  ) %>%
+  pivot_wider(names_from = disease, values_from = sample_date) %>%
+  dplyr::rename(
+    "sample_date_MBL" = MBL,
+    "sample_date_CLL" = CLL
+  ) %>%
+  dplyr::mutate(
+    "MBL sample" = lubridate::time_length(difftime(sample_date_MBL, date_of_MBL_diagnosis), "years"),
+    "CLL sample" = lubridate::time_length(difftime(sample_date_CLL, date_of_MBL_diagnosis), "years"),
+    "MBL_CLL_subtype" = if_else(is.na(MBL_subtype), "CLL", MBL_subtype),
+    "MBL_CLL_subtype" = factor(MBL_CLL_subtype, levels = c("LC", "HC", "CLL"))
+  )
+
+
+input_swimmerplot_ordered <- input_swimmerplot %>%
+  dplyr::mutate(plotting_id = factor(plotting_id, levels = c(paste0("P", c(rev(seq(1:24))))))) %>%
+  dplyr::select(plotting_id, `MBL diagnosis`, `CLL diagnosis`, `MBL sample`, `CLL sample`, decease, `last check-up`) %>%
+  pivot_longer(-c(plotting_id), names_to = "event", values_to = "time [years]") %>%
+  dplyr::mutate(event = case_when(plotting_id %in% paste0("P", seq(1:6)) & event == "MBL sample" ~ "LC-MBL sample",
+    plotting_id %in% paste0("P", seq(from = 7, to = 13)) & event == "MBL sample" ~ "HC-MBL sample",
+    plotting_id %in% paste0("P", seq(from = 14, to = 23)) & event == "MBL sample" ~ "HC-MBL sample",
+    .default = event
+  )) %>%
+  dplyr::mutate(event = factor(event, levels = c("MBL_diagnosis", "LC-MBL sample", "HC-MBL sample", "MBL sample", "CLL diagnosis", "CLL sample", "last check-up", "decease")))
+
+rect_data <- tibble(
+  xmin = rep(-2, 4),
+  xmax = rep(20, 4),
+  ymin = c(0, 1.6, 11.5, 18.5),
+  ymax = c(1.5, 11.5, 18.5, 24.5)
+)
+
+swimmers_plot <- ggplot(
+  data = input_swimmerplot_ordered,
+  mapping = aes(y = plotting_id, x = `time [years]`)
+) +
+  geom_line(colour = "#a3bfb6") +
+  geom_point(aes(colour = factor(event), shape = factor(event)), size = 2, stroke = 1) +
+  scale_x_continuous(breaks = seq(from = -5, to = 20, by = 5), limits = c(-2, 20)) +
+  scale_color_manual(values = c(
+    "LC-MBL sample" = "#fcbda4",
+    "HC-MBL sample" = "#FC8D62",
+    "CLL diagnosis" = "#a3bfb6",
+    "CLL sample" = "#66C2A5",
+    "decease" = "black"
+  )) +
+  scale_shape_manual(name = "Event", values = c(
+    "MBL diagnosis" = NA,
+    "LC-MBL sample" = 16,
+    "HC-MBL sample" = 16,
+    "CLL diagnosis" = 1,
+    "CLL sample" = 16,
+    "decease" = 4
+  )) +
+  labs(y = "Patient", x = "Time since MBL diagnosis [years]", colour = "Event") +
+  geom_rect(
+    data = rect_data,
+    mapping = aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    alpha = 0.2,
+    fill = rev(c("#fcbda4", "#FC8D62", "#66C2A5", "#66C2A5")),
+    inherit.aes = FALSE
+  ) +
+  geom_line(colour = "#a3bfb6") +
+  geom_point(aes(colour = factor(event), shape = factor(event)), size = 2, stroke = 1) +
+  theme_pub() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+swimmers_plot
+
+swimmers_plot %>%
+  ggsave(
+    filename = file.path(result_dir, "Swimmersplot.pdf"),
+    width = 8,
+    height = 5,
+    unit = "in"
+  )
+
+saveRDS(object = swimmers_plot, file.path(RDS_dir, "swimmers_plot.RDS"))
+```
+
+# Median follow up time paired samples
+```{r}
+median_followup <- input_swimmerplot %>%
+  dplyr::select(patient_id, plotting_id, sample_date_CLL, sample_date_MBL) %>%
+  tidyr::pivot_longer(-c(patient_id, plotting_id), names_to = "condition", values_to = "date") %>%
+  dplyr::filter(!is.na(date)) %>%
+  pivot_wider(names_from = condition, values_from = date) %>%
+  dplyr::filter(!(is.na(sample_date_MBL) | is.na(sample_date_CLL))) %>%
+  dplyr::mutate(checkup_since_CLL = case_when(str_starts(patient_id, "CLL") ~ lubridate::time_length(difftime(sample_date_CLL, sample_date_MBL), "days"), .default = NA)) %>%
+  pull(checkup_since_CLL) %>%
+  median(na.rm = TRUE)
+
+median_followup_range <- input_swimmerplot %>%
+  dplyr::select(patient_id, plotting_id, sample_date_CLL, sample_date_MBL) %>%
+  tidyr::pivot_longer(-c(patient_id, plotting_id), names_to = "condition", values_to = "date") %>%
+  dplyr::filter(!is.na(date)) %>%
+  pivot_wider(names_from = condition, values_from = date) %>%
+  dplyr::filter(!(is.na(sample_date_MBL) | is.na(sample_date_CLL))) %>%
+  dplyr::mutate(checkup_since_CLL = case_when(str_starts(patient_id, "CLL") ~ lubridate::time_length(difftime(sample_date_CLL, sample_date_MBL), "days"), .default = NA)) %>%
+  dplyr::summarize(min=min(checkup_since_CLL),
+            max=max(checkup_since_CLL))
+
+median_followup
+median_followup_range
+```
+
+# Modality heatmap
+```{r, fig.width=4, fig.height=5}
+metadata_heatmap <- metadata_all %>%
+  dplyr::filter(!(label %in% c("MBL7dup"))) %>%
+  dplyr::select(patient_id, plotting_id, label, disease, data_type) %>%
+  unique() %>%
+  dplyr::rename(
+    "Modality" = data_type,
+    "Disease stage" = disease
+  ) %>%
+  pivot_wider(id_cols = c("patient_id", "plotting_id", "label", "Disease stage"), names_from = "Modality", values_from = "Modality") %>%
+  pivot_longer(-c(patient_id, plotting_id, label, "Disease stage"), names_to = "category", values_to = "values") %>%
+  dplyr::mutate(category = if_else(category == "BCR", "VDJ", category)) %>%
+  dplyr::mutate(
+    plotting_id = factor(plotting_id, levels = c(paste0("P", c(rev(seq(1:25)))))),
+    `Disease stage` = factor(`Disease stage`, levels = c("MBL", "CLL")),
+    category = factor(category, levels = c("ATAC", "GEX", "VDJ", "TSA", "GOT")),
+    values = factor(values, levels = c("ATAC", "GEX", "TSA", "GOT", "BCR"))
+  ) %>%
+  dplyr::select(-c(label, `Disease stage`)) %>%
+  unique() %>%
+  dplyr::mutate(values = if_else(plotting_id %in% paste0("P", 7:25) & `values` == "TSA", NA, `values`)) %>%
+  ggplot(aes(x = category, y = plotting_id, fill = values)) +
+  geom_tile(colour = "black", height = 0.9, width = 0.8) +
+  scale_fill_manual(
+    name = "",
+    values = c(
+      "MBL" = "#FC8D62",
+      "CLL" = "#66C2A5",
+      "ATAC" = "indianred",
+      "TSA" = "skyblue3",
+      "GOT" = "plum3",
+      "GEX" = "olivedrab",
+      "BCR" = "lightgoldenrod3",
+      "multiome kit" = "pink3",
+      "v2 5'scRNA-seq" = "palevioletred4",
+      "v2 HT 5'scRNA-seq" = "bisque4",
+      "v2 scATAC-seq" = "khaki3"
+    ),
+    na.value = "transparent"
+  ) +
+  scale_x_discrete(
+    expand = c(0, 0), position = "top",
+    labels = c(
+      "ATAC" = "mtscATACseq",
+      "TSA" = "TotalSeq-A Seq",
+      "GOT" = "GoT-ChA",
+      "GEX" = "scRNAseq",
+      "VDJ" = "scBCRseq"
+    )
+  ) +
+  scale_y_discrete(expand = c(0, 0)) +
+  labs(x = "", y = "") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.text.x = element_text(angle = 90, hjust = -0.1, vjust = -0.1),
+    legend.position = "none"
+  ) +
+  coord_equal()
+metadata_heatmap
+
+saveRDS(metadata_heatmap, file.path(RDS_dir, "metadata_heatmap.RDS"))
+
+ggsave(metadata_heatmap,
+  path = result_dir,
+  file = "Metadata_heatmap.pdf",
+  width = 8,
+  height = 10
+)
+```

@@ -1,0 +1,727 @@
+---
+title: "Mitochondrial mutation statistics"
+author: "Anja_Rathgeber"
+date: "`r Sys.Date()`"
+output: html_document
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+#GOAL
+The aim of this script is to investigate how many mt mutations we have per cell and how deep the mutations have been covered.
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+library(ggsignif)
+```
+
+# Set paths
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+library_path <- file.path(data_dir, "ATAC")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "mtDNA_mutation_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+RDS_dir <- file.path(analysis_dir, "RDS_Objects")
+ArchR_dir_Annotation <- file.path(project_dir_ext, "ArchR_Projects_4_Annotation")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r}
+metadata <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv"))%>% 
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE)
+
+variant.df <- c(
+    readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/variant.df.RDS")),
+    readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/RDS_objects/variant.df.RDS")),
+    readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/RDS_objects/variant.df.RDS")),
+    readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/variant.df.MBL.RDS")),
+    readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/RDS_objects/variant.df.MBL.RDS")),
+    readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/RDS_objects/variant.df.MBL.RDS")))
+
+clonal_mt_VAFs <- list(readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/umap_embedding_mito_cln.RDS")),
+                       readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/umap_embedding_mito_cln_MBL.RDS")),
+                       readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/RDS_objects/umap_embedding_mito_cln.RDS")),
+                       readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/RDS_objects/umap_embedding_mito_cln_MBL.RDS")),
+                       readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/RDS_objects/umap_embedding_mito_cln.RDS")),
+                       readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/RDS_objects/umap_embedding_mito_cln_MBL.RDS")),
+                       readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset4/RDS_objects/umap_embedding_mito_cln_MBL.RDS"))
+                       ) %>% bind_rows() %>% dplyr::select(-c(UMAP1, UMAP2, sample)) %>% 
+  tidyr::unite("label_cellbarcode", label:cell_barcode, sep = "#", remove = FALSE ) %>% 
+  tidyr::separate(col = variant_id, into = c("position", "variant"), sep = "(?<=\\d)(?=[A-Z])", remove=FALSE) %>% 
+  dplyr::filter(patient_id != "MBL7dup",
+                variant_id != "310T>C")
+
+ref_all <- read_tsv(file.path(data_dir, "reference_genomes/chrM_refAllele.txt"), col_names = c("V1", "V2"))
+
+mt_gene_annotation <- readr::read_csv(file.path(data_dir, "reference_genomes/mt_genome_gene_annotation/NCBI RefSeq Annotation GCF_000001405.40-RS_2024_08.csv"), 
+                               col_names = TRUE, 
+                               skip = 1) %>% 
+  dplyr::mutate(`Gene symbol`= case_when(str_starts(`Gene symbol`, pattern =  "TRN") ~ "tRNA",
+                                         str_starts(`Gene symbol`, pattern =  "RNR") ~ "rRNA", .default =`Gene symbol`))
+
+celltype_annotation <- read_tsv(file.path(result_dir, "20250129_ATAC_celltype_annotation_healthy.tsv"))
+
+label2pool <- metadata %>% 
+  dplyr::filter(data_type =="ATAC",
+                !(patient_id %in% c("CLL6", "MBL7dup"))) %>% 
+  dplyr::select(label, pool) %>% 
+  deframe()
+
+label2plotting_id <- metadata %>% 
+  dplyr::filter(data_type =="ATAC",
+                !(patient_id %in% c("CLL6", "MBL7dup"))) %>% 
+  dplyr::select(label, plotting_id) %>% 
+  deframe()
+
+mtDNA_depth <- file.path(library_path, paste0(label2pool, ".mgatk"), paste0(label2pool, ".depthTable.txt")) %>% 
+  purrr::set_names(names(label2pool)) %>% 
+  imap(~read_tsv(., col_names = c("cellbarcode", "depth")) %>% 
+        dplyr::mutate(label_cellbarcode=paste0(.y, "#", cellbarcode)))
+
+mt_gene_annotation <- readr::read_csv(file.path(data_dir, "reference_genomes/mt_genome_gene_annotation/NCBI RefSeq Annotation GCF_000001405.40-RS_2024_08.csv"), 
+                               col_names = TRUE, 
+                               skip = 1) %>% 
+  dplyr::mutate(`Gene symbol`= case_when(str_starts(`Gene symbol`, pattern =  "TRN") ~ "tRNA",
+                                         str_starts(`Gene symbol`, pattern =  "RNR") ~ "rRNA", .default =`Gene symbol`))
+
+```
+
+```{r}
+patient_id2plotting_id <- metadata %>%
+  dplyr::filter(data_type=="ATAC") %>% 
+  dplyr::select(patient_id, plotting_id) %>%
+  deframe()
+```
+
+# Analysis
+
+## Total number of mtDNA mutation profiles
+```{r}
+cell_count_mtDNA_profiles <- clonal_mt_VAFs %>% 
+  dplyr::filter(!(patient_id %in% c("MBL6", "MBL7dup"))) %>% 
+  dplyr::select(label_cellbarcode) %>% 
+  pull() %>% 
+  unique() %>% 
+  length()
+cell_count_mtDNA_profiles
+```
+
+
+```{r}
+mutation_count_data <- clonal_mt_VAFs %>% 
+  dplyr::mutate(position=as.numeric(position) )%>%
+  left_join(celltype_annotation %>% 
+                               dplyr::select(label_cellbarcode, My_annotation_healthy), by = join_by(label_cellbarcode)) %>% 
+  filter(!(is.na(My_annotation_healthy)),
+         My_annotation_healthy %in% c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")) %>% 
+  dplyr::select(patient_id, variant_id, position) %>% 
+  unique() %>% 
+  group_by(variant_id) %>% 
+  dplyr::mutate(patient_counts=n_distinct(patient_id)) %>% 
+  arrange(patient_counts) %>% 
+  ungroup()
+```
+
+## Mean mtDNA mutation number per case
+
+```{r}
+mean_mtDNA_variant_counts <- mutation_count_data %>% 
+  dplyr::group_by(patient_id) %>% 
+  dplyr::summarize(variant_counts=n()) %>% 
+  arrange(variant_counts) %>% 
+  dplyr::summarize(mean_mtDNA_counts=mean(variant_counts),
+                   min_mtDNA_counts=min(variant_counts),
+                   max_mtDNA_counts=max(variant_counts))
+
+mean_mtDNA_variant_counts
+```
+
+## Total and non recurrent mtDNA mutations
+
+```{r}
+non_recurrent_mtDNA_mutations <- mutation_count_data %>% 
+  dplyr::select(variant_id, patient_counts) %>% 
+  unique() %>% 
+  dplyr::summarize(total_mtDNA_mutation_count=n_distinct(variant_id),
+                   non_recurrent_mtDNA_mutations=sum(patient_counts==1))
+non_recurrent_mtDNA_mutations
+```
+
+## mtDNA mutation recurrance
+
+### Top 3 recurrent mutations
+```{r}
+top3_recurrent_mtDNA_mutations <- mutation_count_data %>% 
+  dplyr::select(variant_id, patient_counts) %>% 
+  unique() %>% 
+  dplyr::arrange(desc(patient_counts)) %>% 
+  slice_head(n=3) %>% 
+  deframe
+
+top3_recurrent_mtDNA_mutations
+```
+
+```{r}
+axis_data <- tibble("mt_genome"=c(0, 16569))
+
+mt_count_radial_plot <- ggplot() +
+  geom_line(data= axis_data, aes(x=mt_genome, y= 2.1), colour="lightgrey", linewidth = 0.5)+
+  geom_line(data= axis_data, aes(x=mt_genome, y= 2.4), colour="lightgrey", linewidth = 0.5)+
+  geom_rect(data = mt_gene_annotation %>% dplyr::filter(Strand=="plus"), 
+            aes(xmin = Start, xmax = Stop, ymin=2, ymax=2.2, fill = `Gene symbol`), colour = "black", linewidth = 0.3) + 
+  geom_rect(data = mt_gene_annotation %>% dplyr::filter(Strand=="minus"), aes(xmin = Start, xmax = Stop, ymin=2.3, ymax=2.5, fill = `Gene symbol`), colour="black", linewidth = 0.3)+
+  geom_jitter(data = mutation_count_data %>% dplyr::select(variant_id, position, patient_counts) %>% unique, aes(x = position, y = 3, colour = patient_counts), shape=16, size = 0.5) +
+  geom_rect(data=tibble("position"=seq(0, 16659, 200)), aes(xmin=position,xmax=position+10, ymin=3.5, ymax=3.6), linewidth = 0.2, colour="black", fill="black")+
+  geom_text(data=axis_data, aes(x=0, y=0, label="mt\ngenome"))+
+  scale_x_continuous(limits=c(0, 16659), breaks=seq(0, 16569, 2000), labels = seq(0, 16569, 2000))+
+  scale_y_continuous(breaks=c(3.5), limits = c(0, 3.7))+
+  scale_color_distiller(name="Patients with\nmtDNA mutation", palette = "YlOrRd", direction = 1, breaks=c(1, 5, 10, 15, 20)) +
+  scale_fill_manual(name="Gene", 
+                    values=c("ATP6"="#15512A", "ATP8"="#2E8565","COX1"="#4EB1A9","COX2"="#8CB5C0","COX3"="#1A205F","CYTB"="#483591",
+                             "ND1"="#885EB4","ND2"="#BB9AC4","ND3"="#6C2047","ND4"="#9C3D52","ND4L"="#B7716E","ND5"="#CAB3A8","ND6"="#757927",
+                             "rRNA"="#95BB7D", "tRNA"="lightgrey"))+
+  coord_radial(rotate_angle = TRUE, expand = FALSE) +
+  theme_pub()+
+  theme(panel.background = element_rect(fill = 'white'),
+        panel.grid.major.y = element_line(colour = "black"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "right",
+        legend.direction = "vertical",
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.title.x= element_blank(),
+        axis.title.y= element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y =  element_blank())+
+  guides(colour = guide_legend(title="Patient-shared mutations",
+                              override.aes=list(size=3), ncol = 5, byrow=TRUE),
+         fill = guide_legend(ncol=3, byrow=TRUE))
+mt_count_radial_plot
+saveRDS(mt_count_radial_plot, file.path(RDS_dir, "mt_count_radial_plot.RDS"))
+```
+
+### All recurrent mutations
+```{r}
+recurrant_mutations <- mutation_count_data %>% 
+  dplyr::select(variant_id, position, patient_counts) %>% 
+  unique() %>% 
+  dplyr::arrange(desc(patient_counts)) %>% 
+  dplyr::filter(patient_counts >1) %>% 
+  dplyr::select(variant_id, patient_counts)
+
+write_excel_csv(recurrant_mutations, file.path(tsv_dir, "20250703_all_recurrent_mtDNA_mutations.tsv"))
+```
+
+
+### Top 20 recurrent mutations
+```{r}
+top20_mutations <- mutation_count_data %>% 
+  dplyr::select(variant_id, position, patient_counts) %>% 
+  unique() %>% 
+  dplyr::arrange(desc(patient_counts)) %>% 
+  slice_head(n=20)
+
+write_excel_csv(top20_mutations, file.path(tsv_dir, "20250417_top20_recurrent_mtDNA_mutations.tsv"))
+
+top20_mutations_heteroplasmies <- clonal_mt_VAFs %>% 
+  dplyr::filter(variant_id %in% top20_mutations$variant_id) %>% 
+  dplyr::group_by(variant_id, patient_id) %>% 
+  dplyr::summarize(mean_heteroplasmy_perc=round(mean(VAF)*100, digits = 2),
+                   median_heteroplasmy_perc=round(median(VAF)*100), digits=2)
+
+write_excel_csv(top20_mutations_heteroplasmies %>% 
+                  dplyr::mutate(plotting_id=factor(patient_id2plotting_id[patient_id], levels=paste0("P", 1:24))) %>%
+                  dplyr::select(-c(patient_id,median_heteroplasmy_perc)) %>%
+                  arrange(plotting_id) %>% 
+                  tidyr::pivot_wider(id_cols = variant_id, names_from = plotting_id, values_from = mean_heteroplasmy_perc), file.path(tsv_dir, "20250716_top20_recurrent_mtDNA_mutations_heteroplasmies.tsv"))
+```
+
+
+## Patient exclusive mtDNA mutations
+```{r, fig.width=3, fig.height=4}
+percentage_malignant_cells <- clonal_mt_VAFs %>% 
+  left_join(celltype_annotation %>% 
+            dplyr::select(label_cellbarcode, My_annotation_healthy)) %>% 
+  dplyr::filter(!is.na(My_annotation_healthy),
+                My_annotation_healthy %in% c("LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")) %>% 
+  dplyr::select(patient_id, variant_id, label_cellbarcode, VAF) %>% 
+    group_by(patient_id) %>%
+  mutate(total_cells = n_distinct(label_cellbarcode)) %>% 
+  group_by(variant_id, patient_id, total_cells) %>% 
+  dplyr::summarise(
+    variant_cell_count = sum(VAF != 0),  
+    percent_cells = 100 * variant_cell_count / total_cells) %>%
+  ungroup() %>% 
+  unique() %>% 
+  pivot_wider(id_cols = variant_id, names_from = patient_id, values_from = percent_cells) %>% 
+  column_to_rownames("variant_id") %>% 
+  as.matrix()
+
+percentage_malignant_cells[is.na(percentage_malignant_cells)] <- 0
+
+patient_order <- metadata %>%
+  dplyr::filter(data_type=="ATAC") %>%  
+  dplyr::filter(patient_id !="MBL7dup") %>% 
+  dplyr::select(patient_id, plotting_id) %>% 
+  unique %>% 
+  dplyr::mutate(plotting_id=factor(plotting_id, levels=paste0("P", 1:24))) %>% 
+  arrange(plotting_id) %>% 
+  pull(patient_id)
+
+mutation_order <- c() 
+for (patient in patient_order) {
+  ordered_variants <- percentage_malignant_cells %>%
+    as_tibble(rownames = "variant_id") %>%
+    dplyr::select(variant_id, all_of(patient)) %>%
+    filter(.data[[patient]] > 0) %>%  
+    arrange(.data[[patient]]) %>%  
+    pull(variant_id)  
+
+  # Append unique values while keeping order
+  mutation_order <- unique(c(mutation_order, ordered_variants))
+}
+
+# In case we want to annotate by condition as well
+patient_condition <- metadata %>% 
+  dplyr::filter(data_type=="ATAC") %>%
+  dplyr::select(patient_id, MBL_CLL_subtype) %>%
+  tidyr::pivot_wider(id_cols = patient_id, names_from=MBL_CLL_subtype, values_from = MBL_CLL_subtype) %>%
+  unique() %>%
+  dplyr::mutate(Condition=
+                 case_when(!is.na(LC_MBL) ~ "LC-MBL",
+                           !is.na(HC_MBL) & !is.na(CLL) ~ "CLL",
+                            is.na(HC_MBL) & !is.na(CLL) ~ "CLL",
+                           !is.na(HC_MBL) & is.na(CLL) ~ "HC-MBL",
+                           .default=NA)) %>%
+  dplyr::select(patient_id, Condition) %>% 
+  deframe()
+
+patient2condition <- my_MBL_CLL_colours_named[patient_condition]
+names(patient2condition) <- names(patient_condition)
+
+# Create a column annotation
+top_annotation_col_anno <- HeatmapAnnotation(
+  Condition= anno_simple(patient_order, col=patient2condition, border=TRUE),
+  Patient = anno_simple(patient_order, col=c(my_unpaired_colours_named, my_paired_colours_named),
+  border = TRUE),
+  annotation_height = unit(4, "mm"),
+  annotation_name_side = "left",
+  annotation_name_gp = gpar(fontsize = 10,
+                            fontfamily ="Arial"))
+
+
+percentage_malignant_cells <- -log10(percentage_malignant_cells)
+percentage_malignant_cells[percentage_malignant_cells == Inf] <- NA
+
+hm <- Heatmap(matrix = percentage_malignant_cells[mutation_order, patient_order], # values from -2 to 1 --> 0.1 - 100%
+              col=colorRamp2(c(0, 2), c("darkred", "yellow")), # 0.01- >=1 %
+              top_annotation = top_annotation_col_anno,
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              na_col = "white",
+                border_gp = gpar(col = "black", lty = 1),
+                raster_by_magick = TRUE,
+                use_raster = TRUE,
+                raster_quality = 6,
+                
+                #column parameters
+                column_title = "",
+                column_title_gp = gpar(fontsize = 5),
+                show_column_names = FALSE,
+                
+                #row parameters
+                row_title = "678 mtDNA mutations",
+                row_title_gp = gpar(fontsize = 10),
+                show_row_names = FALSE,
+                heatmap_legend_param = list(
+                  title = "% (pre-)malignant cells",
+                  legend_direction = "horizontal",
+                  at = c(2, 1,0), # 0.01, 0.1, ≥1 % 
+                  labels = c("0.01","0.1", "≥ 1"),
+                  title_gp = gpar(fontsize = 10, fontface = "plain") ,
+                  legend_width = unit(1.7, "cm"),
+                  labels_gp = gpar(
+                       fontsize = 10,
+                       fontface = "plain"
+                  )
+                ))               
+
+draw(hm, heatmap_legend_side = "bottom")
+
+hm_grob <- grid::grid.grabExpr(draw(hm, heatmap_legend_side = "bottom"))
+cowplot::plot_grid(hm_grob, nrow=1, ncol=1)
+saveRDS(hm_grob, file.path(RDS_dir, "mtDNA_mutation_patient_heatmap.RDS"))
+```
+
+## mtDNA mutations per celltype
+
+```{r}
+pseudobulk_heteroplasmy <- clonal_mt_VAFs %>% 
+  left_join(celltype_annotation %>% 
+                               dplyr::select(label_cellbarcode, My_annotation_healthy)) %>% 
+  filter(!(is.na(My_annotation_healthy))) %>% 
+  dplyr::filter(VAF != 0) %>%
+  group_by(variant_id, patient_id, My_annotation_healthy) %>% 
+  dplyr::summarize(pseudobulk_heteroplasmy=mean(VAF)) %>% 
+  dplyr::filter(pseudobulk_heteroplasmy > 0.01)
+
+#filtering for >1% pseudobulk heteroplasmy of mt variant in celltype in non-zero values
+variant_counts_celltype <- clonal_mt_VAFs %>% 
+  left_join(celltype_annotation %>% 
+                               dplyr::select(label_cellbarcode, My_annotation_healthy)) %>% 
+  filter(!(is.na(My_annotation_healthy))) %>% 
+  dplyr::filter(VAF != 0) %>% 
+  dplyr::select(variant_id, patient_id, My_annotation_healthy) %>% 
+  semi_join(pseudobulk_heteroplasmy, by = c("variant_id", "patient_id", "My_annotation_healthy")) %>% 
+  unique() %>% 
+  group_by(patient_id, My_annotation_healthy) %>% 
+  dplyr::summarize(variant_counts=n()) %>% 
+  dplyr::mutate(My_annotation_healthy=factor(My_annotation_healthy, levels=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells", "T", "NK", "Mono", "DC", "other")))
+```
+
+```{r, fig.width=5, fig.height=4}
+n_fun <- function(x){
+  return(data.frame(y = 140,
+                    label = paste0(
+                      length(x))))
+}
+
+variant_counts_celltype_plot <- variant_counts_celltype %>%
+dplyr::filter(My_annotation_healthy != "other") %>% 
+ggplot(aes(x=My_annotation_healthy, y=variant_counts, colour=My_annotation_healthy))+
+  geom_boxplot(colour = "black", aes(fill = My_annotation_healthy), outlier.shape = NA)+
+geom_jitter(width = 0.2, colour = "black", aes(fill = My_annotation_healthy), pch = 21, size=0.5) +
+  geom_signif(comparisons = list(c('B', 'LC_MBL_B_Cells'), 
+                                 c('B', 'HC_MBL_B_Cells'), 
+                                 c('B', "CLL_B_Cells"),
+                                 c("B", "T")), 
+              step_increase = 0.1, textsize = 3, colour="black") + 
+  scale_colour_manual("Cell type", values=c(annotation_colours_named),labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="Dendritic", "other"="Other cell types"))+
+  scale_fill_manual("Cell type", values=c(annotation_colours_named),labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="Dendritic", "other"="Other cell types"))+
+  scale_x_discrete(labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="Dendritic", "other"="Other cell types"))+
+  scale_y_continuous(breaks=seq(0, 150, 50), limits = c(0, 150))+
+  labs(x="Cell type", y= "mtDNA mutation counts\n Pseudobulk heteroplasmy > 1%")+
+  theme_pub()+
+  theme(axis.text.x = element_text(angle=45, hjust=1, vjust=1),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+write_tsv(variant_counts_celltype_plot$data, file.path(tsv_dir, "variant_counts_celltype_data.tsv"))
+```
+
+## mtDNA mutation coverage per celltype
+```{r}
+mtDNA_depth_annotated <- mtDNA_depth %>% 
+  map(~left_join(.x, celltype_annotation, by = join_by(cellbarcode, label_cellbarcode)) %>% 
+        dplyr::filter(!is.na(My_annotation_healthy)) %>% 
+        dplyr::select(label_cellbarcode, My_annotation_healthy, depth)) %>% 
+  bind_rows() %>% 
+  tidyr::separate(label_cellbarcode, into = c("label", "cellbarcode"), sep="#", remove=FALSE) %>% 
+  dplyr::group_by(label, My_annotation_healthy) %>% 
+  dplyr::summarize(mean_depth=mean(depth))
+
+coverage_celltype_plot <- mtDNA_depth_annotated %>% 
+  dplyr::mutate(My_annotation_healthy=factor(My_annotation_healthy, levels=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells", "T", "NK", "Mono", "DC", "other"))) %>% 
+  ggplot(aes(x=My_annotation_healthy, y=mean_depth, colour=My_annotation_healthy))+
+  geom_boxplot(colour = "black", aes(fill = My_annotation_healthy), outlier.shape = NA)+
+  geom_jitter(width = 0.2, colour = "black", aes(fill = My_annotation_healthy), pch = 21, size=0.5) +
+  geom_signif(comparisons = list(c('B', 'LC_MBL_B_Cells'),
+                               c('B', 'HC_MBL_B_Cells'),
+                               c('B', "CLL_B_Cells"),
+                               c("B", "T")),
+            step_increase = 0.1, textsize = 3, colour="black") +
+  scale_colour_manual("Cell type", values=c(annotation_colours_named),labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="DC", "other"="Unannotated"))+
+  scale_fill_manual("Cell type", values=c(annotation_colours_named),labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="DC", "other"="Unannotated"))+
+  scale_x_discrete(labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="DC", "other"="Unannotated"))+
+  scale_y_continuous(breaks=seq(0, 100, 20), limits = c(0, 100))+
+  labs(x="Cell type", y= "mtDNA coverage")+
+  theme_pub()+
+  theme(axis.text.x = element_text(angle=45, hjust=1, vjust=1),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+write_tsv(coverage_celltype_plot$data, file.path(tsv_dir, "coverage_celltype_data.tsv"))
+ggsave(plot = coverage_celltype_plot, filename = file.path(plotting_dir, "coverage_celltype_plot.png"), width = 3, height = 3)
+```
+
+## mtDNA general coverage
+```{r}
+axis_data <- tibble("mt_genome"=c(0, 16569))
+
+pull_coverage_subset<- function(SE, cells, resolution = 5){
+  SE_subset <- SE[, colnames(SE) %in% cells]
+  zoo::rollmean(rowMeans(assays(SE_subset)[['coverage']]), resolution)
+}
+
+pull_precise_coverage_subset <-  function(SE, cells){
+  SE_subset <- SE[, colnames(SE) %in% cells]
+  apply(assays(SE_subset)[["coverage"]] , 1, max, na.rm = TRUE)
+}
+
+mtmut_cells_patient <- clonal_mt_VAFs %>% 
+  dplyr::select(label, cell_barcode)
+
+# filtering to only qc accepted cells from ATAC data
+coverage_rm_all_samples <- file.path(library_path, paste0(label2pool, ".mgatk"), paste0(label2pool, ".rds")) %>% 
+  map2(names(label2pool), ~data.frame(
+  patient_id=.y, 
+  position = zoo::rollmean(1:16569, 5),
+  coverage = pull_coverage_subset(SE=readRDS(.x), cells=dplyr::filter(mtmut_cells_patient, label == .y) %>% pull(cell_barcode)))) %>% 
+  set_names(names(label2pool))
+
+coverage_statistics_all_samples <- file.path(library_path, paste0(label2pool, ".mgatk"), paste0(label2pool, ".rds")) %>% 
+  map2(names(label2pool), ~data.frame(
+  patient_id=.y, 
+  position = c(1:16569),
+  max_coverage = pull_precise_coverage_subset(readRDS(.x), cells=dplyr::filter(mtmut_cells_patient, label == .y) %>% pull(cell_barcode)))) %>% 
+  set_names(names(label2pool)) %>% 
+  imap(~dplyr::group_by(.x, patient_id) %>% 
+         dplyr::summarize(max_coverage=max(max_coverage))) %>% 
+  bind_rows()
+
+saveRDS(coverage_statistics_all_samples, file.path(RDS_dir, "coverage_statistics_all_samples.RDS"))
+```
+
+
+```{r fig.width=20, fig.height=20}
+mt_linear_coverage_plot <- imap(coverage_rm_all_samples,
+  ~ggplot() +
+  geom_line(data= axis_data, aes(x=mt_genome, y= -2), colour="lightgrey", linewidth = 0.5)+
+  geom_line(data= axis_data, aes(x=mt_genome, y= -5), colour="lightgrey", linewidth = 0.5)+
+  
+  geom_rect(data = mt_gene_annotation %>% dplyr::filter(Strand=="plus"), 
+            aes(xmin = Start, xmax = Stop, ymin=-1, ymax=-3, fill = `Gene symbol`), 
+            colour = "black", linewidth = 0.3) + 
+  geom_rect(data = mt_gene_annotation %>% dplyr::filter(Strand=="minus"), 
+            aes(xmin = Start, xmax = Stop, ymin=-4, ymax=-6, fill = `Gene symbol`), 
+            colour="black", linewidth = 0.3)+
+    
+  geom_line(data=.x,aes(x = position, y = coverage), 
+              color = "steelblue4", linewidth = 0.5)+
+  
+  geom_smooth(data=.x,aes(x = position, y = coverage), colour="darkred", linewidth=0.5, method = "lm")+
+  scale_x_continuous(limits=c(0, 16659), breaks=seq(0, 16569, 2000), labels = seq(0, 16569, 2000))+
+  scale_y_continuous(limits=c(-10, 100))+
+  scale_fill_manual(name="Gene", 
+                    values=c("ATP6"="#15512A", "ATP8"="#2E8565","COX1"="#4EB1A9","COX2"="#8CB5C0","COX3"="#1A205F","CYTB"="#483591",
+                             "ND1"="#885EB4","ND2"="#BB9AC4","ND3"="#6C2047","ND4"="#9C3D52","ND4L"="#B7716E","ND5"="#CAB3A8","ND6"="#757927",
+                             "rRNA"="#95BB7D", "tRNA"="lightgrey"))+
+    labs(x="Position mt genome [bp]", y="Coverage", title=.y)+
+  # coord_radial(rotate.angle = TRUE, expand = FALSE) +
+  theme_pub()+
+  theme(panel.background = element_rect(fill = 'white'),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none"))
+
+ggarrange(plotlist=mt_linear_coverage_plot, nrow=8, ncol=4)
+
+saveRDS(mt_linear_coverage_plot, file.path(RDS_dir, "mt_linear_coverage_plot.RDS"))
+```
+
+```{r}
+clonal_mt_VAF_statistics <- 
+  clonal_mt_VAFs %>% 
+  dplyr::group_by(label) %>%
+  dplyr::filter(VAF !=0) %>% 
+  dplyr::summarize(min_VAF=min(VAF),
+            max_VAF=max(VAF))
+
+summary_statistics <- coverage_statistics_all_samples %>% 
+  left_join(clonal_mt_VAF_statistics, by = join_by("patient_id"=="label"))
+
+summary_statistics %>% ggplot(aes(x=min_VAF, y=max_coverage))+
+  geom_point()+
+  stat_smooth(method = "lm", colour="darkred" )+
+  stat_cor(method="pearson", label.x = 0.007, label.y=600, )+
+  scale_x_continuous(limits=c(NA, 0.011))+
+  theme_pub()
+```
+
+## Transitions/Transversions
+```{r fig.width=10, fig.height=8}
+ti_tv_data <- clonal_mt_VAFs %>%
+  dplyr::filter(!(patient_id %in% c("CLL6", "MBL7dup"))) %>%
+  left_join(celltype_annotation) %>% 
+        dplyr::filter(!is.na(My_annotation_healthy)) %>% 
+  dplyr::select(label, patient_id, variant_id, variant, position, My_annotation_healthy) %>% 
+  unique() %>% 
+  dplyr::mutate(ti_tv=case_when(variant %in% c("G>A", "A>G", "C>T", "T>C") ~ "transition",
+                                variant %in% c("G>C", "C>G", "A>T", "T>A", "G>T", "T>G", "C>A", "A>C") ~ "transversion"))
+
+ti_tv_data %>%
+  dplyr::mutate(plotting_id=factor(label2plotting_id[label], levels=paste0("P", 1:24))) %>%
+  arrange(plotting_id) %>% 
+  dplyr::mutate(label=factor(label, levels=unique(label)),
+                variant=factor(variant, levels=c("A>G", "C>T", "G>A", "T>C", 
+                                                 "A>C", "A>T", "C>A", "C>G", "G>C", "G>T","T>A","T>G"))) %>% 
+  ggplot(aes(x=variant, fill=label))+
+  geom_bar(position = position_dodge(preserve = "single"))+
+  scale_fill_manual(name="Patient", values = c(my_paired_colours_named, my_unpaired_colours_named), labels=label2plotting_id)+
+  scale_y_continuous(expand = c(0,0.05))+
+  labs(y="unique mtDNA mutation counts", x="Transitions/Transversions")+
+  theme_pub()+
+  theme(legend.position = "bottom", legend.byrow = TRUE)+
+  guides(fill=guide_legend(nrow = 3))#+
+  # facet_wrap(~My_annotation_healthy, scales="free_x")
+```
+
+```{r}
+called_variants <- clonal_mt_VAFs %>%
+  dplyr::filter(!(patient_id %in% c("CLL6", "MBL7dup"))) %>%
+  left_join(celltype_annotation, by = join_by(label_cellbarcode, label)) %>% 
+        dplyr::filter(!is.na(My_annotation_healthy)) %>% 
+  dplyr::select(label, patient_id, variant_id, variant, position, My_annotation_healthy) %>% 
+  unique()
+
+# Simple reverse complement function
+reverse_complement <- function(s){
+  chartr("ATGC","TACG",s)
+}
+
+# Process 3 digit signature based on letters
+colnames(ref_all) <- c("pos", "ref")
+ref_all$ref <- toupper(ref_all$ref)
+l <- as.character(ref_all$ref)
+
+# Gs happen to be at the first and last position
+ref_all$three <- paste0(c("G", l[-length(l)]), l, c(l[-1], "G"))
+
+# Remove Ns
+ref_all <- ref_all[!grepl("N", ref_all$three),]
+
+# Make every possible mutation
+ref_all_long <- rbind(ref_all,ref_all, ref_all,ref_all)
+ref_all_long$alt <- rep(c("A", "C", "G", "T"), each = dim(ref_all)[1])
+ref_all_long <- ref_all_long[ref_all_long$ref != ref_all_long$alt,]
+
+# add some meta data
+ref_all_long$variant <- paste0(as.character(ref_all_long$pos), ref_all_long$ref, ">", ref_all_long$alt)
+ref_all_long$change <- paste0(ref_all_long$ref, ref_all_long$alt)
+ref_all_long$change_rc <- reverse_complement(paste0(ref_all_long$ref, ref_all_long$alt))
+
+# A/G rich strand is "heavy" -- https://en.wikipedia.org/wiki/Heavy_strand
+table(ref_all$ref) # so the reference strand is light (more C/T)
+ref_all_long$strand <- ifelse(ref_all_long$ref %in% c("C","T"), "L", "H")
+
+# Change to C/T as ref allele
+ref_all_long$rc3 <- reverse_complement(ref_all_long$three)
+ref_all_long$three_plot <- ifelse(ref_all_long$strand == "L", ref_all_long$three, ref_all_long$rc3)
+ref_all_long$group_change <- ifelse(ref_all_long$strand == "L", ref_all_long$change, ref_all_long$change_rc)
+
+# Annotate with called variants
+my_variants <- called_variants$variant_id
+ref_all_long$my_variants <- ref_all_long$variant %in% my_variants
+
+total <- dim(ref_all_long)[1]
+total_my_variants <- sum(ref_all_long$my_variants)
+prop_df <- ref_all_long %>% 
+  group_by(three_plot, group_change, strand) %>%
+  dplyr::summarize(observed_prop_my_variants = sum(my_variants)/total_my_variants, expected_prop = n()/total, n = n()) %>%
+  dplyr::mutate(fc_my_variants = observed_prop_my_variants/expected_prop)
+
+prop_df$change_plot <- paste0(prop_df$group_change, "_", prop_df$three_plot)
+
+write_tsv(prop_df, file.path(tsv_dir, "transition_transversion_data.tsv"))
+```
+
+
+```{r fig.width=20, fig.height=5}
+# Visualize
+ti_tv_plot <- ggplot(prop_df, aes(x = change_plot, fill = strand, y = fc_my_variants)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_hline(yintercept = 1, linetype =2, color = "black") +
+  scale_fill_manual(values= c("firebrick", "dodgerblue3")) +
+  scale_y_continuous(expand = c(0,0)) +
+  labs(x = "Change in nucleotide", y = "Substitution Rate (Observed / Expected)")+
+  theme_pub()+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(angle=90),
+        legend.position = "bottom")
+```
+
+
+## Clonal variants non-default filtering
+```{r}
+cln.variants <- variant.df %>%
+  map(~ subset(., subset = n_cells_conf_detected >= 1 & strand_correlation >= 0.65 & vmr > 0.01))
+```
+
+
+### Calculate all VAFs.cln
+```{r}
+VAFs.cln <- mito.data %>%
+  map2(cln.variants, ~ AlleleFreq(.,
+    variants = .y$variant,
+    assay = NULL
+  ))
+```
+
+### Transform data
+```{r}
+heteroplasmy <- VAFs.cln %>%
+  map(~ as.matrix(.) %>%
+    t() %>%
+    as_tibble(rownames = "label_cellbarcode"))
+
+heteroplasmy_long <- heteroplasmy %>%
+  map(~ tidyr::pivot_longer(., -c(label_cellbarcode), names_to = "Variant", values_to = "Heteroplasmy") %>%
+    tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE))
+```
+
+### mtCounts per cell
+```{r}
+mean_mt_cts <- heteroplasmy_long %>% 
+  bind_rows() %>% 
+  split(.$label) %>% 
+         map_dbl(~ filter(., Heteroplasmy > 0) %>% 
+        nrow()/length(unique(.$label_cellbarcode))) %>% 
+  enframe(name = "patient_id", value = "mean_ct_mtSNV") %>% 
+  tidyr::separate(patient_id, c("patient", "sample")) %>% 
+  group_by(patient) %>% 
+  dplyr::summarize(patient_ct=mean(mean_ct_mtSNV))
+
+```
+
+### mtdepth per cell
+```{r}
+mean_depth <- names(variant.df) %>% 
+  map_dbl(~variant.df[[.x]] %>% 
+  dplyr::filter(variant %in% pull(heteroplasmy_long[[.x]], Variant)) %>% 
+  summarize(mean_coverage=mean(mean_coverage)) %>% 
+    pull(mean_coverage)) %>% 
+  set_names(names(variant.df)) %>% 
+  enframe(name ="patient", value = "mean_depth")
+```
+
+correlation plot
+```{r}
+scatterplot <- mean_mt_cts %>% left_join(mean_depth) %>% 
+  ggplot(aes(x=mean_depth,  y=patient_ct, label=patient))+
+  geom_point()+
+  geom_smooth(color = "black", method = lm, se = FALSE, show.legend = FALSE) +
+  geom_text_repel(aes(label = patient), size = 2.5, fontface = "bold", ) +
+  labs(x="mean sequencing depth per cell", y="mean mtSNVs per cell [#]")+
+  stat_cor(method = "pearson", size=2.5) +
+  theme_pub()
+
+ggsave(scatterplot, file.path(plotting_dir, "mtSNVcounts_vs_depth.png"))
+```

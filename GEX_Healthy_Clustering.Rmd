@@ -1,0 +1,1777 @@
+---
+title: "GEX_Healthy_Clustering"
+author: "Anja_Rathgeber"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# GOAL: The aim of this script is cluster my malignant samples with healthy samples to check the similarities/differences.
+
+# Load libraries
+
+```{r Load_libraries}
+library(readxl)
+library(tidyverse)
+library(ggpubr)
+library(Seurat)
+library(SeuratData)
+library(SeuratDisk)
+library(RColorBrewer)
+```
+
+# Set paths
+```{r Set_paths}
+source("config_paths.R")
+library_path <- file.path(project_dir_remote, "scratch/GEX")
+library_path_10X <- file.path(project_dir_remote, "scratch/10X_GEX")
+data_dir <- file.path(project_dir, "data")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "GEX_analysis")
+plotting_dir <- file.path(analysis_dir, "plots")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+```
+
+# Load data
+```{r}
+
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r Load_data}
+reference <- LoadH5Seurat(file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat"))
+
+metadata_malignant <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata_gex.tsv")) %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE)
+
+metadata_healthy <- read_tsv(file = file.path(data_dir, "20250812_Healthy_controls_scRNAseq.tsv")) # https://www.10xgenomics.com/datasets/human-pbmc-from-a-healthy-donor-10-k-cells-v-2-2-standard-5-0-0, https://www.10xgenomics.com/datasets/10-k-human-pbm-cs-5-v-2-0-chromium-controller-2-standard-6-1-0
+
+metadata <- metadata_malignant %>%
+  full_join(metadata_healthy)
+
+patient_id2plotting_id <- metadata %>%
+  dplyr::select(patient_id, plotting_id) %>%
+  deframe()
+
+label2plotting_id <- metadata %>%
+  dplyr::select(label, plotting_id) %>%
+  deframe()
+
+library2label <- metadata %>%
+  dplyr::select(pool, label) %>%
+  deframe()
+
+library_names <- metadata %>%
+  filter(!is.na(pool)) %>%
+  pull(pool)
+
+seurat_paths <- c(
+  file.path(library_path, library_names[1:35], "filtered_feature_bc_matrix"), # malignant libraries
+  file.path(library_path_10X, library_names[36:37], "filtered_feature_bc_matrix") # , # 10X pbmc
+)
+
+
+gex_scaled_all <- readRDS(file.path(RDS_dir, "gex_scaled_all.RDS"))
+```
+
+
+# Analysis
+## Create Seurat Object
+```{r Create_seurat_object}
+# # remove indices when run all samples
+# gex_data_10X_seurat <- seurat_paths %>%
+#  map(~ Read10X(data.dir = .)) %>%
+#  set_names(library2label[library_names])
+#
+# gex_10X_seurat <- gex_data_10X_seurat %>%
+#  imap( ~ CreateSeuratObject(
+#    counts = .x, ,
+#    project = .y,
+#    min.cells = 3,
+#    min.features = 200))
+```
+
+## Merge samples
+```{r Merge_all_seurat_objects}
+# gex_merged_10X_seurat_all <- merge(gex_10X_seurat[[1]],
+#                                   y = c(gex_10X_seurat[2:37]),
+#                                   project = "Healthy_and_malignant_MBL_CLL",
+#                                   add.cell.ids = c(names(gex_data_10X_seurat[1:37])))
+
+# gex_merged_10X_seurat_all <- RenameCells(gex_merged_10X_seurat_all, new.names=sub("^pbmc_", "", colnames(gex_merged_10X_seurat_all)))
+```
+
+## QC
+```{r MtDNA_per_cell}
+# gex_merged_10X_seurat_all[["percent.mt"]] <- PercentageFeatureSet(gex_merged_10X_seurat_all, pattern = "^MT-")
+# saveRDS(gex_merged_10X_seurat_all, file = file.path(RDS_dir, "gex_merged_10X_seurat_all.RDS"))
+```
+
+```{r fig.width=27, fig.height=10}
+# # Visualize QC metrics as a violin plot: features = genes, counts=UMI
+# qc_pre_filter_plots <- gex_merged_10X_seurat_all %>%
+#  VlnPlot(features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size=0)
+#
+# qc_pre_filter_plots %>%
+#  ggsave(., filename = file.path(plotting_dir, "QC_GEX/QC_counts_merged_10X_seurat_all.png"),
+#         unit = "in",
+#         width = 27,
+#         height = 10)
+```
+
+```{r, fig.width=20,  fig.height=4}
+# plot1 <- FeatureScatter(gex_merged_10X_seurat_all, feature1 = "nCount_RNA", feature2 = "percent.mt")
+# plot2 <- FeatureScatter(gex_merged_10X_seurat_all, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+# f_f_plot <- ggarrange(plot1, plot2, ncol = 2, nrow = 1, common.legend = TRUE, legend="right")
+#
+# f_f_plot %>%
+#   ggsave(., filename = file.path(plotting_dir, "QC_GEX/QC_feature_scatterplot_merged_10X_seurat_all.png"),
+#          unit = "in",
+#          width = 20,
+#          height = 4)
+```
+
+```{r}
+# gex_merged_10X_seurat_all <- readRDS(file = file.path(RDS_dir, "gex_merged_10X_seurat_all.RDS"))
+```
+
+```{r}
+# gex_filtered_10X_seurat_all <- subset(gex_merged_10X_seurat_all,
+#                                       subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 20)
+```
+
+```{r}
+# rm(gex_merged_10X_seurat_all)
+#
+# qc_post_filter_plots <- gex_filtered_10X_seurat_all %>%
+#  VlnPlot(features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+#
+# # qc_post_filter_plots
+# qc_post_filter_plots %>%
+# ggsave(., filename = file.path(plotting_dir, "QC_GEX/QC_counts_filtered_10X_seurat_all.png"),
+#        unit = "in",
+#       width = 27,
+#      height = 10)
+```
+
+## Non integrated
+```{r}
+# gex_scaled_10X_seurat_all <- SCTransform(gex_filtered_10X_seurat_all, verbose = TRUE)
+# saveRDS(gex_scaled_10X_seurat_all, file = file.path(RDS_dir, "gex_scaled_10X_seurat_all.RDS"))
+```
+
+### LDR
+```{r}
+# gex_scaled_10X_seurat_all <- RunPCA(gex_scaled_10X_seurat_all, features = VariableFeatures(object = gex_scaled_10X_seurat_all))
+#
+# dot_plot <- VizDimLoadings(gex_scaled_10X_seurat_all, dims = 1:2, reduction = "pca") +
+#   theme_pub()
+#
+# dot_plot %>%
+#  ggsave(., filename = file.path(plotting_dir, "QC_PCA_DimLoadings_all.png"),
+#         unit = "in",
+#         width = 10,
+#         height = 6)
+#
+# pca <- DimPlot(gex_scaled_10X_seurat_all, reduction = "pca", raster = FALSE) +
+#   theme_pub()
+#
+# pca %>%
+#   ggsave(., filename = file.path(plotting_dir, "PCA_all.png"),
+#          unit = "in",
+#          width = 10,
+#          height = 4)
+#
+# #pca
+#
+# PCA_heatmap <- DimHeatmap(gex_scaled_10X_seurat_all, dims = 1, cells = 500, balanced = TRUE) +
+#  theme_pub()
+#
+# PCA_heatmap %>%
+#  ggsave(., filename = file.path(plotting_dir, "PCA_PC1_heatmap_all.png"),
+#         unit = "in",
+#         width = 6,
+#         height = 4)
+#
+# ElbowPlot(gex_scaled_10X_seurat_all) %>%
+#   ggsave(., filename = file.path(plotting_dir, "Elbow_plot.png"),
+#          unit = "in",
+#          width = 6,
+#          height = 4)
+```
+
+### Label transfer
+Find transfer anchors
+```{r}
+# anchors <- FindTransferAnchors(
+#   reference = reference,
+#   query = gex_scaled_10X_seurat_all,
+#   normalization.method = "SCT",
+#   reference.reduction = "spca",
+#   dims = 1:50
+# )
+#
+# gex_scaled_10X_seurat_all <- MapQuery(
+#   anchorset = anchors,
+#   query = gex_scaled_10X_seurat_all,
+#   reference = reference,
+#   refdata = list(
+#     celltype.l1 = "celltype.l1",
+#     celltype.l2 = "celltype.l2",
+#     predicted_ADT = "ADT"
+#   ),
+#   reference.reduction = "spca",
+#   reduction.model = "wnn.umap"
+# )
+#
+# saveRDS(gex_scaled_10X_seurat_all, file = file.path(RDS_dir, "gex_scaled_10X_seurat_all.RDS"))
+```
+
+### Clustering and UMAP
+```{r}
+# gex_scaled_10X_seurat_all <- FindNeighbors(gex_scaled_10X_seurat_all, dims = 1:10) %>%
+#   FindClusters(resolution = 0.5)
+```
+
+```{r}
+# gex_scaled_10X_seurat_all <- RunUMAP(gex_scaled_10X_seurat_all, dims = 1:10)
+```
+
+```{r}
+# saveRDS(gex_scaled_10X_seurat_all, file = file.path(RDS_dir, "gex_scaled_10X_seurat_all.RDS"))
+# gex_scaled_10X_seurat_all <- readRDS(file = file.path(RDS_dir, "gex_scaled_10X_seurat_all.RDS"))
+```
+
+### Celltype annotation
+```{r}
+# malignant_celltype_annotation <- tibble(
+#   "label_cellbarcode" = colnames(gex_scaled_all),
+#   "My_annotation_B" = gex_scaled_all$My_annotation_B
+# ) %>%
+#   dplyr::mutate(My_annotation_LC = case_when(My_annotation_B == "MBL B Cell" & str_starts(label_cellbarcode,
+#       pattern = paste0("MBL", 10:15, collapse = "|")) ~ "LC-MBL B Cell",
+#     My_annotation_B == "MBL B Cell" & str_starts(label_cellbarcode,
+#       pattern = paste0("MBL", 10:15, collapse = "|"), negate = TRUE) ~ "HC-MBL B Cell",
+#     .default = My_annotation_B)) %>%
+#   dplyr::select(-My_annotation_B)
+# 
+# write_tsv(malignant_celltype_annotation, file = file.path(tsv_dir, "20250523_RNA_celltype_annotation_malignant.tsv"))
+# 
+# healthy_celltype_annotation <- tibble(
+#   "label_cellbarcode" = colnames(gex_scaled_10X_seurat_all),
+#   "My_annotation_LC" = gex_scaled_10X_seurat_all$predicted.celltype.l1
+# ) %>%
+#   dplyr::filter(str_starts(label_cellbarcode, "pbmc1|pbmc2|pbmc3|pbmc4")) %>%
+#   dplyr::mutate(My_annotation_LC = case_when(My_annotation_LC == "CD4 T" ~ "T",
+#     My_annotation_LC == "CD8 T" ~ "T",
+#     My_annotation_LC == "other T" ~ "T",
+#     .default = My_annotation_LC
+#   ))
+# 
+# celltype_annotation <- bind_rows(malignant_celltype_annotation, healthy_celltype_annotation) %>% deframe()
+# 
+# gex_scaled_10X_seurat_all <- AddMetaData(
+#   object = gex_scaled_10X_seurat_all,
+#   metadata = celltype_annotation,
+#   col.name = "My_annotation_LC"
+# )
+```
+
+### Plot UMAPs
+```{r}
+# nonMBL7dup_cells <- colnames(gex_scaled_10X_seurat_all)[-c(str_starts(colnames(gex_scaled_10X_seurat_all), "MBL7dup"))]
+```
+
+#### Clusters
+```{r}
+# color_palette <- colorRampPalette(brewer.pal(12, "Set3"))(54)
+```
+
+```{r }
+# umap_clusters_plot <- DimPlot(gex_scaled_10X_seurat_all,
+#                               cells=nonMBL7dup_cells,
+#   reduction = "umap",
+#   raster = FALSE,
+#   label = TRUE,
+#   group.by = "seurat_clusters",
+#   cols = color_palette
+# )
+# 
+# umap_clusters_plot %>%
+#   ggsave(.,
+#     filename = file.path(plotting_dir, "UMAP_10X_seurat_all_clusters.png"),
+#     unit = "in",
+#     width = 8,
+#     height = 6
+#   )
+# 
+# umap_clusters_plot
+```
+
+#### Samples
+```{r}
+# add plotting id
+# plotting_annot <- as_tibble(gex_scaled_10X_seurat_all$orig.ident, rownames=NA) %>%
+#   rownames_to_column("label_cellbarcode") %>%
+#   dplyr::rename("label"="value") %>%
+#   left_join(metadata %>%
+#               dplyr::select(label, plotting_id)) %>%
+#   dplyr::select(label_cellbarcode, plotting_id) %>%
+#   deframe()
+#
+# gex_scaled_10X_seurat_all <- AddMetaData(object = gex_scaled_10X_seurat_all,
+#                                          metadata = plotting_annot,
+#                                          col.name = "plotting_id")
+```
+
+```{r}
+# umap_sample_plot <- DimPlot(gex_scaled_10X_seurat_all,
+#                               cells=nonMBL7dup_cells,
+#                             reduction = "umap",
+#                             raster = FALSE,
+#                             group.by = c("orig.ident"),
+#                             cols=c(my_unpaired_colours_named,my_paired_colours_named, control_colours_named)) +
+#   theme_pub() +
+#   theme(
+#     aspect.ratio = 1,
+#     legend.position = "right"
+#   )+
+#   labs(title="Samples")+
+#   theme_pub()+
+#   theme(aspect.ratio = 1,
+#         axis.ticks.x = element_blank(),
+#         axis.ticks.y = element_blank(),
+#         axis.text.x = element_blank(),
+#         axis.text.y=element_blank())
+# 
+# umap_sample_plot %>%
+#   ggsave(.,
+#          filename = file.path(plotting_dir, "UMAP_10X_seurat_all_samples.png"),
+#          unit = "in",
+#          width = 8,
+#          height = 6)
+# 
+# umap_sample_plot
+```
+
+#### Patients 
+```{r}
+# # add patient id
+# patient_id_annot <- as_tibble(gex_scaled_10X_seurat_all$orig.ident, rownames = NA) %>%
+#   rownames_to_column("label_cellbarcode") %>%
+#   dplyr::rename("label" = "value") %>%
+#   left_join(metadata %>%
+#     dplyr::select(label, patient_id)) %>%
+#   dplyr::select(label_cellbarcode, patient_id) %>%
+#   deframe()
+# 
+# gex_scaled_10X_seurat_all <- AddMetaData(object = gex_scaled_10X_seurat_all, metadata = patient_id_annot, col.name = "patient_id")
+```
+
+```{r}
+# umap_patient <- DimPlot(gex_scaled_10X_seurat_all,
+#                               cells=nonMBL7dup_cells,
+#   reduction = "umap",
+#   group.by = "patient_id",
+#   raster = F,
+#   cols = c(my_unpaired_colours_named, control_colours_named),
+#   shuffle = TRUE
+# ) +
+#   scale_colour_manual(values=c(my_unpaired_colours_named, control_colours_named),
+#                         labels=patient_id2plotting_id)+
+#   labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+#   theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     legend.position = "right",
+#     aspect.ratio = 1
+#   )
+# 
+# umap_patient %>%
+#   ggsave(.,
+#     filename = file.path(plotting_dir, "UMAP_10X_seurat_all_patients.png"),
+#     unit = "in",
+#     width = 7,
+#     height = 4
+#   )
+# 
+# umap_patient
+```
+
+#### Patients disease-split
+```{r}
+# sample_annot <- tibble("label_cellbarcode" = WhichCells(gex_scaled_10X_seurat_all))
+# 
+# disease_annot <- sample_annot %>%
+#   tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+#   tidyr::separate(label, c("patient_id", "sample"), sep = "\\.", remove = FALSE) %>%
+#   dplyr::left_join(metadata %>% dplyr::select(label, disease) %>% unique()) %>%
+#   dplyr::mutate(
+#     disease = if_else(condition = is.na(disease) & patient_id %in% paste0("pbmc", 1:4), true = "Healthy", false = disease),
+#     disease = factor(disease, levels = c("Healthy", "MBL", "CLL"))
+#   ) %>%
+#   dplyr::select(label_cellbarcode, disease) %>%
+#   deframe()
+# 
+# gex_scaled_10X_seurat_all <- AddMetaData(
+#   object = gex_scaled_10X_seurat_all,
+#   metadata = disease_annot,
+#   col.name = "disease"
+# )
+```
+
+```{r}
+# umap_patient_disease <- DimPlot(subset(gex_scaled_10X_seurat_all, cells=nonMBL7dup_cells),
+#   reduction = "umap",
+#   group.by = "patient_id",
+#   raster = F,
+#   cols = c(my_unpaired_colours_named, control_colours_named),
+#   split.by = "disease",
+#   shuffle = TRUE
+# ) +
+#   labs(x = "UMAP1", y = "UMAP2", colour = "Patient", title = "Disease") +
+#   theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     legend.position = "bottom",
+#     aspect.ratio = 1
+#   )
+# 
+# umap_patient_disease %>%
+#   ggsave(.,
+#     filename = file.path(plotting_dir, "UMAP_10X_seurat_all_patients_disease_split.png"),
+#     unit = "in",
+#     width = 24,
+#     height = 6
+#   )
+# 
+# umap_patient_disease
+```
+
+#### Patients disease-subtype-split
+```{r}
+# # add MBL_CLL_subtype annotation
+# MBL_CLL_subtype_annot <- as_tibble(gex_scaled_10X_seurat_all$orig.ident, rownames = NA) %>%
+#   rownames_to_column("label_cellbarcode") %>%
+#   dplyr::rename("label" = "value") %>%
+#   dplyr::left_join(metadata %>% dplyr::select(label, MBL_subtype)) %>%
+#   dplyr::mutate(
+#     MBL_CLL_subtype = if_else(is.na(MBL_subtype) & !(label %in% paste0("pbmc", 1:4)), "CLL", MBL_subtype),
+#     MBL_CLL_subtype = if_else(condition = is.na(MBL_CLL_subtype) & label %in% paste0("pbmc", 1:4), true = "Healthy", false = MBL_CLL_subtype),
+#     MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("Healthy", "LC", "HC", "CLL"))
+#   ) %>%
+#   dplyr::select(label_cellbarcode, MBL_CLL_subtype) %>%
+#   deframe()
+# 
+# gex_scaled_10X_seurat_all <- AddMetaData(
+#   object = gex_scaled_10X_seurat_all,
+#   metadata = MBL_CLL_subtype_annot,
+#   col.name = "MBL_CLL_subtype"
+# )
+```
+
+```{r}
+# umap_patient_MBL_CLL_subtype <- DimPlot(subset(gex_scaled_10X_seurat_all, cells=nonMBL7dup_cells),
+#   reduction = "umap",
+#   group.by = "patient_id",
+#   raster = F,
+#   cols = c(my_unpaired_colours_named, control_colours_named),
+#   split.by = "MBL_CLL_subtype",
+#   shuffle = TRUE
+# ) +
+#   labs(x = "UMAP1", y = "UMAP2", colour = "Patient", title = "Patients") +
+#   theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     legend.position = "bottom",
+#     aspect.ratio = 1
+#   )
+# 
+# write_tsv(umap_patient_MBL_CLL_subtype[[1]]$data, file.path(tsv_dir, "umap_patient_MBL_CLL_subtype_data.tsv" ))
+# 
+# umap_patient_MBL_CLL_subtype %>%
+#   ggsave(.,
+#     filename = file.path(plotting_dir, "UMAP_10X_seurat_all_patients_disease_subtype_split.png"),
+#     unit = "in",
+#     width = 32,
+#     height = 6
+#   )
+# 
+# umap_patient_MBL_CLL_subtype
+```
+
+#### Predicted celltypes and reference
+```{r}
+# umap_predcelltype <- DimPlot(gex_scaled_10X_seurat_all,
+#                              cells=nonMBL7dup_cells,
+#                              reduction = "umap",
+#                              raster = FALSE,
+#                              group.by = "predicted.celltype.l1",
+#                              cols=annotation_colours_named) +
+#   theme_pub() +
+#   theme(
+#     aspect.ratio = 1,
+#     legend.position = "none"
+#   )
+# 
+# umap_predcelltype %>%
+#   ggsave(.,
+#          filename = file.path(plotting_dir, "UMAP_10X_seurat_all_predicted_celltypes.png"),
+#          unit = "in",
+#          width = 7,
+#          height = 4)
+# 
+# umap_predcelltype
+```
+
+```{r}
+# umap_reference <- DimPlot(gex_scaled_10X_seurat_all,
+#                           cells=nonMBL7dup_cells,
+#                           reduction = "ref.umap",
+#                           group.by = "predicted.celltype.l1",
+#                           label = TRUE,
+#                           label.size = 3,
+#                           repel = TRUE,
+#                           raster = FALSE,
+#                           cols = annotation_colours_named) +
+#   theme_pub() +
+#   theme(
+#     aspect.ratio = 1,
+#     legend.position = "none"
+#   )
+# 
+# ggarrange(umap_predcelltype, umap_reference, nrow = 1, ncol = 2) %>%
+#   ggsave(., file = file.path(plotting_dir, "UMAP_10X_seurat_all_predicted_celltypes_and_reference.png"),
+#          height = 4,
+#          width = 8)
+# 
+# ggarrange(umap_predcelltype, umap_reference, nrow = 1, ncol = 2)
+```
+
+```{r}
+# markers_per_predicted_celltype_vlnplot <- VlnPlot(subset(gex_scaled_10X_seurat_all, cells=nonMBL7dup_cells),
+#   group.by = "predicted.celltype.l1",
+#   features = marker_genes,
+#   slot = "scale.data",
+#   cols = annotation_colours_named,
+#   pt.size = FALSE
+# ) +
+#   theme_pub() +
+#   theme(legend.position = "none")
+# 
+# markers_per_predicted_celltype_vlnplot %>%
+#   ggsave(.,
+#     file = file.path(plotting_dir, "VlnPlots_10X_seurat_all_Markers_per_predicted_celltype_vlnplot.png"),
+#     height = 16,
+#     width = 12
+#   )
+# 
+# markers_per_predicted_celltype_vlnplot
+```
+
+
+```{r}
+# predicted_celltype_marker_dotplot <- DotPlot(subset(gex_scaled_10X_seurat_all, cells=nonMBL7dup_cells),
+#   features =
+#     c(
+#       "MS4A1", # B cells
+#       "CD19", "CD5", "FCER2", "CD79B", # CLL
+#       "CD14", # Monocytes
+#       "IL7R", "CD3E", # T cells
+#       "GNLY", "NKG7", # NK cells
+#       "CA1", "HBA1"
+#     ), # Erythrocytes)),
+#   group.by = "predicted.celltype.l1",
+#   cols = "RdYlBu"
+# ) +
+#   labs(y = "Celltype", x = "Marker gene") +
+#   theme_pub() +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.9))
+# 
+# ggsave(predicted_celltype_marker_dotplot,
+#   file = file.path(plotting_dir, "Dotplot_10X_seurat_all_Markers_per_predicted_celltypes.png"),
+#   width = 7,
+#   height = 4,
+#   unit = "in"
+# )
+# 
+# markers_per_predicted_celltype_vlnplot
+```
+
+#### Prediction scores
+```{r fig.width=8, fig.height=6}
+# Idents(gex_scaled_10X_seurat_all) <- "predicted.celltype.l1"
+# prediction_score_umap <- FeaturePlot(gex_scaled_10X_seurat_all,
+#                                      cells = nonMBL7dup_cells,
+#                                      features = c("Mono", "CD8 T", "CD4 T", "other T", "other", "B", "DC", "NK"),
+#                                      reduction = "umap",
+#                                      cols = c("lightgrey", "darkred"),
+#                                      ncol = 3,
+#                                      raster = FALSE) &
+#   theme_pub() &
+#   theme(aspect.ratio = 1)
+# 
+# prediction_score_umap %>%
+#   ggsave(.,
+#          file = file.path(plotting_dir, "UMAP_10X_seurat_all_predicted_celltypes_scores.png"),
+#          height = 6,
+#          width = 8)
+# 
+# prediction_score_umap
+```
+
+#### Markers
+```{r}
+# marker_vln <- VlnPlot(subset(gex_scaled_10X_seurat_all,cells=nonMBL7dup_cells),
+#   group.by = "seurat_clusters",
+#   slot = "scale.data",
+#   cols = color_palette,
+#   pt.size = FALSE,
+#   features = marker_genes
+# ) +
+#   theme_pub() +
+#   theme(legend.position = "none")
+# 
+# marker_vln
+# marker_vln %>%
+#   ggsave(.,
+#     file = file.path(plotting_dir, "Marker_expression_vlnplot_all.png"),
+#     units = "in",
+#     width = 27,
+#     height = 16
+#   )
+```
+
+```{r}
+# marker_umaps <- FeaturePlot(gex_scaled_10X_seurat_all,
+#                             cells = nonMBL7dup_cells,
+#   features = marker_genes,
+#   reduction = "umap",
+#   raster = FALSE
+# ) +
+#   theme_pub() +
+#   theme(legend.position = "none")
+# 
+# marker_umaps %>%
+#   ggsave(.,
+#     file = file.path(plotting_dir, "Marker_expression_umaps_all.png"),
+#     units = "in",
+#     width = 12,
+#     height = 16
+#   )
+# 
+# marker_umaps
+```
+
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# gex.markers <- FindAllMarkers(gex_scaled_10X_seurat_all,
+#                               only.pos = TRUE,
+#                               min.pct = 0.25,
+#                               logfc.threshold = 0.25)
+#
+# saveRDS(gex.markers, file = file.path(RDS_dir, "gex.markers_all.RDS"))
+```
+
+```{r fig.width=20, fig.height=16}
+# gex.markers %>%
+#   group_by(cluster) %>%
+#   top_n(n = 10, wt = avg_log2FC) -> top10
+#
+# marker_heatmap <- DoHeatmap(gex_scaled_10X_seurat_all, features = top10$gene) +
+#   theme_pub() +
+#   theme(legend.position = "none")
+#
+# marker_heatmap %>%
+#   ggsave(., file = file.path(plotting_dir, "Marker_expression_heatmap_all.png"),
+#          units = "in",
+#          width = 20,
+#          height = 16)
+#
+# marker_heatmap
+```
+
+```{r}
+# saveRDS(gex_scaled_10X_seurat_all, file = file.path(RDS_dir, "gex_scaled_10X_seurat_all.RDS"))
+```
+
+#### Celltype
+```{r}
+# umap_celltype <- DimPlot(gex_scaled_10X_seurat_all, 
+#                           cells= nonMBL7dup_cells,
+#                           reduction = "umap",
+#                           group.by = "My_annotation_LC",
+#                           label = FALSE,
+#                           repel = TRUE,
+#                           raster = FALSE,
+#                           cols = annotation_colours_named,
+#                           shuffle = TRUE) +
+#   labs(x = "UMAP1", y = "UMAP2", colour = "Cell types", title = "Cell types") +
+#   theme_pub() +
+#   theme(axis.ticks = element_blank(),
+#         axis.text.y = element_blank(),
+#         axis.text.x = element_blank(),
+#         legend.position = "none",
+#         aspect.ratio = 1
+#   )
+# 
+# ggsave(umap_celltype,
+#        file = file.path(plotting_dir, "UMAP_10X_seurat_all_celltypes.png"),
+#          height = 4,
+#          width = 4)
+# 
+# umap_celltype
+```
+
+```{r}
+# umap_celltype_MBL_CLL_subtype_split <- DimPlot(subset(gex_scaled_10X_seurat_all, cells=nonMBL7dup_cells),
+#   reduction = "umap",
+#   group.by = "My_annotation_LC",
+#   split.by = "MBL_CLL_subtype",
+#   label = FALSE,
+#   repel = TRUE,
+#   raster = FALSE,
+#   cols = annotation_colours_named,
+#   shuffle = TRUE
+# ) +
+#   labs(x = "UMAP1", y = "UMAP2", colour = "Cell types", title = "Cell type") +
+#   theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     legend.position = "none",
+#     aspect.ratio = 1
+#   )
+# 
+# write_tsv(umap_celltype_MBL_CLL_subtype_split[[1]]$data, file.path(tsv_dir, "umap_celltype_MBL_CLL_subtype_split_data.tsv" ))
+# 
+# ggsave(umap_celltype_MBL_CLL_subtype_split+theme(legend.position = "bottom"),
+#   file = file.path(plotting_dir, "UMAP_10X_seurat_all_celltypes_MBL_CLL_subtype_split.png"),
+#   height = 4,
+#   width = 16
+# )
+# 
+# umap_celltype_MBL_CLL_subtype_split
+```
+
+```{r}
+# markers_per_celltype_vlnplot <- VlnPlot(subset(gex_scaled_10X_seurat_all, cells=nonMBL7dup_cells),
+#   group.by = "My_annotation_LC",
+#   slot = "scale.data",
+#   pt.size = FALSE,
+#   cols = annotation_colours_named,
+#   features = c(
+#     "PAX5", "MS4A1", # B-cell trajectories
+#     "CD19", "CD5", "FCER2", "CD79B", # CLL B-Cell Marker
+#     "CD3D", "CD8A", "TBX21", "IL7R", "CD3E", "CD3G", "CD4", "CD8B", # TCells
+#     "CD14", "CEBPB", "CD33", # Monocytes
+#     "GNLY", "NKG7", # NK cells
+#     "CA1", "HBA1" # erythrocytes
+#   ), sort = TRUE
+# ) +
+#   theme_pub() +
+#   theme(legend.position = "none")
+# 
+# markers_per_celltype_vlnplot %>%
+#   ggsave(.,
+#     file = file.path(plotting_dir, "VlnPlots_10X_seurat_all_Markers_per_celltype_vlnplot.png"),
+#     height = 16,
+#     width = 12
+#   )
+```
+
+```{r}
+# celltype_marker_dotplot <- DotPlot(subset(gex_scaled_10X_seurat_all,cells=nonMBL7dup_cells),
+#   features =
+#     c(
+#       "MS4A1", # B cells
+#       "CD19", "CD5", "FCER2", "CD79B", # CLL
+#       "CD14", # Monocytes
+#       "IL7R", "CD3E", # T cells
+#       "GNLY", "NKG7", # NK cells
+#       "CA1", "HBA1"
+#     ), # Erythrocytes)),
+#   group.by = "My_annotation_LC",
+#   cols = "RdYlBu"
+# ) +
+#   labs(y = "Celltype", x = "Marker gene") +
+#   theme_pub() +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.9))
+# 
+# ggsave(celltype_marker_dotplot,
+#   file = file.path(plotting_dir, "Dotplot_10X_seurat_all_Markers_per_celltypes.png"),
+#   width = 7,
+#   height = 4,
+#   unit = "in"
+# )
+```
+
+## Non integrated IG genes removed
+```{r}
+# gex_scaled_10X_seurat_all <- readRDS(file = file.path(RDS_dir, "gex_scaled_10X_seurat_all.RDS"))
+```
+
+### Subset
+```{r}
+# # identify all IG genes
+# features <- rownames(gex_scaled_10X_seurat_all)
+# ig_pattern <- "^IG(A|D|E|G|H|K|L|M|KV|LV)"
+# ig_genes <- features[str_detect(features, ig_pattern)]
+#
+# gex_10X_seurat_all_noIG <- subset(x=gex_scaled_10X_seurat_all,
+#                                          features=setdiff(features, ig_genes))
+```
+
+```{r}
+# gex_scaled_10X_seurat_all_noIG <- SCTransform(gex_10X_seurat_all_noIG, verbose = TRUE)
+#
+# saveRDS(gex_scaled_10X_seurat_all_noIG, file = file.path(RDS_dir, "gex_scaled_10X_seurat_all_noIG.RDS"))
+```
+
+### LDR
+```{r}
+# gex_scaled_10X_seurat_all_noIG <- RunPCA(gex_scaled_10X_seurat_all_noIG,
+#                                     features = VariableFeatures(object = gex_scaled_10X_seurat_all_noIG))
+#
+# ElbowPlot(gex_scaled_10X_seurat_all_noIG) %>%
+#   ggsave(., filename = file.path(plotting_dir, "Elbow_plot_no_IG.png"),
+#          unit = "in",
+#          width = 6,
+#          height = 4)
+#
+# ElbowPlot(gex_scaled_10X_seurat_all_noIG)
+```
+
+### Clustering and UMAP
+```{r}
+# gex_scaled_10X_seurat_all_noIG <- FindNeighbors(gex_scaled_10X_seurat_all_noIG, dims = 1:10) %>%
+#   FindClusters(resolution = 0.5)
+```
+
+```{r}
+# set.seed(123)
+# gex_scaled_10X_seurat_all_noIG <- RunUMAP(gex_scaled_10X_seurat_all_noIG, dims = 1:10)
+```
+
+```{r}
+# saveRDS(gex_scaled_10X_seurat_all_noIG, file = file.path(RDS_dir, "gex_scaled_10X_seurat_all_noIG.RDS"))
+# gex_scaled_10X_seurat_all_noIG <- readRDS(file = file.path(RDS_dir, "gex_scaled_10X_seurat_all_noIG.RDS"))
+```
+
+```{r}
+# gex_scaled_10X_seurat_all_noIG <- AddMetaData(object = gex_scaled_10X_seurat_all_noIG,
+#                                          metadata =celltype_annotation,
+#                                          col.name = "My_annotation_LC")
+```
+
+### Plot UMAPs
+```{r}
+color_palette <- colorRampPalette(brewer.pal(12, "Set3"))(60)
+```
+
+#### Clusters
+```{r}
+nonMBL7dup_cells <- colnames(gex_scaled_10X_seurat_all_noIG)[
+  !grepl("^MBL7dup", colnames(gex_scaled_10X_seurat_all_noIG))
+]
+```
+
+```{r}
+# umap_clusters_plot_no_IG <- DimPlot(gex_scaled_10X_seurat_all_noIG,
+#   cells = nonMBL7dup_cells,
+#   label = TRUE,
+#   shuffle = TRUE,
+#   reduction = "umap",
+#   raster = FALSE,
+#   group.by = c("seurat_clusters"),
+#   cols = color_palette
+# )
+# 
+# umap_clusters_plot_no_IG %>%
+#   ggsave(.,
+#     filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_clusters.png"),
+#     unit = "in",
+#     width = 8,
+#     height = 6
+#   )
+# 
+# umap_clusters_plot_no_IG
+```
+
+#### Samples
+```{r}
+# # add plotting id
+# plotting_annot_no_IG <- as_tibble(gex_scaled_10X_seurat_all_noIG$orig.ident, rownames = NA) %>%
+#   rownames_to_column("label_cellbarcode") %>%
+#   dplyr::rename("label" = "value") %>%
+#   left_join(metadata %>%
+#     dplyr::select(label, plotting_id)) %>%
+#   dplyr::select(label_cellbarcode, plotting_id) %>%
+#   deframe()
+# 
+# gex_scaled_10X_seurat_all_noIG <- AddMetaData(
+#   object = gex_scaled_10X_seurat_all_noIG,
+#   metadata = plotting_annot_no_IG,
+#   col.name = "plotting_id"
+# )
+```
+
+```{r}
+# umap_sample_plot_no_IG <- DimPlot(gex_scaled_10X_seurat_all_noIG,
+#                                   cells = nonMBL7dup_cells,
+#                                   shuffle = TRUE,
+#   reduction = "umap",
+#   raster = FALSE,
+#   group.by = c("orig.ident"),
+#   cols = c(my_unpaired_colours_named, my_paired_colours_named, control_colours_named)
+# ) +
+#   theme_pub() +
+#   labs(title = "Samples") +
+#   theme(
+#     aspect.ratio = 1,
+#     legend.position = "right",
+#     axis.ticks.x = element_blank(),
+#     axis.ticks.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     axis.text.y = element_blank()
+#   )
+# 
+# umap_sample_plot_no_IG %>%
+#   ggsave(.,
+#     filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_samples.png"),
+#     unit = "in",
+#     width = 8,
+#     height = 6
+#   )
+# 
+# umap_sample_plot_no_IG
+```
+
+#### Patients 
+```{r}
+# # add patient id
+# patient_id_annot_no_IG <- as_tibble(gex_scaled_10X_seurat_all_noIG$orig.ident, rownames = NA) %>%
+#   rownames_to_column("label_cellbarcode") %>%
+#   dplyr::rename("label" = "value") %>%
+#   left_join(metadata %>%
+#     dplyr::select(label, patient_id)) %>%
+#   dplyr::select(label_cellbarcode, patient_id) %>%
+#   deframe()
+# 
+# gex_scaled_10X_seurat_all_noIG <- AddMetaData(
+#   object = gex_scaled_10X_seurat_all_noIG,
+#   metadata = patient_id_annot_no_IG,
+#   col.name = "patient_id"
+# )
+```
+
+```{r}
+# umap_patient_no_IG <- DimPlot(gex_scaled_10X_seurat_all_noIG,
+#                               cells = nonMBL7dup_cells,
+#   reduction = "umap",
+#   group.by = "patient_id",
+#   raster = F,
+#   cols = c(my_unpaired_colours_named, control_colours_named),
+#   shuffle = TRUE
+# ) +
+#   scale_colour_manual(values=c(my_unpaired_colours_named, control_colours_named),
+#                         labels=patient_id2plotting_id)+
+#   labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+#   theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     legend.position = "right",
+#     aspect.ratio = 1
+#   )
+# 
+# write_tsv(umap_patient_no_IG[[1]]$data, file.path(tsv_dir, "umap_patient_no_IG_data.tsv"))
+# 
+# umap_patient_no_IG %>%
+#   ggsave(.,
+#     filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_patients.png"),
+#     unit = "in",
+#     width = 7,
+#     height = 4
+#   )
+# 
+# umap_patient_no_IG
+```
+
+```{r}
+# umap_data <- gex_scaled_10X_seurat_all_noIG@reductions$umap@cell.embeddings %>% as.data.frame() %>%
+#   rownames_to_column("label_cellbarcode") %>%
+#   left_join(gex_scaled_10X_seurat_all_noIG@meta.data[c("orig.ident", "patient_id","MBL_CLL_subtype", "My_annotation_LC", "plotting_id")] %>%
+#               rownames_to_column("label_cellbarcode")) %>%
+#   left_join(metadata %>% dplyr::select(label, sequencing_date), by=join_by(orig.ident ==label)) %>%
+#   dplyr::rename("label"="orig.ident") %>%
+#   dplyr::filter(label != "MBL7dup") %>%
+#   dplyr::mutate(plotting_id=factor(plotting_id, levels=c(paste0("P", 1:24),paste0("H", 1:4)))) %>%
+#   dplyr::arrange(plotting_id) %>%
+#   dplyr::mutate(patient_id=factor(patient_id, levels=unique(patient_id)))
+```
+
+```{r fig.height=5, fig.width=5}
+# umap_density_sample_plot_no_IG <- umap_data %>% 
+#   ggplot(aes(x=UMAP_1, y=UMAP_2, colour=patient_id))+
+#   geom_density2d()+
+#   scale_colour_manual(name="Patient", 
+#                       values=c(my_unpaired_colours_named, my_paired_colours_named, control_colours_named), 
+#                       labels=patient_id2plotting_id)+
+#   theme_pub()+
+#   theme(aspect.ratio = 1,
+#     legend.position = "bottom",
+#     axis.ticks.x = element_blank(),
+#     axis.ticks.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     axis.text.y = element_blank())
+```
+
+#### Patients disease-split
+```{r}
+# sample_annot_no_IG <- tibble("label_cellbarcode" = WhichCells(gex_scaled_10X_seurat_all_noIG))
+# 
+# disease_annot_no_IG <- sample_annot_no_IG %>%
+#   tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+#   tidyr::separate(label, c("patient_id", "sample"), sep = "\\.", remove = FALSE) %>%
+#   dplyr::left_join(metadata %>% dplyr::select(label, disease) %>% unique()) %>%
+#   dplyr::mutate(
+#     disease = if_else(condition = is.na(disease) & patient_id %in% paste0("pbmc", 1:4), true = "Healthy", false = disease),
+#     disease = factor(disease, levels = c("Healthy", "MBL", "CLL"))
+#   ) %>%
+#   dplyr::select(label_cellbarcode, disease) %>%
+#   deframe()
+# 
+# gex_scaled_10X_seurat_all_noIG <- AddMetaData(
+#   object = gex_scaled_10X_seurat_all_noIG,
+#   metadata = disease_annot_no_IG,
+#   col.name = "disease"
+# )
+```
+
+```{r}
+# umap_patient_disease_no_IG <- DimPlot(subset(x = gex_scaled_10X_seurat_all_noIG, 
+#                                              cells = nonMBL7dup_cells),
+#   reduction = "umap",
+#   group.by = "patient_id",
+#   raster = F,
+#   cols = c(my_unpaired_colours_named, control_colours_named),
+#   split.by = "disease",
+#   shuffle = TRUE
+# ) +
+#   labs(x = "UMAP1", y = "UMAP2", colour = "Patient", title = "Disease") +
+#   theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     legend.position = "bottom",
+#     aspect.ratio = 1
+#   )
+# 
+# umap_patient_disease_no_IG %>%
+#   ggsave(.,
+#     filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_patients_disease_split.png"),
+#     unit = "in",
+#     width = 12,
+#     height = 6
+#   )
+# 
+# umap_patient_disease_no_IG
+```
+
+```{r fig.height=4, fig.width=20}
+# umap_density_sample_plot_no_IG_split <- umap_data %>% 
+#   ggplot(aes(x=UMAP_1, y=UMAP_2, colour=patient_id))+
+#   geom_density2d()+
+#   scale_colour_manual(name="Sample", values=c(my_unpaired_colours_named, my_paired_colours_named, control_colours_named), labels=patient_id2plotting_id)+
+#   theme(aspect.ratio = 1,
+#     legend.position = "right",
+#     axis.ticks.x = element_blank(),
+#     axis.ticks.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     axis.text.y = element_blank())+
+#   theme_pub()+
+#   facet_wrap(~MBL_CLL_subtype, nrow=1)
+```
+
+```{r, fig.width=12, fig.height=4}
+# #hide density for other immune cells
+# umap_data_no_immune <- umap_data %>% 
+#   dplyr::filter(!(My_annotation_LC %in% c("T", "other", "Mono", "NK", "DC")))
+# 
+# umap_density_sample_plot_no_IG_no_immune_split <- ggplot()+
+#   geom_point(data = umap_data, aes(x=UMAP_1, y=UMAP_2, colour=patient_id), alpha=0.05, size=0.000000001)+
+#   geom_density2d(data = umap_data_no_immune, aes(x=UMAP_1, y=UMAP_2, colour=patient_id), linewidth = 0.5)+
+#   scale_colour_manual(name="Patient", values=c(my_unpaired_colours_named, my_paired_colours_named, control_colours_named), 
+#                       labels=patient_id2plotting_id)+
+#   labs(x="UMAP1", y="UMAP2")+
+#   theme_pub()+
+#   theme(aspect.ratio = 1,
+#     legend.position = "right",
+#     axis.ticks = element_blank(),
+#     axis.text = element_blank())+
+#   facet_wrap(~ MBL_CLL_subtype, nrow = 1)+
+#   guides(colour=list(size=1))
+# 
+# ggsave(plot=umap_density_sample_plot_no_IG_no_immune_split,
+#        file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_patients_disease_split_density.png"),
+#        width=16,
+#        height=4,
+#        unit="in",
+#        dpi=600)
+```
+
+```{r}
+centroids <- umap_data_no_immune %>% 
+  dplyr::select(UMAP_1, UMAP_2, patient_id) %>% 
+  group_by(patient_id) %>% 
+  dplyr::summarize(across(everything(), mean)) %>% 
+  dplyr::left_join(metadata %>% dplyr::filter(data_type=="GEX") %>% dplyr::select(patient_id, plotting_id)) %>% unique()
+
+umap_patient_no_IG_labelled <- DimPlot(gex_scaled_10X_seurat_all_noIG,
+                              cells=nonMBL7dup_cells,
+                        reduction = "umap",
+                        group.by = "patient_id",
+                        raster = F,
+                        cols = my_unpaired_colours_named,
+                        shuffle = TRUE) +
+  geom_text_repel(data=centroids, aes(x=UMAP_1, y=UMAP_2, label=plotting_id), max.overlap=0, force=500)+
+  scale_colour_manual(values=my_unpaired_colours_named, label=patient_id2plotting_id)+
+  labs(x = "UMAP1", y = "UMAP2", title = "") +
+  theme_pub() +
+  theme(axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        aspect.ratio=1)
+
+write_tsv(umap_patient_no_IG_labelled[[1]][["data"]], file.path(tsv_dir, "20250325_GEX_healthy_patient_annotation_noIG_umap_data.tsv"))
+write_tsv(centroids, file.path(tsv_dir, "20250325_GEX_healthy_patient_annotation_noIG_umap_centroids.tsv"))
+```
+
+```{r}
+# umap_data_no_immune %>% 
+#   dplyr::mutate(sequencing_date=as.character(sequencing_date)) %>% 
+#   ggplot(aes(x=UMAP_1, y=UMAP_2, colour=sequencing_date))+
+#   geom_point(size=0.000000001)+
+#   scale_colour_manual(name="Sequencing_date",
+#                       values=c("2022-02-28" = "#E6AB02", 
+#                         "2022-11-18" = "#7FC97F", 
+#                         "2023-05-02" = "#FFFF99", 
+#                         "2024-03-18" = "#386CB0",
+#                         "2022-02-26" = "#FFEF40"))+
+#   theme_pub()+
+#   theme(aspect.ratio = 1,
+#     legend.position = "bottom",
+#     axis.ticks.x = element_blank(),
+#     axis.ticks.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     axis.text.y = element_blank())+
+#   facet_wrap(~ MBL_CLL_subtype, nrow = 1)+
+#   guides(colour=list(size=1))
+```
+
+#### Patients disease-subtype-split
+```{r}
+# # add MBL_CLL_subtype annotation
+# MBL_CLL_subtype_annot_no_IG <- as_tibble(gex_scaled_10X_seurat_all_noIG$orig.ident, rownames = NA) %>%
+#   rownames_to_column("label_cellbarcode") %>%
+#   dplyr::rename("label" = "value") %>%
+#   dplyr::left_join(metadata %>% dplyr::select(label, MBL_subtype)) %>%
+#   dplyr::mutate(
+#     MBL_CLL_subtype = if_else(is.na(MBL_subtype) & !(label %in% paste0("pbmc", 1:4)), "CLL", MBL_subtype),
+#     MBL_CLL_subtype = if_else(condition = is.na(MBL_CLL_subtype) & label %in% paste0("pbmc", 1:4), true = "Healthy", false = MBL_CLL_subtype),
+#     MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("Healthy", "LC", "HC", "CLL"))
+#   ) %>%
+#   dplyr::select(label_cellbarcode, MBL_CLL_subtype) %>%
+#   deframe()
+# 
+# gex_scaled_10X_seurat_all_noIG <- AddMetaData(
+#   object = gex_scaled_10X_seurat_all_noIG,
+#   metadata = MBL_CLL_subtype_annot_no_IG,
+#   col.name = "MBL_CLL_subtype"
+# )
+```
+
+```{r}
+# umap_patient_MBL_CLL_subtype_no_IG <- DimPlot(subset(x=gex_scaled_10X_seurat_all_noIG,
+#                                               cells = nonMBL7dup_cells),
+#   reduction = "umap",
+#   group.by = "patient_id",
+#   raster = F,
+#   cols = c(my_unpaired_colours_named, control_colours_named),
+#   split.by = "MBL_CLL_subtype",
+#   shuffle = TRUE
+# ) +
+#   labs(x = "UMAP1", y = "UMAP2", colour = "Patient", title = "Patients") +
+#   theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     legend.position = "bottom",
+#     aspect.ratio = 1
+#   )
+# 
+# umap_patient_MBL_CLL_subtype_no_IG %>%
+#   ggsave(.,
+#     filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_patients_disease_subtype_split.png"),
+#     unit = "in",
+#     width = 16,
+#     height = 6
+#   )
+# 
+# umap_patient_MBL_CLL_subtype_no_IG
+```
+
+#### Celltype markers
+```{r}
+marker_genes <- c(
+  "PAX5", "MS4A1", "EBF1", "MME", # B-cell trajectories
+  "CD14", "CEBPB", "MPO", "CD33", # Monocytes
+  "CD3D", "CD8A", "TBX21", "IL7R", "CD3E", "CD3G", "CD4", "CD8B", # TCells
+  "CD19", "CD5", "FCER2", "CD79B", # CLL B-Cell Marker
+  "GNLY", "NKG7", "NCAM1", # NK cells
+  "PF4", # platelets
+  "CA1", "HBA1" # erythrocytes
+)
+```
+
+```{r fig.width=20, fig.height=15}
+# marker_vln_no_IG <- VlnPlot(subset(gex_scaled_10X_seurat_all_noIG, cells=nonMBL7dup_cells),
+#   features = marker_genes,
+#   group.by = "seurat_clusters",
+#   slot = "scale.data",
+#   pt.size = FALSE,
+#   cols = color_palette
+# ) +
+#   theme_pub() +
+#   theme(legend.position = "none")
+# 
+# marker_vln_no_IG %>%
+#   ggsave(.,
+#     file = file.path(plotting_dir, "Marker_expression_vlnplot_all_no_IG.png"),
+#     units = "in",
+#     width = 20,
+#     height = 16
+#   )
+# 
+# marker_vln_no_IG
+```
+
+```{r, fig.width=20, fig.height=15}
+# marker_umaps_no_IG <- FeaturePlot(gex_scaled_10X_seurat_all_noIG,
+#                                   cells = nonMBL7dup_cells,
+#   reduction = "umap",
+#   features = marker_genes,
+#   raster = FALSE
+# ) +
+#   theme_pub() +
+#   theme(legend.position = "none")
+# 
+# marker_umaps_no_IG %>%
+#   ggsave(.,
+#     file = file.path(plotting_dir, "Marker_expression_umaps_all_no_IG.png"),
+#     units = "in",
+#     width = 12,
+#     height = 16
+#   )
+# 
+# marker_umaps_no_IG
+```
+
+```{r}
+# saveRDS(gex_scaled_10X_seurat_all_noIG, file = file.path(RDS_dir, "gex_scaled_10X_seurat_all_noIG.RDS"))
+```
+
+#### Celltype annotation
+```{r}
+malignant_celltype_annotation <- tibble(
+  "label_cellbarcode" = colnames(gex_scaled_all),
+  "My_annotation" = gex_scaled_all$My_annotation
+) %>%
+  dplyr::mutate(My_annotation = case_when(
+    My_annotation == "MBL B Cell" & str_starts(label_cellbarcode,
+      pattern = paste0("MBL", 10:15, collapse = "|")
+    ) ~ "LC-MBL B Cell",
+    My_annotation == "MBL B Cell" & str_starts(label_cellbarcode,
+      pattern = paste0("MBL", 10:15, collapse = "|"),
+      negate = TRUE
+    ) ~ "HC-MBL B Cell",
+    .default = My_annotation
+  ))
+
+healthy_celltype_annotation <- tibble(
+  "label_cellbarcode" = colnames(gex_scaled_10X_seurat_all_noIG),
+  "My_annotation" = gex_scaled_10X_seurat_all_noIG$predicted.celltype.l1
+) %>%
+  dplyr::filter(str_starts(label_cellbarcode, "pbmc1|pbmc2|pbmc3|pbmc4")) %>%
+  dplyr::mutate(My_annotation = case_when(My_annotation == "CD4 T" ~ "T",
+    My_annotation == "CD8 T" ~ "T",
+    My_annotation == "other T" ~ "T",
+    .default = My_annotation
+  ))
+
+celltype_annotation <- bind_rows(malignant_celltype_annotation, healthy_celltype_annotation) %>% deframe()
+
+gex_scaled_10X_seurat_all_noIG <- AddMetaData(
+  object = gex_scaled_10X_seurat_all_noIG,
+  metadata = celltype_annotation,
+  col.name = "My_annotation"
+)
+```
+
+#### Celltype
+```{r}
+# umap_celltype_no_IG <- DimPlot(gex_scaled_10X_seurat_all_noIG,
+#                                cells=nonMBL7dup_cells,
+#   reduction = "umap",
+#   group.by = "My_annotation_LC",
+#   label = FALSE,
+#   repel = TRUE,
+#   raster = FALSE,
+#   cols = annotation_colours_named,
+#   shuffle = TRUE
+# ) +
+#   labs(x = "UMAP1", y = "UMAP2", colour = "Cell types", title = "Cell types") +
+#   theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     legend.position = "none",
+#     aspect.ratio = 1
+#   )
+# 
+# ggsave(umap_celltype_no_IG,
+#   file = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_celltypes.png"),
+#   height = 4,
+#   width = 4
+# )
+# 
+# umap_celltype_no_IG
+```
+
+```{r}
+# umap_celltype_no_IG_MBL_CLL_subtype_split <- DimPlot(subset(x=gex_scaled_10X_seurat_all_noIG, cells=nonMBL7dup_cells),
+#   reduction = "umap",
+#   split.by = "MBL_CLL_subtype",
+#   group.by = "My_annotation_LC",
+#   label = FALSE,
+#   repel = TRUE,
+#   raster = FALSE,
+#   cols = annotation_colours_named,
+#   shuffle = TRUE
+# ) +
+#   labs(
+#     x = "UMAP1",
+#     y = "UMAP2",
+#     colour = "Cell type",
+#     title = "Cell type"
+#   ) +
+#   theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     legend.position = "none",
+#     aspect.ratio = 1
+#   )
+# 
+# ggsave(umap_celltype_no_IG_MBL_CLL_subtype_split,
+#   file = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_celltypes_MBL_CLL_subtype_split.png"),
+#   height = 4,
+#   width = 16
+# )
+# 
+# write_tsv(umap_celltype_no_IG_MBL_CLL_subtype_split[[1]]$data, file = file.path(tsv_dir, "UMAP_10X_seurat_all_no_IG_celltypes_MBL_CLL_subtype_split_data.tsv"))
+# 
+# umap_celltype_no_IG_MBL_CLL_subtype_split
+```
+
+```{r}
+umap_celltype_no_IG_MBL_CLL_subtype_split_noB <- DimPlot(subset(x=gex_scaled_10X_seurat_all_noIG, cells=nonMBL7dup_cells),
+  reduction = "umap",
+  split.by = "MBL_CLL_subtype",
+  group.by = "My_annotation",
+  label = FALSE,
+  repel = TRUE,
+  raster = FALSE, 
+  cols = annotation_colours_named,
+  shuffle = TRUE
+) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    colour = "Cell type",
+    title = "Cell type"
+  ) +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    legend.position = "none",
+    aspect.ratio = 1
+  )
+
+write_tsv(umap_celltype_no_IG_MBL_CLL_subtype_split_noB[[1]]$data, file = file.path(tsv_dir, "20250326_UMAP_10X_seurat_all_no_IG_celltypes_MBL_CLL_subtype_split_noB_data.tsv"))
+
+umap_celltype_no_IG_MBL_CLL_subtype_split_noB
+```
+
+## Combined IG genes removal with scVI technology integration
+
+```{r}
+gex_scVI_10X_seurat_all_noIG <- readRDS(file.path(RDS_dir, "gex_scaled_10X_seurat_all_scvi_MBL_CLL_healthy_no_IG.RDS"))
+```
+
+### Plot UMAPs
+
+```{r}
+color_palette <- colorRampPalette(brewer.pal(12, "Set3"))(60)
+```
+
+#### Clusters
+
+```{r}
+umap_clusters_plot_no_IG_scVI <- DimPlot(gex_scVI_10X_seurat_all_noIG,
+                              reduction = "scvi",
+                              raster = FALSE,
+                              group.by = c("seurat_clusters"),
+                              cols=color_palette)
+
+umap_clusters_plot_no_IG_scVI %>%
+  ggsave(.,
+         filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_scVI_clusters.png"),
+         unit = "in",
+         width = 8,
+         height = 6)
+```
+
+#### Samples
+```{r}
+# add plotting id
+plotting_annot_no_IG_scVI <- as_tibble(gex_scVI_10X_seurat_all_noIG$orig.ident, rownames=NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::rename("label"="value") %>%
+  left_join(metadata %>%
+              dplyr::select(label, plotting_id)) %>%
+  dplyr::select(label_cellbarcode, plotting_id) %>%
+  deframe()
+
+gex_scVI_10X_seurat_all_noIG <- AddMetaData(object = gex_scVI_10X_seurat_all_noIG,
+                                         metadata = plotting_annot_no_IG_scVI,
+                                         col.name = "plotting_id")
+```
+
+```{r}
+umap_sample_plot_no_IG_scVI <- DimPlot(gex_scVI_10X_seurat_all_noIG,
+                              reduction = "scvi",
+                            raster = FALSE,
+                            group.by = c("orig.ident"),
+                            cols=c(my_unpaired_colours_named,my_paired_colours_named, control_colours_named)) +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    legend.position = "right"
+  )+
+  labs(title="Samples")+
+  theme_pub()+
+  theme(aspect.ratio = 1,
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y=element_blank())
+
+umap_sample_plot_no_IG_scVI %>%
+  ggsave(.,
+         filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_scVI_samples.png"),
+         unit = "in",
+         width = 8,
+         height = 6)
+```
+
+#### Patients 
+```{r}
+# add patient id
+patient_id_annot_no_IG_scVI <- as_tibble(gex_scVI_10X_seurat_all_noIG$orig.ident, rownames=NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::rename("label"="value") %>%
+  left_join(metadata %>%
+              dplyr::select(label, patient_id)) %>%
+  dplyr::select(label_cellbarcode, patient_id) %>%
+  deframe()
+
+gex_scVI_10X_seurat_all_noIG <- AddMetaData(object = gex_scVI_10X_seurat_all_noIG,
+                                              metadata = patient_id_annot_no_IG_scVI,
+                                              col.name = "patient_id")
+```
+
+```{r}
+umap_patient_no_IG_scVI <- DimPlot(gex_scVI_10X_seurat_all_noIG,
+                        reduction = "scvi",
+                        group.by = "patient_id",
+                        raster = F,
+                        cols = c(my_unpaired_colours_named, control_colours_named),
+                        shuffle = TRUE) +
+  labs(x = "UMAP1", y = "UMAP2", title = "All Patients") +
+  theme_pub() +
+  theme(axis.ticks = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        aspect.ratio=1)
+
+umap_patient_no_IG_scVI %>%
+  ggsave(.,
+         filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_scVI_patients.png"),
+         unit = "in",
+         width = 7,
+         height = 4)
+```
+
+#### Patients disease-split
+```{r}
+sample_annot_no_IG_scVI <- tibble("label_cellbarcode" = WhichCells(gex_scVI_10X_seurat_all_noIG))
+
+disease_annot_no_IG_scVI <- sample_annot_no_IG_scVI %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  tidyr::separate(label, c("patient_id", "sample"), sep = "\\.", remove = FALSE) %>%
+  dplyr::left_join(metadata %>% dplyr::select(label, disease) %>% unique()) %>%
+  dplyr::mutate(disease=if_else(condition=is.na(disease) & patient_id %in% paste0("pbmc", 1:4),true= "Healthy", false=disease),
+                disease=factor(disease, levels=c("Healthy", "MBL", "CLL"))) %>%
+  dplyr::select(label_cellbarcode, disease) %>%
+  deframe()
+
+gex_scVI_10X_seurat_all_noIG <- AddMetaData(object = gex_scVI_10X_seurat_all_noIG,
+                                         metadata = disease_annot_no_IG_scVI,
+                                         col.name = "disease")
+```
+
+```{r}
+umap_patient_disease_no_IG_scVI <- DimPlot(gex_scVI_10X_seurat_all_noIG,
+                                reduction = "scvi",
+                                group.by = "patient_id",
+                                raster = F,
+                                cols = c(my_unpaired_colours_named, control_colours_named),
+                                split.by = "disease",
+                                shuffle = TRUE) +
+  labs(x = "UMAP1", y = "UMAP2", colour = "Patient", title = "Disease") +
+  theme_pub() +
+  theme(axis.ticks = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        aspect.ratio = 1
+  )
+
+umap_patient_disease_no_IG_scVI %>%
+  ggsave(.,
+         filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_scVI_patients_disease_split.png"),
+         unit = "in",
+         width = 24,
+         height = 6)
+```
+
+#### Patients disease-subtype-split
+```{r}
+# add MBL_CLL_subtype annotation
+MBL_CLL_subtype_annot_no_IG_scVI <- as_tibble(gex_scVI_10X_seurat_all_noIG$orig.ident, rownames=NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::rename("label"="value") %>%
+  dplyr::left_join(metadata %>% dplyr::select(label, MBL_subtype)) %>%
+  dplyr::mutate(MBL_CLL_subtype=if_else(is.na(MBL_subtype) & !(label %in% paste0("pbmc", 1:4)), "CLL", MBL_subtype),
+                MBL_CLL_subtype=if_else(condition=is.na(MBL_CLL_subtype) & label %in% paste0("pbmc", 1:4), true= "Healthy", false=MBL_CLL_subtype),
+                MBL_CLL_subtype=factor(MBL_CLL_subtype, levels=c("Healthy", "LC", "HC", "CLL"))) %>%
+  dplyr::select(label_cellbarcode, MBL_CLL_subtype) %>%
+  deframe()
+
+gex_scVI_10X_seurat_all_noIG <- AddMetaData(object = gex_scVI_10X_seurat_all_noIG,
+                                         metadata = MBL_CLL_subtype_annot_no_IG_scVI,
+                                         col.name = "MBL_CLL_subtype")
+```
+
+```{r}
+umap_patient_MBL_CLL_subtype_no_IG_scVI <- DimPlot(gex_scVI_10X_seurat_all_noIG,
+                                                   reduction = "scvi",
+                                                   group.by = "patient_id",
+                                        raster = F,
+                                        cols = c(my_unpaired_colours_named, control_colours_named),
+                                        split.by = "MBL_CLL_subtype",
+                                        shuffle = TRUE) +
+  labs(x = "UMAP1", y = "UMAP2", colour = "Patient", title = "Patients") +
+  theme_pub() +
+  theme(axis.ticks = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "bottom",
+        aspect.ratio = 1
+  )
+
+umap_patient_MBL_CLL_subtype_no_IG_scVI %>%
+  ggsave(.,
+         filename = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_scVI_patients_disease_subtype_split.png"),
+         unit = "in",
+         width = 32,
+         height = 6)
+```
+
+#### Celltype markers
+```{r}
+marker_genes <- c(
+  "PAX5", "MS4A1", "EBF1", "MME", # B-cell trajectories
+  "CD14", "CEBPB", "MPO", "CD33", # Monocytes
+  "CD3D", "CD8A", "TBX21", "IL7R", "CD3E", "CD3G", "CD4", "CD8B", # TCells
+  "CD19", "CD5", "FCER2", "CD79B", # CLL B-Cell Marker
+  "GNLY", "NKG7", "NCAM1", # NK cells
+  "PF4", # platelets
+  "CA1", "HBA1" # erythrocytes
+)
+```
+
+```{r}
+marker_vln_no_IG_scVI <- VlnPlot(gex_scVI_10X_seurat_all_noIG, features = marker_genes) +
+  theme_pub() +
+  theme(legend.position = "none")
+
+marker_vln_no_IG_scVI %>%
+  ggsave(., file = file.path(plotting_dir, "Marker_expression_vlnplot_all_no_IG_scVI.png"),
+         units = "in",
+         width = 20,
+         height = 16)
+```
+
+```{r}
+marker_umaps_no_IG_scVI <- FeaturePlot(gex_scVI_10X_seurat_all_noIG,
+                                  reduction = "scvi",
+                                  features = marker_genes, raster = FALSE) +
+                                  theme_pub() +
+                                  theme(legend.position = "none")
+
+marker_umaps_no_IG_scVI %>%
+  ggsave(., file = file.path(plotting_dir, "Marker_expression_umaps_all_no_IG_scVI.png"),
+         units = "in",
+         width = 12,
+         height = 16)
+```
+
+```{r}
+# saveRDS(gex_scVI_10X_seurat_all_noIG,
+#         file = file.path(RDS_dir, "gex_scaled_10X_seurat_all_scvi_MBL_CLL_healthy_no_IG.RDS"))
+```
+
+#### Celltype
+
+```{r}
+gex_scVI_10X_seurat_all_noIG <- AddMetaData(
+  object = gex_scVI_10X_seurat_all_noIG,
+  metadata = celltype_annotation,
+  col.name = "My_annotation_LC")
+
+umap_celltype_no_IG_scVI <- DimPlot(gex_scVI_10X_seurat_all_noIG,
+  reduction = "scvi",
+  group.by = "My_annotation_LC",
+  label = FALSE,
+  repel = TRUE,
+  raster = FALSE,
+  cols = annotation_colours_named,
+  shuffle = TRUE) +
+  labs(x = "UMAP1", y = "UMAP2", colour = "Cell types", title = "Cell types") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    legend.position = "none",
+    aspect.ratio = 1)
+
+ggsave(umap_celltype_no_IG_scVI,
+  file = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_scVI_celltypes.png"),
+  height = 4,
+  width = 4)
+
+umap_celltype_no_IG_scVI
+```
+
+```{r}
+umap_celltype_no_IG_integrated_MBL_CLL_subtype_split <- DimPlot(gex_scVI_10X_seurat_all_noIG,
+  reduction = "scvi",
+  split.by = "MBL_CLL_subtype",
+  group.by = "My_annotation_LC",
+  label = FALSE,
+  repel = TRUE,
+  raster = FALSE,
+  cols = annotation_colours_named,
+  shuffle = TRUE) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    colour = "Cell type",
+    title = "Cell type") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    legend.position = "none",
+    aspect.ratio = 1)
+
+ggsave(umap_celltype_no_IG_integrated_MBL_CLL_subtype_split,
+  file = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_integrated_celltypes_MBL_CLL_subtype_split.png"),
+  height = 4,
+  width = 16
+)
+
+write_tsv(umap_celltype_no_IG_integrated_MBL_CLL_subtype_split[[1]]$data, file = file.path(tsv_dir, "UMAP_10X_seurat_all_no_IG_integrated_celltypes_MBL_CLL_subtype_split_data.tsv"))
+
+umap_celltype_no_IG_integrated_MBL_CLL_subtype_split
+```
+
+#### Technology
+```{r}
+sequencing_date_annotation <- tibble(
+  "label_cellbarcode" = colnames(gex_scVI_10X_seurat_all_noIG),
+  "label" = gex_scVI_10X_seurat_all_noIG$orig.ident
+) %>%
+  left_join(metadata %>% dplyr::select(label, sequencing_date)) %>%
+  dplyr::mutate(sequencing_date=as.character(sequencing_date)) %>%
+  dplyr::select(label_cellbarcode, sequencing_date) %>% deframe
+
+gex_scVI_10X_seurat_all_noIG <- AddMetaData(object = gex_scVI_10X_seurat_all_noIG,metadata = sequencing_date_annotation, col.name = "sequencing_date")
+
+umap_sequencing_date_no_IG_scVI <- DimPlot(gex_scVI_10X_seurat_all_noIG,
+  reduction = "scvi",
+  split.by = "MBL_CLL_subtype",
+  group.by = "sequencing_date",
+  label = FALSE,
+  repel = TRUE,
+  raster = FALSE,
+  cols = c("2022-02-28" = "#E6AB02",
+          "2022-11-18" = "#7FC97F",
+          "2023-05-02" = "#FFFF99",
+          "2024-03-18" = "#386CB0",
+          "2022-02-26" = "#FFEF40"),
+  shuffle = TRUE
+) +
+  labs(x = "UMAP1", y = "UMAP2", colour = "Cell types", title = "Sequencing date") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    legend.position = "none",
+    aspect.ratio = 1)
+umap_sequencing_date_no_IG_scVI
+```
+

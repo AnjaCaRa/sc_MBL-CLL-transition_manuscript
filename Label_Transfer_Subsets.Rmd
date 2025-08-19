@@ -1,0 +1,194 @@
+---
+title: "Label transfer MBL CLL"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+# Goal
+The aim of this script is annotate all cells with the data set from Hao and Hao et. al.
+
+Load libraries
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(ArchR)
+library(tidyverse)
+library(ggrepel)
+library(SeuratDisk)
+library(Seurat)
+```
+
+```{r Run_parameters}
+set.seed(1)
+addArchRThreads(threads = 1)
+```
+
+# Set paths
+```{r define_directories}
+source("config_paths.R")
+# ArchR_dir <- "ArchR_Subset1"
+# ArchR_dir <- "ArchR_Subset2"
+# ArchR_dir <- "ArchR_Subset3"
+ArchR_dir <- "ArchR_Subset4"
+
+result_dir <- file.path(project_dir, "results", ArchR_dir)
+data_dir <- file.path(project_dir, "data")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+## ArchR Project
+```{r Load_ArchR_Project}
+setwd(result_dir)
+CLLProj <- loadArchRProject(path = result_dir)
+```
+
+## Reference data set Hao and Hao et al 2021
+```{r Load_RNA_reference}
+# if(!file.exists("scRNA-PBMcs_Hao_and_Hao_et_2021.h5seurat")){
+#     download.file(
+#         url = "https://atlas.fredhutch.org/data/nygc/multimodal/pbmc_multimodal.h5seurat",
+#         destfile = file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat"
+#     ))
+# }
+
+Hao_seRNA <- LoadH5Seurat(file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat"))
+Hao_seRNA
+```
+
+
+# Analysis
+## Hao and Hao et al annotation
+```{r Create_RNA_reference_assay, fig.width=2, fig.height=2}
+#As this dataset does not have an RNA assay, the non-SCT values need to be reconstructed to an RNA assay for the reference
+rna_counts <- CreateAssayObject(Hao_seRNA@assays$SCT$counts)
+
+NormalizeData(
+    rna_counts,
+    normalization.method = "LogNormalize",
+    scale.factor = 10000,
+    margin = 1,
+    verbose = TRUE
+)
+
+Hao_seRNA@assays$RNA<-rna_counts
+```
+
+
+### LSI resolution 0.2
+```{r Vary_resolution_LSI_0.2}
+# Try different LSI resolutions
+CLLProj <- addGeneIntegrationMatrix(     
+    ArchRProj = CLLProj, 
+    useMatrix = "GeneScoreMatrix",
+    matrixName = "GeneIntegrationMatrix_IterativeLSI",
+    reducedDims = "IterativeLSI",
+    seRNA = Hao_seRNA,
+    addToArrow = FALSE,
+    groupRNA = "celltype.l1",
+    nameCell = "predictedCell_Un_Hao,",
+    nameGroup = "predictedGroup_Un_Hao",
+    nameScore = "predictedScore_Un_Hao",
+    threads = 1,
+    force=TRUE
+)
+saveArchRProject(ArchRProj = CLLProj, outputDirectory = result_dir, load = FALSE)
+```
+
+```{r Plot_resolution_0.2, fig.width=4, fig.height=4}
+plot_Hao_and_Hao_et_al <- plotEmbedding(
+     embedding = "UMAP_LSI_0.4",
+     plotAs = "point",   
+     size = 0.5,
+     CLLProj, 
+     colorBy = "cellColData", 
+     name = "predictedGroup_Un_Hao",
+     pal=annotation_colours_named
+     ) +
+  theme(
+    plot.title = element_blank(),    axis.title = element_text(face = "bold"),
+    panel.border = element_blank(),
+    axis.line.x = element_line(linetype = "solid", colour = "black"),
+    axis.line.y = element_line(linetype = "solid", colour = "black"),
+    legend.text = element_text(size = 8),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ) +
+  labs(x="UMAP1", y="UMAP2")+
+  guides(colour = guide_legend(override.aes = list(size = 4)))
+plot_Hao_and_Hao_et_al
+
+saveRDS(plot_Hao_and_Hao_et_al, file.path(project_dir, "/RDS_Objects/plot_Hao_and_Hao_et_al_subset4.RDS"))
+```
+
+### LSI resolution 0.4
+```{r Vary_resolution_LSI_0.4}
+CLLProj <- addGeneIntegrationMatrix(     
+    ArchRProj = CLLProj, 
+    useMatrix = "GeneScoreMatrix",
+    matrixName = "GeneIntegrationMatrix_IterativeLSI_0.4",
+    reducedDims = "IterativeLSI_0.4",
+    seRNA = Hao_seRNA,
+    addToArrow = FALSE,
+    groupRNA = "celltype.l1",
+    nameCell = "predictedCell_Un_Hao_IterativeLSI_0.4,",
+    nameGroup = "predictedGroup_Un_Hao_IterativeLSI_0.4",
+    nameScore = "predictedScore_Un_Hao_IterativeLSI_0.4",
+    threads = 1
+)
+
+saveArchRProject(ArchRProj = CLLProj, outputDirectory = result_dir, load = FALSE)
+```
+
+```{r Plot_resolution_0.4, fig.width=4, fig.height=4}
+plot_Hao_and_Hao_et_al_IterativeLSI_0.4 <- plotEmbedding(
+  size = 0.5,
+  CLLProj,
+  embedding = "UMAP_LSI_0.4",
+  colorBy = "cellColData",
+  name = "predictedGroup_Un_Hao_IterativeLSI_0.4",
+  pal=annotation_colours_named
+) +
+  theme(
+    plot.title = element_blank(),    axis.title = element_text(face = "bold"),
+    panel.border = element_blank(),
+    axis.line.x = element_line(linetype = "solid", colour = "black"),
+    axis.line.y = element_line(linetype = "solid", colour = "black"),
+    legend.text = element_text(size = 8),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ) +
+  labs(x="UMAP1", y="UMAP2")+
+  guides(colour = guide_legend(override.aes = list(size = 4)))
+
+plot_Hao_and_Hao_et_al_IterativeLSI_0.4
+```
+
+```{r Export_Resolution_comparison}
+plotPDF(plot_Hao_and_Hao_et_al, 
+        plot_Hao_and_Hao_et_al_IterativeLSI_0.4,
+        name = "Plot-UMAP-RNA-Hao-Integration.pdf", 
+        ArchRProj = CLLProj, 
+        addDOC = FALSE, 
+        width = 5, 
+        height = 5)
+```
+
+### Compare LSI resolutions
+```{r Plot_LSI_comparison, fig.width=8, fig.height=5}
+ggAlignPlots(plot_Hao_and_Hao_et_al,
+plot_Hao_and_Hao_et_al_IterativeLSI_0.4, type="h")
+```
+
+Subclustering and annotatation without cancerous cells in Annotation_SubsetX.Rmd script
+

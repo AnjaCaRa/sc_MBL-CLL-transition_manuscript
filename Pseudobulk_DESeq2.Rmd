@@ -1,0 +1,1050 @@
+---
+title: "Differential Gene Pseudobulk Expression analysis"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+GOAL: The aim of this script is to find out if there are differentially expressed genes between LC-MBL, HC-MBL and CLL cases across patients in comparison to physiologic B cells. We use pseudobulk analysis here adapted from https://hbctraining.github.io/scRNA-seq/lessons/pseudobulk_DESeq2_scrnaseq.html 
+
+## Load libraries
+
+```{r Load_libraries}
+library(DESeq2)
+library(magrittr)
+library(Matrix.utils)
+library(readxl)
+library(tidyverse)
+library(ggpubr)
+library(ggrepel)
+library(Cairo)
+library(Seurat)
+library(SeuratDisk)
+library(RColorBrewer)
+library("org.Hs.eg.db")
+library(pheatmap)
+library(circlize)
+library(SingleCellExperiment)
+library(ggvenn)
+library(disgenet2r)
+library(ComplexHeatmap)
+```
+
+# Set paths
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "DESeq2_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_Objects")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+GEX_RDS_dir <- file.path(result_dir, "GEX_Analysis/RDS_Objects")
+```
+
+## Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+source(file.path(project_dir, "scripts/heatmap_plotting_functions.R"))
+```
+
+```{r}
+gex_scaled_all <- readRDS(file.path(GEX_RDS_dir, "gex_scaled_all.RDS"))
+metadata_all <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv")) %>%
+  dplyr::mutate(MBL_CLL_subtype = if_else(is.na(MBL_subtype), "CLL", MBL_subtype))
+gex_data_scvi <- readRDS(file = file.path(project_dir_ext, "scVI\ expression\ data/scvi_expression.RDS"))
+c2_data <- read_tsv(file.path(c2_data_dir, "c2.all.v2024.1.Hs.symbols.gmt.txt"), col_names = FALSE) %>%
+  dplyr::filter(str_starts(
+    X1,
+    "REACTOME_SIGNALING_BY_THE_B_CELL_RECEPTOR_BCR|REACTOME_CD22_MEDIATED_BCR_REGULATION|REACTOME_FCERI_MEDIATED_CA_2_MOBILIZATION|REACTOME_FCERI_MEDIATED_MAPK_ACTIVATION|REACTOME_FCERI_MEDIATED_NF_KB_ACTIVATION|REACTOME_ANTIGEN_ACTIVATES_B_CELL_RECEPTOR_BCR_LEADING_TO_GENERATION_OF_SECOND_MESSENGERS"
+  ))
+```
+
+## Add Seurat metadata
+```{r}
+sequencing_annot <- tibble("label_cellbarcode" = WhichCells(gex_scaled_all)) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  dplyr::left_join(metadata_all %>% dplyr::filter(data_type == "GEX") %>% dplyr::select(label, sequencing_date) %>% unique()) %>%
+  dplyr::select(label_cellbarcode, sequencing_date) %>%
+  dplyr::mutate(sequencing_date = as.factor(as.character(sequencing_date))) %>%
+  deframe()
+
+gex_scaled_all <- AddMetaData(object = gex_scaled_all, metadata = sequencing_annot, col.name = "sequencing_date")
+
+LC_celltype_annot <- tibble(
+  "label_cellbarcode" = WhichCells(gex_scaled_all),
+  "My_annotation_B" = gex_scaled_all$My_annotation_B
+) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  dplyr::left_join(metadata_all %>% dplyr::filter(data_type == "GEX") %>%
+    dplyr::select(label, MBL_subtype) %>% unique()) %>%
+  dplyr::mutate(My_annotation_LC = case_when(My_annotation_B == "MBL B Cell" & MBL_subtype == "HC" ~ "HC-MBL B Cell",
+    My_annotation_B == "MBL B Cell" & MBL_subtype == "LC" ~ "LC-MBL B Cell",
+    .default = My_annotation_B
+  )) %>%
+  dplyr::select(label_cellbarcode, My_annotation_LC) %>%
+  deframe()
+
+gex_scaled_all <- AddMetaData(object = gex_scaled_all, metadata = LC_celltype_annot, col.name = "My_annotation_LC")
+
+celltype_subtype_annot <- tibble(
+  "label_cellbarcode" = WhichCells(gex_scaled_all),
+  "My_annotation_LC" = gex_scaled_all$My_annotation_LC
+) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  dplyr::left_join(metadata_all %>% dplyr::filter(data_type == "GEX") %>%
+    dplyr::select(label, MBL_CLL_subtype) %>% unique()) %>%
+  dplyr::mutate(celltype_subtype = paste0(My_annotation_LC, "_", MBL_CLL_subtype)) %>%
+  dplyr::mutate(celltype_subtype = if_else(celltype_subtype %in% c("B_HC", "B_CLL"), "B_HCCLL", celltype_subtype)) %>%
+  dplyr::select(label_cellbarcode, celltype_subtype) %>%
+  deframe()
+
+gex_scaled_all <- AddMetaData(object = gex_scaled_all, metadata = celltype_subtype_annot, col.name = "celltype_subtype")
+```
+
+# Analysis
+```{r Calculate_celltype_condition_numbers}
+celltype_condition_counts <- gex_scaled_all@meta.data %>%
+  dplyr::select(orig.ident, patient_id, MBL_CLL_subtype, My_annotation_LC, celltype_subtype) %>%
+  dplyr::filter(
+    My_annotation_LC %in% c("B", "LC-MBL B Cell", "HC-MBL B Cell", "CLL B Cell"),
+    patient_id != "MBL7dup"
+  ) %>%
+  dplyr::group_by(patient_id, orig.ident, MBL_CLL_subtype, My_annotation_LC, celltype_subtype) %>%
+  summarise(cell_counts = n()) %>%
+  dplyr::select(patient_id, orig.ident, celltype_subtype, cell_counts)
+```
+
+```{r}
+# Filter out MBL7dup
+Idents(gex_scaled_all) <- "orig.ident"
+gex_scaled_all_oi <- subset(gex_scaled_all, subset = orig.ident != "MBL7dup" & My_annotation_LC %in% c("B", "LC-MBL B Cell", "HC-MBL B Cell", "CLL B Cell"))
+
+Idents(gex_scaled_all_oi) <- "celltype_subtype"
+# Extract raw counts and metadata to create SingleCellExperiment object
+counts <- gex_scaled_all_oi@assays$RNA@counts
+
+metadata <- gex_scaled_all_oi@meta.data
+
+# Set up metadata as desired for aggregation and DE analysis
+metadata$cluster_id <- factor(gex_scaled_all_oi@active.ident)
+metadata$orig.ident <- factor(gex_scaled_all_oi$orig.ident)
+
+# Create single cell experiment object
+sce <- SingleCellExperiment(
+  assays = list(counts = counts),
+  colData = metadata
+)
+
+# Identify groups for aggregation of counts
+groups <- colData(sce)[, c("cluster_id", "orig.ident")]
+```
+
+```{r Check_aggregation_info}
+kids <- purrr::set_names(levels(sce$cluster_id))
+
+nk <- length(kids)
+
+sids <- purrr::set_names(levels(sce$`orig.ident`))
+
+ns <- length(sids)
+```
+
+```{r Create_sample_level_metadata}
+table(sce$orig.ident)
+
+n_cells <- as.numeric(table(sce$orig.ident))
+
+## Determine how to reoder the samples (rows) of the metadata to match the order of sample names in sids vector
+m <- match(sids, sce$orig.ident)
+
+## Create the sample level metadata by combining the reordered metadata with the number of cells corresponding to each sample.
+ei_sample_res <- data.frame(colData(sce)[m, ],
+  n_cells,
+  row.names = NULL
+) %>%
+  dplyr::select(-"cluster_id")
+
+ei <- celltype_condition_counts %>%
+  dplyr::mutate(orig.ident = factor(orig.ident, levels = sids)) %>%
+  dplyr::left_join(ei_sample_res %>% dplyr::select(-c(celltype_subtype, My_annotation_LC, My_annotation_B, My_annotation)), by = c("patient_id", "orig.ident", "MBL_CLL_subtype")) %>%
+  dplyr::relocate(patient_id:orig.ident, .before = MBL_CLL_subtype) %>%
+  dplyr::mutate(orig.ident = factor(orig.ident, levels = sids)) %>%
+  dplyr::rename("celltype_cell_counts" = cell_counts)
+```
+
+```{r Count_aggregation_to_sample_leve}
+# Aggregate the counts per sample_id and cluster_id
+
+# Subset metadata to only include the cluster and sample IDs to aggregate across
+groups <- colData(sce)[, c("cluster_id", "orig.ident")]
+
+# Aggregate across cluster-sample groups
+pb <- aggregate.Matrix(t(counts(sce)),
+  groupings = groups, fun = "sum"
+)
+
+class(pb)
+
+dim(pb)
+
+pb[1:6, 1:6]
+
+# splitf <- sapply(stringr::str_split(rownames(pb), pattern = "_", n = 2),
+#                 `[`, 1)
+
+# Turn into a list and split the list into components for each cluster/celltype and transform, so rows are genes and columns are samples and make rownames as the sample IDs
+pb <- t(pb)
+
+
+# Explore the different components of list
+str(pb)
+
+# Print out the table of cells in each cluster-sample group
+options(width = 100)
+table(sce$cluster_id, sce$orig.ident)
+```
+
+```{r}
+# Get sample names for each of the cell type clusters
+
+# prep. data.frame for plotting
+de_samples <- colnames(pb)
+```
+
+```{r}
+# Get cluster IDs for each of the samples
+samples_list <- colnames(pb)
+de_orig_idents <- colnames(pb) %>% str_split_i(pattern = "_", i = 3)
+de_cluster_ids <- colnames(pb) %>% str_extract("^[^_]*_[^_]*")
+```
+
+```{r}
+# Create a data frame with the sample IDs, cluster IDs and condition
+gg_df <- data.frame(
+  cluster_id = as.factor(de_cluster_ids),
+  orig.ident = as.factor(de_orig_idents),
+  sample_id = as.factor(de_samples)
+)
+
+gg_df <- left_join(gg_df, ei[, c("orig.ident", "sequencing_date", "celltype_subtype", "celltype_cell_counts")], by = join_by(orig.ident, cluster_id == celltype_subtype))
+
+
+metadata <- gg_df %>%
+  dplyr::select(cluster_id, sample_id, sequencing_date, celltype_cell_counts) %>%
+  dplyr::mutate(celltype_cell_counts = log(celltype_cell_counts)) %>%
+  dplyr::mutate(cluster_id = factor(cluster_id, levels = c("B_LC", "B_HCCLL", "LC-MBL B Cell_LC", "HC-MBL B Cell_HC", "CLL B Cell_CLL")))
+```
+
+```{r Subsetting_dataset_to_celltypes_oi}
+# Generate vector of cluster IDs
+clusters <- levels(metadata$cluster_id)
+clusters
+```
+
+```{r}
+# Subset the metadata to only the B like cells
+# cluster_metadata <- metadata[which(metadata$cluster_id == clusters[c(1,2,4,5)]), ]
+# head(cluster_metadata)
+#
+# # Assign the rownames of the metadata to be the sample IDs
+# rownames(cluster_metadata) <- cluster_metadata$sample_id
+# head(cluster_metadata)
+#
+# # Subset the counts to only the B cells
+# counts <- pb[[clusters[1]]]
+#
+# cluster_counts <- data.frame(counts[, which(colnames(counts) %in% rownames(cluster_metadata))])
+#
+# # Check that all of the row names of the metadata are the same and in the same order as the column names of the counts in order to use as input to DESeq2
+# all(rownames(cluster_metadata) == colnames(cluster_counts))
+```
+
+```{r}
+# Create matrix for all comparisons
+combinations_ordered <- tibble(
+  "Downregulated" = c(
+    "B_LC", "B_HCCLL", "B_HCCLL",
+    "HC-MBL B Cell_HC" # , "LC-MBL B Cell_LC"
+  ),
+  "Upregulated" = c(
+    "LC-MBL B Cell_LC", "HC-MBL B Cell_HC", "CLL B Cell_CLL",
+    "CLL B Cell_CLL" # , "HC-MBL B Cell_HC"
+  )
+)
+
+create.deseq <- function(condition_1, condition_2, complete_count_data, meta) {
+  cl_metadata <- meta[which(meta$cluster_id %in% c(condition_1, condition_2)), ]
+  rownames(cl_metadata) <- cl_metadata$sample_id
+
+  count_data <- complete_count_data[, cl_metadata$sample_id]
+
+  if (condition_1 == "B_LC" & condition_2 == "LC-MBL B Cell_LC") {
+    dds <- DESeqDataSetFromMatrix(count_data,
+      colData = cl_metadata,
+      design = ~cluster_id
+    )
+  } else {
+    dds <- DESeqDataSetFromMatrix(count_data,
+      colData = cl_metadata,
+      design = ~ sequencing_date + cluster_id
+    )
+  }
+  return(dds)
+}
+
+dds_list <- list()
+for (n in 1:nrow(combinations_ordered)) {
+  dds_list[paste0(combinations_ordered$Downregulated[n], "_vs_", combinations_ordered$Upregulated[n])] <- create.deseq(
+    condition_1 = combinations_ordered$Downregulated[n],
+    condition_2 = combinations_ordered$Upregulated[n],
+    complete_count_data = pb,
+    meta = metadata
+  )
+}
+```
+
+```{r PC, fig.width=20, fig.height=12}
+# Transform counts for data visualization
+rld <- dds_list %>% 
+  map(~ rlog(., blind = TRUE))
+
+# Plot PCA
+rld %>%
+  map(~ DESeq2::plotPCA(., intgroup = "cluster_id")) %>%
+  ggarrange(plotlist = ., nrow = 2, ncol = 3)
+
+rld %>%
+  map(~ DESeq2::plotPCA(., intgroup = "sequencing_date")) %>%
+  ggarrange(plotlist = ., nrow = 2, ncol = 3)
+```
+
+```{r Hierarchical_Clustering, fig.height=12, fig.width=12}
+# Extract the rlog matrix from the object and compute pairwise correlation values
+rld_mat <- rld %>% map(~ assay(.))
+rld_cor <- rld_mat %>% map(~ cor(.))
+
+annotation_colours_seqdate <- c("2022-02-28" = "#E6AB02", "2022-11-18" = "#7FC97F", "2023-05-02" = "#FFFF99", "2024-03-18" = "#386CB0") %>% as.factor()
+
+# Plot heatmap
+for (n in 1:nrow(combinations_ordered)) {
+  print(n)
+  cluster_metadata <- metadata[which(metadata$cluster_id %in% c(combinations_ordered$Downregulated[n], combinations_ordered$Upregulated[n])), ] %>%
+    dplyr::mutate(cluster_id = as.character(cluster_id)) %>%
+    tidyr::separate(cluster_id, into = c("cluster_id", NA), sep = "_")
+  rownames(cluster_metadata) <- cluster_metadata$sample_id
+
+  rld_cor[[n]] %>% pheatmap(
+    annotation = cluster_metadata[, c("cluster_id", "sequencing_date"), drop = F],
+    annotation_colors = list(
+      cluster_id = annotation_colours_named[c(1, 10, 11, 12)],
+      sequencing_date = annotation_colours_seqdate
+    )
+  )
+}
+```
+
+```{r Run_DESeq}
+dds_result <- dds_list %>% 
+  map(~ DESeq(.))
+# saveRDS(dds_result, file.path(RDS_dir, "dds_result.RDS"))
+dds_result <- readRDS(file.path(RDS_dir, "dds_result.RDS"))
+```
+
+```{r fig.width=6, fig.height=6}
+# Plot dispersion estimates
+dds_dispersionplots <- dds_result %>% 
+  map(~ plotDispEsts(.))
+```
+
+```{r}
+# Output results of Wald test for contrast for stim vs ctrl
+res_lst <- list()
+for (n in 1:nrow(combinations_ordered)) {
+  print(n)
+  cluster_metadata <- metadata[which(metadata$cluster_id %in% c(combinations_ordered$Downregulated[n], combinations_ordered$Upregulated[n])), ]
+  rownames(cluster_metadata) <- cluster_metadata$sample_id
+
+  contrast <- c("cluster_id", combinations_ordered$Upregulated[n], combinations_ordered$Downregulated[n])
+
+  resultsNames(dds_result[[n]])
+  res_lst[[paste0(combinations_ordered$Downregulated[n], "_vs_", combinations_ordered$Upregulated[n])]] <- results(dds_result[[n]],
+    contrast = contrast,
+    alpha = 0.05
+  )
+
+  res_lst[[paste0(combinations_ordered$Downregulated[n], "_vs_", combinations_ordered$Upregulated[n])]] <- lfcShrink(
+    dds = dds_result[[paste0(combinations_ordered$Downregulated[n], "_vs_", combinations_ordered$Upregulated[n])]],
+    contrast = contrast, type = "ashr",
+    res = res_lst[[paste0(combinations_ordered$Downregulated[n], "_vs_", combinations_ordered$Upregulated[n])]]
+  )
+}
+```
+
+```{r}
+res_tbl <- res_lst %>% 
+  map(~ data.frame(.) %>%
+  rownames_to_column(var = "gene") %>%
+  as_tibble())
+
+# saveRDS(res_tbl, file = file.path(RDS_dir, "res_tbl.RDS"))
+res_tbl <- readRDS(file = file.path(RDS_dir, "res_tbl.RDS"))
+```
+
+### Volcanoplots
+```{r Volcanoplot, fig.width=15, fig.height=5}
+res_table_thres <- res_tbl %>% 
+  map(~mutate(., threshold = if_else(-log10(padj) >= 10 & abs(log2FoldChange) >= 1, TRUE, NA)) %>%
+    dplyr::arrange(desc(threshold), padj) %>%
+    dplyr::mutate(label = if_else(threshold == TRUE & row_number() <= 20 & !grepl("^IG", gene),
+      gene, NA
+    )))
+
+res_table_thres %>%
+  imap(~
+    ggplot(.x, aes(x = log2FoldChange, y = -log10(padj), colour = threshold, label = label)) +
+      geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+      geom_hline(yintercept = c(10), color = "grey", linetype = "dashed") +
+      geom_point(size = 0.5) +
+      geom_label_repel(
+      size = 2.5,
+      label.size = NA,
+      label.padding = 0.1,
+      segment.size = 0.25,
+      segment.colour = "grey",
+      min.segment.length = 0.1,
+      max.overlaps = 40, colour="black")+      
+      labs(title = .y, y = "-log10(FDR)", x = "log2(Fold change)") +
+      scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, 0.01))) +
+      scale_x_continuous(limits = c(-20, 20), expand = expansion(mult = c(0, 0.01))) +
+      scale_colour_manual(name = "Significance", values = c("TRUE" = "darkred", "FALSE" = "lightgrey"), na.value = "lightgrey") +
+      theme(legend.position = "bottom") +
+      theme_pub()) %>%
+  ggarrange(plotlist = ., nrow = 1, ncol = 4, common.legend = TRUE, legend = "bottom")
+```
+
+### Venn Diagram between conditions
+```{r fig.width=6, fig.height=6}
+venn_input <- res_table_thres[1:3] %>%
+  map(~ dplyr::filter(., threshold == "TRUE") %>%
+    dplyr::mutate(gene = if_else(log2FoldChange >= 0, gene, paste0("-", gene))) %>%
+    pull(gene))
+names(venn_input) <- c("LC-MBL vs. B", "HC-MBL vs. B", "CLL vs. B")
+
+ggvenn(
+  data = venn_input,
+  fill_color = c("#fcbda4", "#FC8D62", "#66C2A5"),
+  stroke_size = 0.5,
+  set_name_size = 4,
+)
+```
+
+### Highlight Disgenet genes
+```{r}
+# register at disgnet and retrive api key https://disgenet.com/Profile-area#apiKey
+
+# api_key <- "a1df2b60-8ac8-451c-9454-1ab487e56606"
+# Sys.setenv(DISGENET_API_KEY= api_key)
+# disgenet_CLL_results <- disease2gene( disease  = "UMLS_C0023434",
+#                            database = "CURATED",
+#                            score    = c( 0.1,1 ), n_pags=100 )
+#
+# saveRDS(disgenet_CLL_results, file = file.path(RDS_dir, "disgenet_CLL_results.RDS"))
+disgenet_CLL_results <- readRDS(file = file.path(RDS_dir, "disgenet_CLL_results.RDS"))
+
+# disgenet_MBL_results <- disease2gene( disease  = "UMLS_C2698259",
+#                           database = "CURATED",
+#                           score    = c( 0.1,1 ), n_pags=100 )
+
+# saveRDS(disgenet_MBL_results, file = file.path(RDS_dir, "disgenet_MBL_results.RDS"))
+disgenet_MBL_results <- readRDS(file = file.path(RDS_dir, "disgenet_MBL_results.RDS"))
+
+genes2label <- c(disgenet_CLL_results@qresult[["gene_symbol"]], disgenet_MBL_results@qresult[["gene_symbol"]])
+```
+
+disgenet CLL/MBL associated genes and top10 significant genes
+```{r fig.width=10, fig.height=5}
+res_table_thres_disgenet <- res_table_thres %>%
+  map(~ mutate(., disgenet = if_else(gene %in% genes2label & threshold == TRUE, gene, NA)) %>%
+    dplyr::arrange(desc(disgenet))) %>%
+  map(~ arrange(., desc(threshold), padj) %>%
+    dplyr::mutate(top10_threshold = if_else(threshold == TRUE & row_number() <= 10,
+      gene, NA
+    )))
+
+# show disgnet genes associated with CLL or MBL
+res_table_thres_disgenet %>%
+  imap(~
+    ggplot(.x, aes(x = log2FoldChange, y = -log10(padj), colour = threshold, label = disgenet)) +
+      geom_point(size = 0.5) +
+      geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+      geom_hline(yintercept = c(10), color = "grey", linetype = "dashed") +
+      geom_label_repel(
+          size = 2.5,
+          label.size = NA,
+          label.padding = 0.1,
+          segment.size = 0.25,
+          segment.colour = "grey",
+          min.segment.length = 0.1,
+          max.overlaps = 40, colour="black")+      
+      labs(title = .y, y = "-log10(FDR)", x = "log2(Fold change)") +
+      scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, 0.01))) +
+      scale_x_continuous(limits = c(-10, 10), expand = expansion(mult = c(0, 0.01))) +
+      scale_colour_manual(name = "Significance", values = c("TRUE" = "darkred", "FALSE" = "lightgrey"), na.value = "lightgrey") +
+      theme(legend.position = "bottom") +
+      theme_pub()) %>%
+  ggarrange(plotlist = ., nrow = 1, ncol = 4, common.legend = TRUE, legend = "bottom")
+
+# additionally show top10 significant genes
+res_table_thres_disgenet %>%
+  map(~ mutate(., disgenet_and_top10 = if_else(gene %in% top10_threshold | !is.na(disgenet), gene, NA))) %>%
+  imap(~ ggplot(.x, aes(x = log2FoldChange, y = -log10(padj), colour = threshold, label = disgenet_and_top10)) +
+    geom_point(size = 0.5) +
+    geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+    geom_hline(yintercept = c(10), color = "grey", linetype = "dashed") +
+    geom_label_repel(
+        size = 2.5,
+        label.size = NA,
+        label.padding = 0.1,
+        segment.size = 0.25,
+        segment.colour = "grey",
+        min.segment.length = 0.1,
+        max.overlaps = 40, colour="black")+    
+    labs(title = .y, y = "-log10(FDR)", x = "log2(Fold change)") +
+    scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, 0.01))) +
+    scale_x_continuous(limits = c(-10, 10), expand = expansion(mult = c(0, 0.01))) +
+    scale_colour_manual(name = "Significance", values = c("TRUE" = "darkred", "FALSE" = "lightgrey"), na.value = "lightgrey") +
+    theme(legend.position = "bottom") +
+    theme_pub()) %>%
+  ggarrange(plotlist = ., nrow = 1, ncol = 4, common.legend = TRUE, legend = "bottom")
+```
+
+### Highlight Reactome genes in addition
+```{r fig.width=10, fig.height=5}
+# Reoccuring pathways and genes in disease progression from GSEA of Pseudobulk_GeneSetEnrichmenb_MBL_CLL.Rmd
+c2 <- c2_data %>%
+  tidyr::pivot_longer(cols = X3:X30, names_to = NULL, values_to = "gene") %>%
+  dplyr::rename("gene_set" = X1, "URL" = X2) %>%
+  dplyr::select(gene_set, gene) %>%
+  separate_rows(gene, sep = "\t")
+
+res_table_reactome <- res_table_thres_disgenet %>%
+  map(~ mutate(.,
+    reactome = if_else(gene %in% c2$gene & threshold == TRUE, gene, NA),
+    disgenet_reactome = if_else((!is.na(disgenet) | !is.na(reactome)) & !grepl("^IG", gene), gene, NA),
+    disgenet_reactome_IG = if_else((!is.na(disgenet) | !is.na(reactome)) , gene, NA),
+    
+  ) %>%
+    dplyr::arrange(desc(reactome), desc(disgenet)))
+
+res_table_reactome %>%
+  imap(~
+    ggplot(.x, aes(x = log2FoldChange, y = -log10(padj), colour = threshold, label = disgenet_reactome)) +
+      geom_point(size = 0.5) +
+      geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+      geom_hline(yintercept = c(10), color = "grey", linetype = "dashed") +
+      geom_label_repel(
+          size = 2.5,
+          label.size = NA,
+          label.padding = 0.1,
+          segment.size = 0.25,
+          segment.colour = "grey",
+          min.segment.length = 0.1,
+          max.overlaps = 40, colour="black")+      
+      labs(title = .y, y = "-log10(FDR)", x = "log2(Fold change)") +
+      scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, 0.01))) +
+      scale_x_continuous(limits = c(-10, 10), expand = expansion(mult = c(0, 0.01))) +
+      scale_colour_manual(name = "Significance", values = c("TRUE" = "darkred", "FALSE" = "lightgrey"), na.value = "lightgrey") +
+      theme(legend.position = "bottom") +
+      theme_pub()) %>%
+  ggarrange(plotlist = ., nrow = 1, ncol = 4, common.legend = TRUE, legend = "bottom")
+```
+
+
+### Highlight B and CLL cell marker genes in addition
+```{r fig.width=10, fig.height=5}
+B_markers <- c("MS4A1", "EBF1", "PAX5", "MME", "CD19")
+CLL_markers <- c("CD19", "CD5", "FCER2", "CD79b")
+
+res_table_marker <- res_table_reactome %>%
+  map(~ mutate(.,
+    marker_gene = if_else(gene %in% c(B_markers, CLL_markers) & threshold == TRUE, gene, NA),
+    disgenet_reactome_marker_gene = if_else((!is.na(disgenet) | !is.na(reactome) | !is.na(marker_gene)) & !grepl("^IG", gene), gene, NA),
+    disgenet_reactome_marker_gene_IG = if_else((!is.na(disgenet_reactome_IG) | !is.na(marker_gene)),  gene, NA),
+    
+  ) %>%
+    arrange(desc(reactome), desc(disgenet), desc(marker_gene)))
+
+res_table_marker %>%
+  imap(~
+    ggplot(.x, aes(x = log2FoldChange, y = -log10(padj), colour = threshold, label = disgenet_reactome_marker_gene)) +
+      geom_point(size = 0.5) +
+      geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+      geom_hline(yintercept = c(10), color = "grey", linetype = "dashed") +
+      geom_label_repel(
+        size = 2.5,
+        label.size = NA,
+        label.padding = 0.1,
+        segment.size = 0.25,
+        segment.colour = "grey",
+        min.segment.length = 0.1,
+        max.overlaps = 40, colour = "black"
+      ) +
+      labs(title = .y, y = "-log10(FDR)", x = "log2(Fold change)") +
+      scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, 0.01))) +
+      scale_x_continuous(limits = c(-10, 10), expand = expansion(mult = c(0, 0.01))) +
+      scale_colour_manual(name = "Significance", values = c("TRUE" = "darkred", "FALSE" = "lightgrey"), na.value = "lightgrey") +
+      theme(legend.position = "bottom") +
+      theme_pub()) %>%
+  ggarrange(plotlist = ., nrow = 1, ncol = 4, common.legend = TRUE, legend = "bottom")
+```
+
+### Individual volcanoplots correct colouring
+```{r}
+LC_MBL_pb_volcano <- res_table_marker$`B_LC_vs_LC-MBL B Cell_LC` %>%
+  dplyr::mutate(significant = case_when(threshold == TRUE & log2FoldChange > 0 ~ "upregulated",
+    threshold == TRUE & log2FoldChange < 0 ~ "downregulated",
+    .default = "not significant"
+  )) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj), colour = significant, label = disgenet_reactome_marker_gene)) +
+  geom_point(size = 0.5) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(10), color = "grey", linetype = "dashed") +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40, colour = "black"
+  ) +
+  labs(title = "B vs. LC-MBL", y = "-log10(FDR)", x = "log2(Fold change)") +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, 0.01))) +
+  scale_x_continuous(limits = c(-10, 10), expand = expansion(mult = c(0, 0.01))) +
+  scale_colour_manual(
+    name = "DEGs",
+    values = c("upregulated" = "#fcbda4", "downregulated" = "darkred", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "LC-MBL Cells", "downregulated" = "Physiologic B Cells")
+  ) +
+  theme_pub()+
+  theme(legend.position = "bottom")
+
+saveRDS(LC_MBL_pb_volcano, file.path(RDS_dir, "LC_MBL_pb_volcano.RDS"))
+
+
+HC_MBL_pb_volcano <- res_table_marker$`B_HCCLL_vs_HC-MBL B Cell_HC` %>%
+  dplyr::mutate(significant = case_when(threshold == TRUE & log2FoldChange > 0 ~ "upregulated",
+    threshold == TRUE & log2FoldChange < 0 ~ "downregulated",
+    .default = "not significant"
+  )) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj), colour = significant, label = disgenet_reactome_marker_gene)) +
+  geom_point(size = 0.5) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(10), color = "grey", linetype = "dashed") +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40, colour = "black"
+  ) +
+  labs(title = "B vs. HC-MBL", y = "-log10(FDR)", x = "log2(Fold change)") +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, 0.01))) +
+  scale_x_continuous(limits = c(-10, 10), expand = expansion(mult = c(0, 0.01))) +
+  scale_colour_manual(
+    name = "DEGs",
+    values = c("upregulated" = "#FC8D62", "downregulated" = "darkred", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "HC-MBL Cells", "downregulated" = "Physiologic B Cells")
+  ) +
+  theme_pub()+
+  theme(legend.position = "bottom")
+
+saveRDS(HC_MBL_pb_volcano, file.path(RDS_dir, "HC_MBL_pb_volcano.RDS"))
+
+
+CLL_pb_volcano <- res_table_marker$`B_HCCLL_vs_CLL B Cell_CLL` %>%
+  dplyr::mutate(significant = case_when(threshold == TRUE & log2FoldChange > 0 ~ "upregulated",
+    threshold == TRUE & log2FoldChange < 0 ~ "downregulated",
+    .default = "not significant"
+  )) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj), colour = significant, label = disgenet_reactome_marker_gene)) +
+  geom_point(size = 0.5) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(10), color = "grey", linetype = "dashed") +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40, colour = "black"
+  ) +
+  labs(title = "B vs. CLL", y = "-log10(FDR)", x = "log2(Fold change)") +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, 0.01))) +
+  scale_x_continuous(limits = c(-10, 10), expand = expansion(mult = c(0, 0.01))) +
+  scale_colour_manual(
+    name = "DEGs",
+    values = c("upregulated" = "#66C2A5", "downregulated" = "darkred", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "CLL Cells", "downregulated" = "Physiologic B Cells")
+  ) +
+  theme_pub()+
+  theme(legend.position = "bottom")
+
+saveRDS(CLL_pb_volcano, file.path(RDS_dir, "CLL_pb_volcano.RDS"))
+
+
+HC_CLL_pb_volcano <- res_table_marker$`HC-MBL B Cell_HC_vs_CLL B Cell_CLL` %>%
+  dplyr::mutate(significant = case_when(threshold == TRUE & log2FoldChange > 0 ~ "upregulated",
+    threshold == TRUE & log2FoldChange < 0 ~ "downregulated",
+    .default = "not significant"
+  )) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj), colour = significant, label = disgenet_reactome_marker_gene)) +
+  geom_point(size = 0.5) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(10), color = "grey", linetype = "dashed") +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40, colour = "black"
+  ) +
+  labs(title = "HC-MBL vs. CLL", y = "-log10(FDR)", x = "log2(Fold change)") +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, 0.01))) +
+  scale_x_continuous(limits = c(-10, 10), expand = expansion(mult = c(0, 0.01))) +
+  scale_colour_manual(
+    name = "DEGs",
+    values = c("upregulated" = "#66C2A5", "downregulated" = "#FC8D62", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "CLL Cells", "downregulated" = "Physiologic B Cells")
+  ) +
+  theme_pub()+
+  theme(legend.position = "bottom")
+
+
+ggsave(plot = HC_CLL_pb_volcano+theme(legend.position = "none"), 
+       filename = file.path(plotting_dir, "HC_CLL_pb_volcano_DEGs.png"),
+       width = 2.8, 
+       height = 2)
+
+saveRDS(HC_CLL_pb_volcano, file.path(RDS_dir, "HC_CLL_pb_volcano.RDS"))
+```
+
+```{r, fig.width=10, fig.height=4}
+ggarrange(LC_MBL_pb_volcano, HC_MBL_pb_volcano, CLL_pb_volcano, nrow=1, ncol=3)
+```
+
+```{r}
+# all significant genes
+DEGs_oi <- res_table_thres %>%
+  map(~ dplyr::filter(., !is.na(threshold) & !grepl("^IG", gene)) %>%
+    pull(gene)) %>%
+  unlist() %>%
+  unique()
+
+# saveRDS(DEGs_oi, file = file.path(RDS_dir , "DEGs_pseudobulk.RDS"))
+DEGs_oi <- readRDS(file.path(RDS_dir, "DEGs_pseudobulk.RDS"))
+
+# all significant genes including immunoglobulinas
+DEGs_oi_IG <- res_table_thres %>%
+  map(~ dplyr::filter(., !is.na(threshold)) %>%
+    pull(gene)) %>%
+  unlist() %>%
+  unique()
+
+# saveRDS(DEGs_oi_IG, file = file.path(RDS_dir , "DEGs_IG_pseudobulk.RDS"))
+
+
+# union of all significant disgenet, reactome and marker genes without immunoglobulins
+DEGs_disgenet_reactome_marker <- res_table_marker %>%
+  map(~ dplyr::filter(., !is.na(threshold) & !grepl("^IG", gene) &!is.na(disgenet_reactome_marker_gene)) %>%
+    pull(gene)) %>%
+  unlist() %>%
+  unique()
+
+saveRDS(DEGs_disgenet_reactome_marker, file = file.path(RDS_dir , "DEGs_disgenet_reactome_marker_pseudobulk.RDS"))
+
+
+# union of all significant disgenet, reactome and marker genes WITH immunoglobulins
+DEGs_disgenet_reactome_marker_IG <- res_table_marker %>%
+  map(~ dplyr::filter(., !is.na(threshold) & !is.na(disgenet_reactome_marker_gene_IG)) %>%
+    pull(gene)) %>%
+  unlist() %>%
+  unique()
+
+saveRDS(DEGs_disgenet_reactome_marker_IG, file = file.path(RDS_dir , "DEGs_disgenet_reactome_marker_IG_pseudobulk.RDS"))
+```
+
+### Downsampled heatmap
+Plot heatmap of downsampled cell number for DEGs on batch corrected expression values
+```{r}
+celltype_barcode_counts <- gex_scaled_all@meta.data %>%
+  dplyr::select(patient_id, My_annotation_LC) %>%
+  dplyr::filter(patient_id != "MBL7dup") %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::filter(My_annotation_LC %in% c("B", "LC-MBL B Cell", "HC-MBL B Cell", "CLL B Cell")) %>%
+  dplyr::mutate(B_like_annotation = case_when(My_annotation_LC == "LC-MBL B Cell" ~ "LC-MBL Cells",
+    My_annotation_LC == "HC-MBL B Cell" ~ "HC-MBL Cells",
+    My_annotation_LC == "CLL B Cell" ~ "CLL Cells",
+    My_annotation_LC == "B" ~ "Physiologic B Cells",
+    .default = My_annotation_LC
+  )) %>%
+  group_by(B_like_annotation, patient_id) %>%
+  dplyr::summarise(celltype_count = n())
+# 20263 total physiologic B cells across patients
+
+barcodes <- gex_scaled_all@meta.data %>%
+  dplyr::select(patient_id, My_annotation_LC) %>%
+  dplyr::filter(patient_id != "MBL7dup") %>%
+  rownames_to_column("label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  dplyr::filter(My_annotation_LC %in% c("B", "LC-MBL B Cell", "HC-MBL B Cell", "CLL B Cell")) %>%
+  dplyr::mutate(B_like_annotation = case_when(My_annotation_LC == "LC-MBL B Cell" ~ "LC-MBL Cells",
+    My_annotation_LC == "HC-MBL B Cell" ~ "HC-MBL Cells",
+    My_annotation_LC == "CLL B Cell" ~ "CLL Cells",
+    My_annotation_LC == "B" ~ "Physiologic B Cells",
+    .default = My_annotation_LC
+  ))
+
+# max cell count possible c(400000, 32900,21460 ,20263)
+celltype_barcodes <- map2(
+  c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"), c(5000, 5000, 5000, 5000),
+  ~ barcodes %>%
+    dplyr::filter(B_like_annotation == .x) %>%
+    downsample_cells(max_cells = .y)
+) %>%
+  set_names(c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"))
+
+heatmap_input_b_like_scaled <- t(scale(gex_data_scvi[barcodes$label_cellbarcode, DEGs_disgenet_reactome_marker]))
+saveRDS(heatmap_input_b_like_scaled, file.path(RDS_dir, "expression_heatmap_DEGs_batch_corrected_input.RDS"))
+```
+
+
+```{r fig.width=20, fig.height=10}
+hm_downsampled <- build_celltype_heatmap(
+  bcs_per_celltype = celltype_barcodes,
+  data_matrix = heatmap_input_b_like_scaled,
+  modality = "GEX",
+  include_all_metadata = FALSE,
+  show_heatmap_legend = FALSE,
+  show_annotation_legend = FALSE,
+  absolute_capping = c(-3, 3),
+  quantile_capping = FALSE,
+  high_score_colour = "darkred",
+  mid_score_colour = "white",
+  low_score_colour = "midnightblue",
+  heatmap_legend_name = "Expression"
+)
+
+hm_downsampled$`Physiologic B Cells` + hm_downsampled$`LC-MBL Cells` + hm_downsampled$`HC-MBL Cells` + hm_downsampled$`CLL Cells`
+
+hm_downsampled_grob <- grid.grabExpr(draw(hm_downsampled$`Physiologic B Cells` + hm_downsampled$`LC-MBL Cells` + hm_downsampled$`HC-MBL Cells` + hm_downsampled$`CLL Cells`, heatmap_legend_side = "right"))
+
+cowplot::plot_grid(hm_downsampled_grob)
+saveRDS(hm_downsampled_grob, file.path(RDS_dir, "expression_heatmaps_DEGs_batch_corrected.RDS"))
+```
+
+#### Clustered heatmap
+```{r fig.width=20, fig.height=10}
+hm_downsampled_clustered <- build_clustered_heatmap(
+  bcs_cells_df = bind_rows(celltype_barcodes),
+  data_matrix = heatmap_input_b_like_scaled,
+  modality = "GEX",
+  include_all_metadata = TRUE,
+  show_heatmap_legend = TRUE,
+  show_annotation_legend = TRUE,
+  absolute_capping = c(-3, 3),
+  quantile_capping = FALSE,
+  high_score_colour = "darkred",
+  mid_score_colour = "white",
+  low_score_colour = "midnightblue",
+  heatmap_legend_name = "Expression"
+)
+
+saveRDS(hm_downsampled_clustered, file = file.path(RDS_dir, "expression_heatmaps_DEGs_batch_corrected_clustered.RDS"))
+
+hm_downsampled_grob_clustered <- grid.grabExpr(draw(hm_downsampled_clustered[[1]]))
+#cowplot::plot_grid(hm_downsampled_grob_clustered)
+saveRDS(hm_downsampled_grob_clustered, file.path(RDS_dir, "expression_heatmaps_DEGs_batch_corrected_clustered_grob.RDS"))
+# do not try to display, session crashes, rather export
+```
+
+## DEG Scheme
+```{r, fig.width=9, fig.height=4}
+WBC_summary <- metadata_all %>%
+  dplyr::filter(data_type == "GEX") %>%
+  dplyr::select(label, patient_id, `WBC_[cells/nl]`, MBL_subtype) %>%
+  dplyr::mutate(MBL_CLL_subtype = if_else(is.na(MBL_subtype), "CLL", MBL_subtype)) %>%
+  dplyr::select(patient_id, `WBC_[cells/nl]`, MBL_CLL_subtype) %>%
+  group_by(MBL_CLL_subtype) %>%
+  dplyr::summarise(
+    mean_WBC = mean(`WBC_[cells/nl]`),
+    median_WBC = median(`WBC_[cells/nl]`)
+  )
+
+LC_DEGs <- res_table_thres[["B_LC_vs_LC-MBL B Cell_LC"]] %>%
+  dplyr::filter(!is.na(threshold)) %>%
+  pull(var = gene)
+
+HC_DEGs <- res_table_thres[["B_HCCLL_vs_HC-MBL B Cell_HC"]] %>%
+  bind_rows() %>%
+  dplyr::filter(!is.na(threshold)) %>%
+  pull(var = gene)
+
+CLL_DEGs <- res_table_thres[["B_HCCLL_vs_CLL B Cell_CLL"]] %>%
+  bind_rows() %>%
+  dplyr::filter(!is.na(threshold)) %>%
+  pull(var = gene)
+
+barcodes_scheme <- rownames(gex_data_scvi) %>%
+  as_tibble() %>%
+  dplyr::rename("label_cellbarcode" = value) %>%
+  dplyr::filter(label_cellbarcode %in% barcodes$label_cellbarcode) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  dplyr::left_join(tibble(
+    "label_cellbarcode" = colnames(gex_scaled_all),
+    "B_like_annotation" = gex_scaled_all@meta.data$My_annotation_LC
+  )) %>%
+  dplyr::filter(!str_starts(label_cellbarcode, pattern = "MBL7dup")) %>%
+  dplyr::mutate(
+    B_like_annotation = case_when(B_like_annotation == "B" ~ "Physiologic B Cells",
+      B_like_annotation == "LC-MBL B Cell" ~ "LC-MBL Cells",
+      B_like_annotation == "HC-MBL B Cell" ~ "HC-MBL Cells",
+      B_like_annotation == "CLL B Cell" ~ "CLL Cells",
+      .default = B_like_annotation
+    ),
+    B_like_annotation = factor(B_like_annotation, levels = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"))
+  ) %>%
+  arrange(B_like_annotation, label) %>%
+  left_join(tibble(
+    "B_like_annotation" = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"),
+    "Colour" = c("darkred", "#fcbda4", "#FC8D62", "#66C2A5")
+  ))
+
+barcodes2annotation <- barcodes_scheme %>%
+  dplyr::select(label_cellbarcode, B_like_annotation) %>%
+  dplyr::mutate(B_like_annotation = factor(B_like_annotation, levels = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"))) %>%
+  deframe()
+
+# plots schematic now for all CLL related DEGs including IGs
+gex_data_scvi_DEGs <- t(gex_data_scvi[barcodes_scheme$label_cellbarcode, DEGs_disgenet_reactome_marker_IG])
+saveRDS(gex_data_scvi_DEGs, file.path(RDS_dir, "gex_data_scvi_DEGs.RDS"))
+
+deviation_summary_tmp <- scale(gex_data_scvi_DEGs) %>%
+  t() %>%
+  as_tibble(rownames = "label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, into = c("label", NA), sep = "_", remove = FALSE) %>%
+  dplyr::left_join(metadata_all %>%
+    dplyr::filter(data_type == "GEX") %>%
+    dplyr::select(label, patient_id, MBL_subtype)) %>%
+  dplyr::mutate(
+    celltype = barcodes2annotation[label_cellbarcode],
+    MBL_CLL_subtype = if_else(is.na(MBL_subtype), "CLL", MBL_subtype)
+  ) %>%
+  pivot_longer(-c(label, label_cellbarcode, patient_id, MBL_subtype, celltype, MBL_CLL_subtype), names_to = "DEG", values_to = "deviation") %>%
+  dplyr::group_by(DEG, celltype) %>%
+  dplyr::summarise(
+    mean_deviation = mean(deviation),
+    median_deviation = median(deviation)
+  ) %>%
+  dplyr::mutate(direction = case_when(mean_deviation & median_deviation >= 0 ~ "positive",
+    mean_deviation & median_deviation < 0 ~ "negative",
+    .default = "ambiguous"
+  )) %>%
+  ungroup() %>%
+  group_by(celltype, direction) %>%
+  dplyr::summarise(
+    celltype_mean_deviation = mean(mean_deviation),
+    celltype_median_deviation = median(median_deviation)
+  )
+
+saveRDS(deviation_summary_tmp, file = file.path(RDS_dir, "deviation_summary_tmp.RDS"))
+
+deviation_summary <- deviation_summary_tmp %>%
+  group_by(direction) %>%
+  dplyr::filter(celltype != "Physiologic B Cells") %>%
+  # Join with Physiologic B Cells on the same direction
+  left_join(
+    deviation_summary_tmp %>%
+      filter(celltype == "Physiologic B Cells"),
+    by = "direction",
+    suffix = c("_current", "_reference")
+  ) %>%
+  # Calculate ratios
+  dplyr::mutate( # mean_deviation_ratio = celltype_mean_deviation_current / celltype_mean_deviation_reference,
+    mean_deviation_difference = celltype_mean_deviation_reference - celltype_mean_deviation_current,
+    # median_deviation_ratio = celltype_median_deviation_current / celltype_median_deviation_reference,
+    median_deviation_difference = celltype_median_deviation_reference - celltype_median_deviation_current
+  ) %>%
+  # Select relevant columns for output
+  dplyr::select(
+    celltype_current, direction, # mean_deviation_ratio, median_deviation_ratio,
+    mean_deviation_difference, median_deviation_difference
+  )
+
+scheme_input <- deviation_summary %>%
+  dplyr::mutate(MBL_CLL_subtype = case_when(
+    celltype_current == "LC-MBL Cells" ~ "LC",
+    celltype_current == "HC-MBL Cells" ~ "HC",
+    celltype_current == "CLL Cells" ~ "CLL"
+  )) %>%
+  left_join(WBC_summary) %>%
+  bind_rows(tibble(
+    celltype_current = c("Physiologic B Cells", "Physiologic B Cells", "Physiologic B Cells", "Physiologic B Cells"),
+    MBL_CLL_subtype = c(NA, NA, NA, NA),
+    mean_WBC = c(0, 0, 5, 5),
+    median_WBC = c(0, 0, 5, 5),
+    mean_deviation_difference = c(0, 0, 0, 0),
+    median_deviation_difference = c(0, 0, 0, 0),
+    direction = c("positive", "negative", "positive", "negative")
+  ))
+
+rect_data <- tibble(
+  ymin = rep(-0.4, 4),
+  ymax = rep(0.4, 4),
+  xmin = c(0, 5.48, 9.96, 18.35),
+  xmax = c(5.48, 9.96, 18.35, 25)
+)
+
+write_tsv(scheme_input, file = file.path(tsv_dir, "GEX_motif_scheme_input.tsv"))
+```
+
+
+```{r, fig.width=9, fig.height=4}
+scheme <- scheme_input %>%
+  ggplot(aes(x = median_WBC, y = median_deviation_difference, group = direction)) +
+  geom_rect(
+    data = rect_data,
+    mapping = aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    alpha = 0.2,
+    fill = c("darkred", "#fcbda4", "#FC8D62", "#66C2A5"),
+    inherit.aes = FALSE
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "lightgrey") +
+  geom_line(colour = "olivedrab", linewidth = 1.5) +
+  geom_point(colour = "olivedrab", size = 3) +
+  scale_y_continuous(limits = c(-0.4, 0.4), expand = expansion(mult = c(0, 0))) +
+  scale_x_continuous(limits = c(0, 25), expand = expansion(mult = c(0, 0))) +
+  labs(title = "Gene expression", x = "Median WBC/nl", y = "Median difference") +
+  theme_pub() +
+  theme(plot.title = element_text(size = 10))
+scheme
+
+saveRDS(object = scheme, file = file.path(RDS_dir, "GEX_scheme.RDS"))
+## values which increase in plot depict genes which were blue in heatmap at B cell stage and then turned red in disease progresion
+## values which decrease vice versa
+```

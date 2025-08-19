@@ -1,0 +1,1127 @@
+---
+title: "ATAC_Healthy_Clustering"
+author: "Anja_Rathgeber"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# GOAL: The aim of this script is to find find out how clustering looks like if healthy PBMC samples are added to malignant MBL/CLL samples
+
+# Load libraries
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(readxl)
+library(ggrepel)
+library(glue)
+library(ggpubr)
+library(ggplot2)
+library(dplyr)
+library(SeuratDisk)
+library(Seurat)
+library(SeuratObject)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(Cairo)
+library(harmony)
+library(patchwork)
+library(BiocParallel)
+library(circlize)
+library(magick)
+library(ArchR)
+library(readr)
+library(tibble)
+```
+
+```{r Run_parameters}
+set.seed(1)
+addArchRThreads(threads = 1)
+addArchRGenome("hg38")
+```
+
+# Set paths
+
+```{r }
+source("config_paths.R")
+data_dir <- file.path(project_dir_remote, "data")
+library_dir <- file.path(project_dir_remote, "scratch/ATAC")
+results_dir <- file.path(project_dir_remote, "results")
+analysis_dir <- file.path(results_dir, "ArchR_analysis")
+
+ArchR_proj <- file.path("ArchR_Healthy_35_samples")
+ArchR_proj_ndb <- file.path("ArchR_Healthy_35_samples_no_doublets")
+ArchR_proj_healthy_3 <- file.path("ArchR_Healthy_3")
+
+ArchR_dir_healthy_35 <- file.path(analysis_dir, ArchR_proj)
+ArchR_dir_healthy_35_no_doublets <- file.path(analysis_dir, ArchR_proj_ndb)
+ArchR_dir_healthy_3 <- file.path(analysis_dir, ArchR_proj_healthy_3)
+```
+
+# Load data
+
+```{r}
+source(file.path(scripts_dir_remote, "publication_theme.R"))
+```
+
+```{r }
+metadata_malignant <- read_tsv(file = file.path(data_dir, "20240723_Tidy_MBL_CLL_metadata.tsv")) %>% 
+  dplyr::filter(patient_id !="MBL7dup")
+
+metadata_healthy_atac <- read_tsv(file.path(data_dir, "20250812_Healthy_controls_mtscATACseq.tsv"))
+                           #"SRR12476607", "SRR12476609", "SRR12476610" # Mimitou et al (2021) Nat Biotech healthy sample
+                           #"SRR11539033", "SRR11539034"  # Laureau et al healthy sample
+
+metadata <- metadata_malignant %>% 
+  full_join(metadata_healthy)
+
+patient_id2plotting_id <- metadata %>%
+  select(patient_id, plotting_id) %>%
+  unique() %>%
+  deframe
+
+My_annotation <- read_tsv(file.path(analysis_dir, "CLLProj_35_samples_subsetted_My_annotation.tsv")) %>% 
+  dplyr::mutate(My_annotation_LC=case_when(str_starts(label_cellbarcode, "MBL10|MBL11|MBL12|MBL13|MBL14|MBL15")                      & My_annotation =="MBL_B_Cells" ~ "LC_MBL_B_Cells",
+                                           str_starts(label_cellbarcode, pattern="MBL10|MBL11|MBL12|MBL13|MBL14|MBL15", negate=TRUE) & My_annotation =="MBL_B_Cells" ~ "HC_MBL_B_Cells", 
+                                          .default=My_annotation)) %>% 
+  dplyr::select(label_cellbarcode, My_annotation_LC) 
+
+celltype_annotation_healthy <- read_tsv(file.path(results_dir, "20250303_ATAC_celltype_annotation_healthy.tsv"), col_names = TRUE) %>%
+  dplyr::filter(label != "pbmc1")
+```
+
+```{r}
+# setwd(file.path(analysis_dir, "arrow_files_unprocessed"))
+# 
+# # do below only for new healthy controls and then pass all paths to arrowpaths
+# sample_names <- metadata %>%
+#   dplyr::filter(data_type == "ATAC") %>%
+#   dplyr::select(label, pool) %>%
+#   dplyr::arrange(pool) %>%
+#   dplyr::pull(var = label, name = pool)
+# 
+# # Select library_file_paths based on sample_names
+# library_file_paths <- c(file.path(project_dir_remote, "scratch/ATAC", names(sample_names), "fragments.tsv.gz"))
+# 
+# # commented out as arrow files already created from the Subset projects
+# ArrowFiles <- createArrowFiles(
+#   outputNames = sample_names,
+#   inputFiles = library_file_paths,
+#   sampleNames = sample_names,
+#   minTSS = 4,
+#   minFrags = 1000,
+#   addTileMat = TRUE,
+#   addGeneScoreMat = TRUE,
+#   threads = 1,
+#   subThreading = FALSE
+# )
+
+# ArrowFiles <- file.path(analysis_dir, "arrow_files_unprocessed", paste0(sample_names, ".arrow"))
+```
+
+# Doublet Inference for healthy patients 
+In malignant cells already removed in other objects and filtered for them
+
+```{r Doublet_Inference}
+# setwd(file.path(analysis_dir, "arrow_files_unprocessed"))
+# 
+# doubScores <- addDoubletScores(
+#   input = ArrowFiles[c(35,36)],
+#   k = 10, # Refers to how many cells near a "pseudo-doublet" to count.
+#   knnMethod = "UMAP", # Refers to the embedding to use for nearest neighbor search with doublet projection.
+#   LSIMethod = 1, 
+#   threads = 1
+# )
+```
+
+# Create ArchR Project
+
+```{r Make_ArchRProject}
+# setwd(analysis_dir)
+# 
+# CLLProj_Healthy <- ArchRProject(
+#   ArrowFiles = file.path(analysis_dir, "arrow_files_unprocessed", paste0(sample_names, ".arrow")),
+#   outputDirectory = ArchR_proj,
+#   copyArrows = TRUE,
+#   threads = 1
+# )
+# 
+# saveArchRProject(
+#   ArchRProj = CLLProj_Healthy,
+#   outputDirectory = ArchR_proj,
+#   load = FALSE,
+#   overwrite = TRUE)
+# 
+# CLLProj_Healthy <- loadArchRProject(path = file.path(ArchR_dir_healthy_35))
+# 
+# annotation <- tibble("label_cellbarcode"=CLLProj_Healthy$cellNames,
+#                      "label"=CLLProj_Healthy$Sample) %>%
+#   left_join(metadata %>% dplyr::filter(data_type=="ATAC") %>% 
+#               dplyr::select(label, patient_id, technology, sequencing_date)) %>% 
+#   left_join(My_annotation) %>% 
+#   dplyr::mutate(My_annotation_LC=if_else(condition=is.na(My_annotation_LC), true=NA, false=My_annotation_LC))
+```
+
+```{r remove_doublets}
+# setwd(analysis_dir)
+# 
+# CLLProj_Healthy <- filterDoublets(ArchRProj = CLLProj_Healthy)
+# 
+# saveArchRProject(
+#   ArchRProj = CLLProj_Healthy,
+#   outputDirectory = ArchR_proj,
+#   load = FALSE,
+#   overwrite = TRUE
+# )
+```
+
+# Subset to no doublets
+```{r}
+# malignant data set has previously already been filtered for doublets, this way same filtering is kept
+# no_doublet_cells <- CLLProj_Healthy$cellNames[CLLProj_Healthy$cellNames %in% My_annotation$label_cellbarcode | grepl("^(mimitou1|laureau1)", CLLProj_Healthy$cellNames)]
+# 
+# CLLProj_Healthy_no_db <- subsetArchRProject(
+#   ArchRProj = CLLProj_Healthy,
+#   cells = no_doublet_cells,
+#   outputDirectory = ArchR_dir_healthy_35_no_doublets,
+#   dropCells = FALSE)
+
+CLLProj_Healthy_no_db <- loadArchRProject(ArchR_dir_healthy_35_no_doublets)
+```
+
+
+# LSI Dimensionality Reduction
+
+```{r LSI_Dimensionality_Reduction}
+# setwd(analysis_dir)
+# 
+# CLLProj_Healthy_no_db <- addIterativeLSI(
+#   seed = 1,
+#   ArchRProj = CLLProj_Healthy_no_db,
+#   useMatrix = "TileMatrix",
+#   name = "IterativeLSI",
+#   iterations = 2,
+#   clusterParams = list( # See Seurat::FindClusters
+#     resolution = c(0.2),
+#     sampleCells = 10000,
+#     n.start = 10
+#   ),
+#   varFeatures = 25000,
+#   dimsToUse = 1:30, threads = 1
+# )
+# 
+# CLLProj_Healthy_no_db <- addIterativeLSI(
+#   seed = 1,
+#   ArchRProj = CLLProj_Healthy_no_db,
+#   useMatrix = "TileMatrix",
+#   name = "IterativeLSI_0.4",
+#   iterations = 2,
+#   clusterParams = list( # See Seurat::FindClusters
+#     resolution = c(0.4),
+#     sampleCells = 10000,
+#     n.start = 10),
+#   varFeatures = 25000,
+#   dimsToUse = 1:30, threads = 1
+# )
+# 
+# saveArchRProject(ArchRProj = CLLProj_Healthy_no_db,
+#                  outputDirectory = ArchR_proj_ndb,
+#                  load = FALSE,
+#                  overwrite = TRUE)
+```
+
+# Batch correction
+
+```{r}
+# setwd(analysis_dir)
+# 
+# CLLProj_Healthy_no_db <- addCellColData(
+#   ArchRProj = CLLProj_Healthy_no_db,
+#   data = annotation %>%
+#     mutate(sequencing_date=as.character(sequencing_date)) %>%
+#     pull(sequencing_date),
+#   cells = annotation %>% pull(label_cellbarcode),
+#   name = "sequencing_date",
+# )
+
+# CLLProj_Healthy_no_db <- addHarmony(
+#   ArchRProj = CLLProj_Healthy_no_db,
+#   reducedDims = "IterativeLSI",
+#   name = "Harmony_IterativeLSI",
+#   groupBy = c("sequencing_date"), 
+#   verbose = TRUE
+# )
+# 
+# CLLProj_Healthy_no_db <- addHarmony(
+#   ArchRProj = CLLProj_Healthy_no_db,
+#   reducedDims = "IterativeLSI_0.4",
+#   name = "Harmony_IterativeLSI_0.4",
+#   groupBy = c("sequencing_date"), 
+#   verbose = TRUE
+# )
+
+# saveArchRProject(ArchRProj = CLLProj_Healthy_no_db,   
+#                  outputDirectory = ArchR_proj_ndb, 
+#                  load = FALSE, 
+#                  overwrite = TRUE)
+```
+
+# Gene Score Imputation
+
+```{r}
+CLLProj_Healthy_no_db <- addImputeWeights(CLLProj_Healthy_no_db)
+
+markerGenes <- c(
+  "CD34", # Early Progenitor
+  "GATA1", # Erythroid
+  "PAX5", "MS4A1", "EBF1", "MME", # B-Cell Trajectory
+  "CD14", "CEBPB", "MPO", "S100A8", "S100A9", "SPI1", "LYZ",   "IRF8", # Monocytes
+  "IL7R", "CD3D", "CD3E", "CD3G", # General T cell markers
+  "CD4", # CD4+ T cells
+  "CD8A", "CD8B", # CD8+ T cells
+  "FOXP3", "IL2RA", # Tregs
+  "CCR7", "SELL", # Memory/naïve T cells
+  "CD69", "IFNG", "IL2", # T cell Activation markers
+  "TBX21", "GATA3", "RORC", "CTLA4", # T subset-specific markers
+  "CD19", "CD5", "FCER2", "CD79b", # CLL B-Cell Marker
+  "GNLY", "NKG7", "NCAM1", "KLRD1", "PRF1", "KLRK1", "KLRC1", "FCGR3A", "ZBTB16", "IL2RB" # NK cells
+)
+```
+
+# Seurat Clustering
+
+```{r}
+setwd(analysis_dir)
+
+# Try combinations between different LSI resolutions and clustering resolutions
+param_combinations <- tidyr::expand_grid(
+  dimred = c(
+    "IterativeLSI",
+    "IterativeLSI_0.4",
+    "Harmony_IterativeLSI", "Harmony_IterativeLSI_0.4"
+  ),
+  resolution = c(0.2, 0.3, 0.4, 0.6)
+)
+
+for (row in 1:nrow(param_combinations)) {
+  resolution <- param_combinations$resolution[[row]]
+  dimred <- param_combinations$dimred[[row]]
+
+  CLLProj_Healthy_no_db <- addClusters(
+    input = CLLProj_Healthy_no_db,
+    seed = 1,
+    reducedDims = dimred,
+    method = "Seurat",
+    name = glue("Clusters_{resolution}_{dimred}"),
+    resolution = resolution
+  )
+}
+saveArchRProject(
+  ArchRProj = CLLProj_Healthy_no_db,
+  outputDirectory = ArchR_proj_ndb,
+  load = FALSE,
+  overwrite = TRUE
+)
+```
+
+# UMAP
+
+```{r UMAP_Embedding}
+setwd(analysis_dir)
+
+dimred_df <- tidyr::expand_grid(
+  dimred = c(
+    "IterativeLSI",
+    "IterativeLSI_0.4",
+   "Harmony_IterativeLSI",
+   "Harmony_IterativeLSI_0.4"
+  )
+)
+
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  CLLProj_Healthy_no_db <- addUMAP(
+    seed = 1,
+    ArchRProj = CLLProj_Healthy_no_db,
+    reducedDims = dimred,
+    name = glue("UMAP_{dimred}"),
+    nNeighbors = 30,
+    minDist = 0.5,
+    metric = "cosine"
+  )
+}
+
+saveArchRProject(ArchRProj = CLLProj_Healthy_no_db,
+                 outputDirectory = ArchR_proj_ndb,
+                 load = FALSE,
+                 overwrite = TRUE)
+```
+
+# Label transfer
+```{r}
+setwd(analysis_dir)
+
+# Hao_seRNA <- LoadH5Seurat(file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat"))
+# Hao_seRNA
+
+# rna_counts <- CreateAssayObject(Hao_seRNA@assays[["SCT"]]@counts)
+# 
+# NormalizeData(
+#   rna_counts,
+#   normalization.method = "LogNormalize",
+#   scale.factor = 10000,
+#   margin = 1,
+#   verbose = TRUE
+# )
+# 
+# Hao_seRNA@assays[["RNA"]] <- rna_counts
+
+Hao_seRNA <- readRDS(file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/Hao_seRNA.RDS"))
+
+CLLProj_Healthy_no_db <- addGeneIntegrationMatrix(
+  ArchRProj = CLLProj_Healthy_no_db,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "GeneIntegrationMatrix_IterativeLSI",
+  reducedDims = "IterativeLSI",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "predictedCell_Un_Hao_IterativeLSI_,",
+  nameGroup = "predictedGroup_Un_Hao_IterativeLSI",
+  nameScore = "predictedScore_Un_Hao_IterativeLSI",
+  threads = 1,
+  force=TRUE)
+
+saveArchRProject(ArchRProj = CLLProj_Healthy_no_db,
+                 outputDirectory = ArchR_proj_ndb,
+                 load = FALSE,
+                 overwrite = TRUE)
+
+CLLProj_Healthy_no_db <- addGeneIntegrationMatrix(
+  ArchRProj = CLLProj_Healthy_no_db,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "GeneIntegrationMatrix_IterativeLSI_0.4",
+  reducedDims = "IterativeLSI_0.4",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "predictedCell_Un_Hao_IterativeLSI_0.4",
+  nameGroup = "predictedGroup_Un_Hao_IterativeLSI_0.4",
+  nameScore = "predictedScore_Un_Hao_IterativeLSI_0.4",
+  threads = 1,
+  force=TRUE)
+
+saveArchRProject(ArchRProj = CLLProj_Healthy_no_db,
+                 outputDirectory = ArchR_proj_ndb,
+                 load = FALSE,
+                 overwrite = TRUE)
+```
+
+## Visualization
+### Sample annotation
+```{r , fig.width=8, fig.height=8}
+umap_samples <- plotEmbedding(
+  ArchRProj = CLLProj_Healthy_no_db,
+  colorBy = "cellColData",
+  name = "Sample",
+  embedding = "UMAP_IterativeLSI",
+  plotAs = "points",
+    pal = c(my_paired_colours_named, my_unpaired_colours_named, control_colours_named)
+) +
+  labs(x = "UMAP1", y = "UMAP2", colour="Sample") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+ggsave(umap_samples, 
+       filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plots/UMAP_samples.png"), 
+                              units="in",
+                  width = 8,
+                  height = 8)
+umap_samples
+```
+
+### Patient annotation
+```{r}
+annotation <- tibble("label_cellbarcode"=CLLProj_Healthy_no_db$cellNames,
+                     "label"=CLLProj_Healthy_no_db$Sample) %>%
+  left_join(metadata %>% dplyr::filter(data_type=="ATAC") %>% 
+              dplyr::select(label, patient_id, technology, sequencing_date))%>% 
+  left_join(My_annotation) %>% 
+  dplyr::mutate(My_annotation_LC=if_else(condition=is.na(My_annotation_LC), true=NA, false=My_annotation_LC))
+
+
+CLLProj_Healthy_no_db <- addCellColData(
+  ArchRProj = CLLProj_Healthy_no_db,
+  data = annotation %>% pull(patient_id),
+  cells = annotation %>% pull(label_cellbarcode),
+  name = "patient_id"
+)
+```
+
+```{r , fig.width=5, fig.height=5}
+umap_coordinates <- CLLProj_Healthy_no_db@embeddings@listData[["UMAP_IterativeLSI"]]@listData[["df"]] %>% 
+  as_tibble(rownames = "label_cellbarcode")
+
+patient_annotation <- CLLProj_Healthy_no_db@cellColData %>%
+  as_tibble(rownames = "label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, patient_id)
+
+celltype_annotation <- CLLProj_Healthy_no_db@cellColData %>%
+  as_tibble(rownames = "label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, My_annotation_healthy)
+
+umap_patient_annotation <- patient_annotation %>%
+  dplyr::left_join(umap_coordinates) %>% 
+  dplyr::left_join(celltype_annotation)
+
+patient_annotation_umap <- umap_patient_annotation %>%
+  dplyr::filter(patient_id != "MBL7dup") %>%
+  ggplot(aes(x = `IterativeLSI#UMAP_Dimension_1`, y = `IterativeLSI#UMAP_Dimension_2`, colour = patient_id)) +
+  geom_point(size = 0.5, stroke = NA) +
+  coord_equal() +
+  scale_colour_manual(name = "Patients", values = c(my_unpaired_colours_named, control_colours_named)) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    aspect.ratio = 1
+  ) +
+  guides(colour = guide_legend(
+    keywidth = 0.5,
+    keyheight = 0.5,
+    override.aes = list(size = 3)
+  ))
+
+patient_annotation_umap
+
+ggsave(patient_annotation_umap, filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plots/UMAP_patients.png"), 
+                              units="in",
+                  width = 4,
+                  height = 4)
+```
+
+```{r}
+umap_data_no_immune <- umap_patient_annotation %>%  
+  left_join(metadata %>% dplyr::select(patient_id, plotting_id)) %>% 
+  dplyr::filter(patient_id != "CLL6") %>% 
+  dplyr::mutate(plotting_id=factor(plotting_id, levels=c(paste0("P", 1:24),paste0("H", 1:4)))) %>% 
+  dplyr::arrange(plotting_id) %>% 
+  dplyr::mutate(patient_id=factor(patient_id, levels=unique(patient_id))) %>% 
+  dplyr::filter(!(My_annotation_healthy %in% c("T", "other", "Mono", "NK", "DC")))
+
+centroids <- umap_data_no_immune %>% 
+  dplyr::select(`IterativeLSI#UMAP_Dimension_1`, `IterativeLSI#UMAP_Dimension_2`, patient_id) %>% 
+  group_by(patient_id) %>% 
+  dplyr::summarize(across(everything(), mean)) %>% 
+  dplyr::left_join(metadata %>% dplyr::filter(data_type=="ATAC") %>% dplyr::select(patient_id, plotting_id)) %>% unique()
+```
+
+```{r}
+patient_annotation_umap <- umap_patient_annotation %>% 
+  dplyr::filter(patient_id != "MBL7dup") %>%
+  ggplot(aes(x = `IterativeLSI#UMAP_Dimension_1`, y = `IterativeLSI#UMAP_Dimension_2`, colour = patient_id)) +
+  geom_point(size = 0.5, stroke = NA) +
+  geom_text_repel(data=centroids, aes(x=`IterativeLSI#UMAP_Dimension_1`, y=`IterativeLSI#UMAP_Dimension_2`, label=plotting_id),colour="black",  force=300, max.overlaps = 200)+
+  coord_equal() +
+  scale_colour_manual(name = "Patients", values = c(my_unpaired_colours_named, control_colours_named)) +
+  labs(x = "UMAP1", y = "UMAP2", title = "") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "none",
+    aspect.ratio = 1
+  ) +
+  guides(colour = guide_legend(
+    keywidth = 0.5,
+    keyheight = 0.5,
+    override.aes = list(size = 3)
+  ))
+
+```
+
+```{r}
+write_tsv(centroids, file = file.path(ArchR_dir_healthy_35_no_doublets, "tsv_data/20250325_ATAC_patient_annotation_healthy_centroids.tsv"), 
+  col_names = TRUE )
+
+write_tsv(patient_annotation_umap$data %>% 
+  dplyr::rename("UMAP1"=`IterativeLSI#UMAP_Dimension_1`, 
+                "UMAP2"=`IterativeLSI#UMAP_Dimension_2`) %>% 
+    tidyr::separate(label_cellbarcode, into=c("label", "cellbarcode"), sep="#", remove = FALSE) %>% 
+    dplyr::left_join(metadata %>%  dplyr::filter(data_type=="ATAC") %>% 
+                       dplyr::select(label, MBL_CLL_subtype)), 
+  file = file.path(ArchR_dir_healthy_35_no_doublets, "tsv_data/20250325_ATAC_celltype_annotation_healthy.tsv"), 
+  col_names = TRUE )
+```
+
+```{r}
+patient_annotation_split_umap <- umap_patient_annotation %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, MBL_CLL_subtype)) %>% 
+  dplyr::mutate(MBL_CLL_subtype=factor(MBL_CLL_subtype, levels=c("Healthy", "LC", "HC", "CLL"))) %>% 
+  dplyr::filter(patient_id != "MBL7dup") %>%
+  ggplot(aes(x = `IterativeLSI#UMAP_Dimension_1`, y = `IterativeLSI#UMAP_Dimension_2`, colour = patient_id)) +
+  geom_point(size = 0.5, stroke = NA) +
+  coord_equal() +
+  scale_colour_manual(name = "Patients", values = c(my_unpaired_colours_named, control_colours_named)) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    aspect.ratio = 1
+  ) +
+  guides(colour = guide_legend(
+    keywidth = 0.5,
+    keyheight = 0.5,
+    override.aes = list(size = 3)
+  ))+
+  facet_wrap(~MBL_CLL_subtype, nrow = 1)
+
+write_tsv(patient_annotation_split_umap$data, file.path(ArchR_dir_healthy_35_no_doublets, "tsv_data/patient_annotation_split_umap_data.tsv"))
+```
+
+
+### Cluster annotation
+```{r fig.width=5, fig.height=5}
+# Try combinations between different LSI resolutions and clustering resolutions
+param_combinations_umap <- tidyr::expand_grid(
+  dimred = c("IterativeLSI", "IterativeLSI_0.4"),
+  resolution = c(0.2, 0.3, 0.4, 0.6)
+) %>% mutate("umap" = case_when(
+  dimred == "IterativeLSI" ~ "",
+  dimred == "IterativeLSI_0.4" ~ "_LSI_0.4"
+))
+
+create_clusters <- function() {
+  all_plots <- list()
+  for (row in 1:nrow(param_combinations_umap)) {
+    resolution <- param_combinations_umap$resolution[[row]]
+    dimred <- param_combinations_umap$dimred[[row]]
+    umap <- param_combinations_umap$umap[[row]]
+
+    plot <- plotEmbedding(
+      ArchRProj = CLLProj_Healthy_no_db,
+      colorBy = "cellColData",
+      name = glue("Clusters_{resolution}_{dimred}"),
+      embedding = glue("UMAP_{dimred}"),
+      plotAs = "points"
+    ) +
+      labs(x = "UMAP1", y = "UMAP2") +
+      scale_color_discrete(
+        name = "Cluster",
+        type = cluster_colours
+      ) +
+      theme_bw() +
+      theme(
+        strip.text = element_text(face = "bold", size = rel(1.2)),
+        strip.background = element_rect(fill = "white", colour = NA),
+        panel.border = element_blank(),
+        axis.line = element_line(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_text(face = "bold"),
+        panel.grid = element_blank(),
+        legend.text = element_text(size = 10),
+        legend.position = "bottom",
+        legend.direction = "horizontal"
+      ) +
+      guides(colour = guide_legend(override.aes = list(size = rel(2))))
+
+    print(plot)
+    all_plots[[row]] <- plot
+  }
+
+  return(all_plots)
+}
+
+all_clusters <- create_clusters()
+
+umaps_clusters <- cowplot::plot_grid(ggpubr::ggarrange(plotlist = all_clusters, nrow = 2, ncol = 4))
+ggsave(umaps_clusters, filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plots/UMAPs_clusters.png"), 
+                              units="in",
+                  width = 16,
+                  height = 15)
+
+all_clusters[[1]]
+```
+
+
+### Celltype annotation
+```{r}
+CLLProj_Healthy_no_db <- addCellColData(
+  ArchRProj = CLLProj_Healthy_no_db,
+  data = annotation %>% dplyr::filter(!is.na(My_annotation_LC) & label_cellbarcode %in% CLLProj_Healthy_no_db$cellNames) %>% pull(My_annotation_LC),
+  cells = annotation %>% dplyr::filter(!is.na(My_annotation_LC) & label_cellbarcode %in% CLLProj_Healthy_no_db$cellNames) %>%  pull(label_cellbarcode),
+  name = "My_annotation",
+)
+
+umap_celltype <- plotEmbedding(
+  ArchRProj = CLLProj_Healthy_no_db,
+  colorBy = "cellColData",
+  name = "My_annotation",
+  embedding = "UMAP_IterativeLSI",
+  pal = annotation_colours_named,
+  plotAs = "points") +
+  labs(title="Cell type", x = "UMAP1", y = "UMAP2", colour="Cell type") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "right",
+    legend.direction = "vertical"
+  )
+umap_celltype
+
+ggsave(umap_celltype, filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plots/UMAP_celltype.png"), 
+                              units="in",
+                  width = 4,
+                  height = 4)
+```
+
+### Technology annotation
+```{r}
+CLLProj_Healthy_no_db <- addCellColData(
+  ArchRProj = CLLProj_Healthy_no_db,
+  data = annotation %>% pull(technology),
+  cells = annotation %>% pull(label_cellbarcode),
+  name = "technology")
+
+```
+
+```{r}
+umap_technology <- plotEmbedding(
+  ArchRProj = CLLProj_Healthy_no_db,
+  colorBy = "cellColData",
+  name = "technology",
+  embedding = "UMAP_IterativeLSI",
+  plotAs = "points") +
+  labs(title="Technology", x = "UMAP1", y = "UMAP2", colour="Technology") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "right",
+    legend.direction = "vertical"
+  )
+
+umap_technology
+
+ggsave(umap_technology, 
+       filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plots/UMAP_technology.png"), 
+                              units="in",
+                  width = 4,
+                  height = 4)
+```
+
+### Sequencing date annotation
+```{r}
+CLLProj_Healthy_no_db <- addCellColData(
+  ArchRProj = CLLProj_Healthy_no_db,
+  data = annotation %>%
+    mutate(sequencing_date=as.character(sequencing_date)) %>%
+    pull(sequencing_date),
+  cells = annotation %>% pull(label_cellbarcode),
+  name = "sequencing_date",
+)
+
+umap_seqdate <- plotEmbedding(
+  ArchRProj = CLLProj_Healthy_no_db,
+  colorBy = "cellColData",
+  name = "sequencing_date",
+  embedding = "UMAP_IterativeLSI",
+  plotAs = "points") +
+  labs(title="Sequencing date", x = "UMAP1", y = "UMAP2", colour="Sequencing date") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "right",
+    legend.direction = "vertical"
+  )
+umap_seqdate
+
+ggsave(umap_seqdate, filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plots/UMAP_sequencingdate.png"), 
+                              units="in",
+                  width = 4,
+                  height = 4)
+```
+
+### GeneScores
+
+```{r fig.width=8, fig.height=22}
+setwd(analysis_dir)
+
+UMAP_marker_genes <- plotEmbedding(
+    ArchRProj = CLLProj_Healthy_no_db, 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "UMAP_IterativeLSI",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = getImputeWeights(CLLProj_Healthy_no_db),
+    plotAs = "points"
+)
+
+UMAP_marker_genes_figure <- lapply(UMAP_marker_genes, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+#cowplot::plot_grid(plotlist=UMAP_marker_genes_figure, ncol = 4)
+
+cowplot::plot_grid(plotlist=UMAP_marker_genes_figure, ncol = 4 ) %>% 
+  ggsave(filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plots/UMAP_marker_genes_figure_batches.png"), 
+                              units="in",
+                  width = 8,
+                  height = 22)
+
+cowplot::plot_grid(plotlist=UMAP_marker_genes_figure, ncol = 4 ) 
+```
+
+```{r fig.width=5, fig.height=5}
+B_cell_markers <- c( "CCR7", # Naïve B cells
+  "CD27", "CD80", # Memory B cells
+  "CD38", "PRDM1", "XBP1", "SLAMF7", # Plasma cells
+  "CD40", "CD86", "HLA-DRA", "HLA-DRB1" # Activation markers
+  )
+
+UMAP_B_cells <- plotEmbedding(
+    ArchRProj = CLLProj_Healthy_no_db, 
+    colorBy = "GeneScoreMatrix", 
+    name = B_cell_markers, 
+    embedding = "UMAP_IterativeLSI",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = getImputeWeights(CLLProj_Healthy_no_db),
+    plotAs = "points")
+
+UMAP_B_cells
+
+UMAP_qc <- plotEmbedding(
+    ArchRProj = CLLProj_Healthy_no_db,
+    name = "TSSEnrichment",
+    colorBy = "cellColData", 
+    embedding = "UMAP_IterativeLSI",
+    quantCut = c(0.01, 0.95),
+    plotAs = "points")
+
+UMAP_qc
+```
+
+### Predicted Celltype
+
+```{r}
+umap_predicted_celltype<- plotEmbedding(
+  ArchRProj = CLLProj_Healthy_no_db,
+  colorBy = "cellColData",
+  name = "predictedGroup_Un_Hao_IterativeLSI",
+  embedding = "UMAP_IterativeLSI",
+  pal = annotation_colours_named,
+  plotAs = "points") +
+  labs(title="Cell type", x = "UMAP1", y = "UMAP2", colour="Cell type") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "right",
+    legend.direction = "vertical"
+  )
+
+umap_predicted_celltype
+
+ggsave(umap_predicted_celltype, 
+       filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plots/UMAP_predicted_celltype.png"), 
+                              units="in",
+                  width = 4,
+                  height = 4)
+```
+
+### Prediction Score
+```{r}
+umap_predicted_score<- plotEmbedding(
+  ArchRProj = CLLProj_Healthy_no_db,
+  colorBy = "cellColData",
+  name = "predictedScore_Un_Hao_IterativeLSI",
+  embedding = "UMAP_IterativeLSI",
+  plotAs = "points") +
+  labs(title="Prediction score", x = "UMAP1", y = "UMAP2", colour="Prediction score") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "right",
+    legend.direction = "vertical"
+  )
+
+umap_predicted_score
+
+ggsave(umap_predicted_score, filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plots/UMAP_predicted_score.png"), 
+                              units="in",
+                  width = 4,
+                  height = 4)
+```
+
+## Celltype annotation via subclustering
+
+### Subset to only healthy patients
+```{r}
+subset_healthy_pass<-which(CLLProj_Healthy_no_db@cellColData$patient_id %in% c("laureau1", "mimitou1"))
+subset_healthy_cells_pass<-CLLProj_Healthy_no_db$cellNames[subset_healthy_pass]
+
+HealthyProj <- subsetArchRProject(
+  ArchRProj = CLLProj_Healthy_no_db,
+  cells = subset_healthy_cells_pass,
+  outputDirectory = ArchR_dir_healthy_3,
+  dropCells = FALSE, 
+  threads=1)
+```
+
+Subclustering and annotation via script Annotation_Healthy.Rmd
+
+```{r}
+HealthyProj <- loadArchRProject(path = file.path(ArchR_dir_healthy_3))
+```
+
+```{r}
+Healthy_annotation <- tibble("label_cellbarcode"=HealthyProj$cellNames,
+                             "My_annotation_new"=HealthyProj@cellColData$My_annotation_healthy)
+
+My_annotation <- tibble("label_cellbarcode"=CLLProj_Healthy_no_db$cellNames,
+                        "My_annotation_new"=CLLProj_Healthy_no_db@cellColData$My_annotation) %>%
+  tidyr::separate(label_cellbarcode, into=c("label", "cellbarcode"), sep="#", remove = FALSE) %>%
+  dplyr::filter(!((label %in% c("pbmc1", "mimitou1", "laureau1")))) %>%
+  dplyr::select(label_cellbarcode, My_annotation_new)
+
+My_annotation_healthy <- bind_rows(Healthy_annotation, My_annotation) %>%
+  dplyr::rename("My_annotation_healthy"=My_annotation_new)
+
+CLLProj_Healthy_no_db <- addCellColData(
+  ArchRProj = CLLProj_Healthy_no_db,
+  data = My_annotation_healthy %>% pull(My_annotation_healthy),
+  cells = My_annotation_healthy %>% pull(label_cellbarcode),
+  name = "My_annotation_healthy", 
+  force=T)
+```
+
+```{r}
+umap_healthy_celltype<- plotEmbedding(
+  ArchRProj = CLLProj_Healthy_no_db,
+  colorBy = "cellColData",
+  randomize = TRUE,
+  name = "My_annotation_healthy",
+  embedding = "UMAP_IterativeLSI",
+  pal = annotation_colours_named,
+  plotAs = "points") +
+  labs(title="Cell type", x = "UMAP1", y = "UMAP2", colour="Cell type") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "right",
+    legend.direction = "vertical"
+  )
+```
+
+```{r}
+write_tsv(umap_healthy_celltype$data %>% 
+  dplyr::rename("UMAP1"=x, "UMAP2"=y, "My_annotation_healthy"=color) %>% 
+  dplyr::mutate(My_annotation_healthy=str_remove(My_annotation_healthy, pattern = "^[^-]+-"),
+                My_annotation_healthy=factor(My_annotation_healthy)), file = file.path(ArchR_dir_healthy_35_no_doublets, "tsv_data/20250325_ATAC_celltype_annotation_healthy.tsv"), 
+  col_names = TRUE )
+```
+
+```{r}
+# # create shuffled annotation umap
+# # Create a minimal expression matrix (dummy data)
+# expression_matrix <- matrix(data = rnorm(208441), nrow = 1, ncol = 208441)
+# rownames(expression_matrix) <- paste0("Gene1")
+# colnames(expression_matrix) <- rownames(celltype_annotation_healthy)
+# 
+# # Create Seurat object
+# seurat_obj <- CreateSeuratObject(counts = expression_matrix)
+# 
+# # Set the UMAP coordinates as embeddings
+# umap_matrix <- celltype_annotation_healthy %>%
+#   dplyr::select(`UMAP2`,`UMAP1`) %>%
+#   as.matrix()
+# 
+# rownames(umap_matrix) <- rownames(celltype_annotation_healthy)
+# seurat_obj[['umap']] <- CreateDimReducObject(embeddings = umap_matrix,
+#                                              key = "UMAP_",
+#                                              assay = DefaultAssay(seurat_obj))
+# 
+# My_annotation_healthy <- celltype_annotation_healthy %>%
+#   dplyr::mutate(My_annotation_healthy=factor(My_annotation_healthy, levels=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells", "T", "NK", "Mono", "DC", "other"))) %>% 
+#   rownames_to_column("label_cellbarcode") %>% 
+#                             dplyr::select(label_cellbarcode, My_annotation_healthy) %>%
+#                             deframe()
+# 
+# # Merge annotation_tibble with the Seurat object metadata
+# seurat_obj <- AddMetaData(seurat_obj,
+#                           metadata = My_annotation_healthy,
+#                           col.name = "My_annotation_healthy")
+# 
+# metadata <- metadata %>%
+#   dplyr::mutate(MBL_CLL_subtype=case_when(disease =="Healthy" ~ "Healthy",
+#                                                      disease =="CLL" ~ "CLL",
+#                                                      disease =="MBL" & MBL_subtype =="LC" ~ "LC",
+#                                                      disease =="MBL" & MBL_subtype =="HC" ~ "HC",
+#                                                      .default=NA))
+# 
+# MBL_CLL_subtype_annotation <- tibble("label_cellbarcode" = WhichCells(seurat_obj)) %>%
+#   tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+#   dplyr::left_join(metadata %>% dplyr::select(label, MBL_CLL_subtype) %>% unique()) %>%
+#   dplyr::select(label_cellbarcode, MBL_CLL_subtype) %>%
+#   deframe()
+# 
+# seurat_obj <- AddMetaData(object=seurat_obj,
+#                           metadata = MBL_CLL_subtype_annotation,
+#                           col.name = "MBL_CLL_subtype")
+# 
+# 
+# #plot
+# celltype_healthy_shuffled_annotation_umap <- DimPlot(seurat_obj,
+#                                                      reduction = "umap",
+#                                                      group.by = "My_annotation_healthy",
+#                                                      label = F,
+#                                                      shuffle = TRUE,
+#                                                      raster = F,
+#                                                      seed = 1)+
+#   scale_fill_manual(values = my_MBL_CLL_colours_named)+
+#   coord_equal()+
+#   scale_colour_manual(
+#     name = "Cell types",
+#     values = annotation_colours_named,
+#     labels = c("B" = "B cells", 
+#                "DC" = "Dendritic cells",
+#                "Mono" = "Monocytes", 
+#                "other" = "Other cell types",
+#                "CLL_B_Cells" = "CLL cells", 
+#                "HC_MBL_B_Cells" = "HC-MBL cells",
+#                "LC_MBL_B_Cells"="LC-MBL cells",
+#                "NK" = "NK cells",
+#                "T" = "T cells")) +
+# theme_pub() +
+#   theme(
+#     axis.ticks = element_blank(),
+#     axis.text.x = element_blank(),
+#     axis.text.y = element_blank(),
+#     legend.position = "bottom",
+#     legend.direction = "horizontal",
+#     aspect.ratio = 1
+#   ) +
+#   labs(x = "UMAP1", y = "UMAP2", title = "Cell types") +
+#   guides(colour = guide_legend(
+#     keywidth = 0.5,
+#     keyheight = 0.5,
+#     override.aes = list(size = 3)
+#   ))
+# 
+# celltype_healthy_shuffled_annotation_umap
+# 
+# 
+# write_tsv(celltype_healthy_shuffled_annotation_umap[[1]]$data, file.path(ArchR_dir_healthy_35_no_doublets, "tsv_data/celltype_healthy_shuffled_annotation_umap_data.tsv"))
+# 
+# saveRDS(celltype_healthy_shuffled_annotation_umap, file.path(results_dir, "RDS_objects/ATAC_healthy_cell_annotation_umap.RDS"))
+```
+
+
+```{r}
+# # no shuffeling required as separated anyway
+celltype_healthy_shuffled_annotation_umap_split <- as_tibble(seurat_obj@reductions[["umap"]]@cell.embeddings, rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  left_join(tibble(
+    "label_cellbarcode" = colnames(seurat_obj),
+    "My_annotation_healthy" = seurat_obj@meta.data$My_annotation_healthy,
+    "label" = seurat_obj@meta.data$orig.ident,
+    "MBL_CLL_subtype" = seurat_obj@meta.data$MBL_CLL_subtype
+  )) %>%
+    dplyr::mutate(My_annotation_healthy=if_else(My_annotation_healthy=="MBL B Cell" & MBL_CLL_subtype=="LC", "LC_MBL_B_Cells", My_annotation_healthy),
+                  MBL_CLL_subtype=factor(seurat_obj@meta.data$MBL_CLL_subtype, levels=c("Healthy", "LC", "HC", "CLL"))) %>%
+  ggplot(aes(x = UMAP_1, y = UMAP_2, colour = My_annotation_healthy)) +
+  geom_point(size = 0.0001) +
+  scale_colour_manual(
+    name = "Cell types",
+    values = annotation_colours_named,
+    labels = c("B" = "B cells", "DC" = "Dendritic cells",
+               "Mono" = "Monocytes", "other" = "Other cell types",
+               "CLL_B_Cells" = "CLL cells", "HC_MBL_B_Cells" = "HC-MBL cells",
+               "LC_MBL_B_Cells"="LC-MBL cells",
+               "NK" = "Natural killer cells",
+               "T" = "T cells")) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    aspect.ratio = 1
+  ) +
+  guides(colour = guide_legend(
+    keywidth = 0.3,
+    keyheight = 0.3,
+    override.aes = list(size = 2)
+  ))+
+  facet_wrap(~MBL_CLL_subtype, nrow = 1, ncol=4)
+
+celltype_healthy_shuffled_annotation_umap_split
+
+write_tsv(celltype_healthy_shuffled_annotation_umap_split$data, file.path(ArchR_dir_healthy_35_no_doublets, "tsv_data/celltype_healthy_shuffled_annotation_umap_split_data.tsv"))
+
+saveRDS(celltype_healthy_shuffled_annotation_umap_split, file.path(results_dir, "RDS_objects/ATAC_healthy_cell_annotation_umap_split.RDS"))
+```
+
+
+## Visualise marker genes
+```{r}
+# markersGS <- getMarkerFeatures(
+#     ArchRProj = CLLProj_Healthy_no_db, 
+#     useMatrix = "GeneScoreMatrix", 
+#     groupBy = "Clusters_0.2_IterativeLSI",
+#     bias = c("TSSEnrichment", "log10(nFrags)"),
+#     testMethod = "wilcoxon"
+# )
+# 
+# markerList <- getMarkers(markersGS, cutOff = "FDR <= 0.05 & Log2FC >= 1.5")
+# 
+# heatmapGS <- markerHeatmap(
+#   seMarker = markersGS, 
+#   cutOff = "FDR <= 0.05 & Log2FC >= 1.5", 
+#   labelMarkers = markerGenes,
+#   transpose = TRUE
+# )
+```
+
+## Save ArchR project
+```{r}
+setwd(analysis_dir)
+ 
+saveArchRProject(
+  ArchRProj = CLLProj_Healthy_no_db,
+  outputDirectory = ArchR_dir_healthy_35_no_doublets,
+  load = FALSE,
+  overwrite = TRUE)
+```
+

@@ -1,0 +1,898 @@
+---
+title: "Copy number variant analysis full cohort"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL: The aim of this script is to find out if there are copy number changes identifiable from mitochondrial sequencing coverage.
+
+# Load libraries 
+
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(ArchR)
+library(readxl)
+library(ggrepel)
+library(pheatmap)
+library(BuenColors)
+library(tidyverse)
+library(ggpubr)
+library(GenomicRanges)
+library(data.table)
+library(reshape2)
+library(SummarizedExperiment)
+library(Matrix)
+library(matrixStats)
+library(circlize)
+library(gplots)
+library(glue)
+library(Seurat)
+library(diffloop)
+
+# keep option below so GRanges are built correctly on coordinates
+options(scipen = 999)
+"%ni%" <- Negate("%in%")
+```
+
+# Set paths
+
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+library_path <- file.path(data_dir, "ATAC")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "CNV_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+
+mtDNA_mutation_analysis_RDS_dir <- file.path(result_dir, "mtDNA_mutation_analysis/RDS_Objects")
+
+ArchR_dir <- "ArchR_35_samples/ArchR_all_samples/"
+ArchR_project <- file.path(project_dir_ext, ArchR_dir)
+ArchR_dir1 <- "ArchR_Subset1"
+ArchR_dir2 <- "ArchR_Subset2"
+ArchR_dir3 <- "ArchR_Subset3"
+ArchR_dir4 <- "ArchR_Subset4"
+
+ArchR_dir_Annotation <- file.path(project_dir_ext, "ArchR_Projects_4_Annotation")
+result_dir_subset1 <- file.path(ArchR_dir_Annotation, ArchR_dir1)
+result_dir_subset2 <- file.path(ArchR_dir_Annotation, ArchR_dir2)
+result_dir_subset3 <- file.path(ArchR_dir_Annotation, ArchR_dir3)
+result_dir_subset4 <- file.path(ArchR_dir_Annotation, ArchR_dir4)
+```
+
+# Load data
+
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r Load_input_data}
+sizes <- read.table(file.path(data_dir, "CNV_computation_files/chrom_hg38.sizes"), stringsAsFactors = FALSE)
+regions_pbmc10k <- readRDS(file.path(data_dir, "CNV_computation_files/vector_of_regions_hg38.rds"))
+bl <- diffloop::bedToGRanges(file.path(data_dir, "CNV_computation_files/hg38.full.blacklist.bed"))
+
+CLLProj_patients <- readRDS(file.path(result_dir, "CLLProj_patients.RDS"))
+CLLProj_MBL_patients <- readRDS(file.path(result_dir, "CLLProj_MBL_patients.rds"))
+metadata <- read_tsv(file.path(data_dir, "20240530_Tidy_MBL_CLL_metadata_atac.tsv"))
+label2pool <- metadata %>%
+  dplyr::select(label, pool) %>%
+  deframe()
+
+MBL.clonotypes_malignant <- readRDS(file.path(mtDNA_mutation_analysis_RDS_dir, "MBL.clonotypes_malignant.RDS"))
+CLL.clonotypes_malignant <- readRDS(file.path(mtDNA_mutation_analysis_RDS_dir, "CLL.clonotypes_malignant.RDS"))
+clonotypes_MBL_malignant <- readRDS(file.path(mtDNA_mutation_analysis_RDS_dir, "clonotypes_MBL_malignant.RDS"))
+
+# Generate common list for progressive and non-progressive samples
+CLLProj <- loadArchRProject(path = ArchR_project)
+
+# CLLProj_MBL_patients<-list()
+# for (patient in paste0("MBL", c("1", "2", "3", "4",  "6", "7", "8", "9"))) {
+#   idxSampleIdv <- BiocGenerics::which(CLLProj$Sample == patient)
+#   cellsSampleIdv <- CLLProj$cellNames[idxSampleIdv]
+#
+#   CLLProj_oi <- subsetArchRProject(
+#   ArchRProj = CLLProj,
+#   cells = cellsSampleIdv,
+#   outputDirectory = paste0(project_dir, "/results/ArchR_", patient),
+#   dropCells = TRUE)
+#
+#   CLLProj_MBL_patients[[patient]] <- CLLProj_oi
+# }
+# saveRDS(CLLProj_MBL_patients, paste0(project_dir, "/results/CLLProj_MBL_patients.rds"))
+
+
+# CLLProj_LC_MBL_patients<-list()
+# for (patient in paste0("MBL", c("7dup", c(10:15))) ){
+#   idxSampleIdv <- BiocGenerics::which(CLLProj$Sample == patient)
+#   cellsSampleIdv <- CLLProj$cellNames[idxSampleIdv]
+#
+#   CLLProj_oi <- subsetArchRProject(
+#   ArchRProj = CLLProj,
+#   cells = cellsSampleIdv,
+#   outputDirectory = paste0(project_dir, "/results/ArchR_", patient),
+#   dropCells = TRUE)
+#
+#   CLLProj_LC_MBL_patients[[patient]] <- CLLProj_oi
+# }
+
+# saveRDS(CLLProj_LC_MBL_patients, paste0(project_dir, "/results/CLLProj_LC_MBL_patients.rds"))
+CLLProj_LC_MBL_patients <- readRDS(paste0(project_dir, "/results/CLLProj_LC_MBL_patients.rds"))
+
+# reorder patients in list
+for (patient in paste0("MBL", c(seq(from = 1, to = 4), seq(from = 6, to = 9)))) {
+  CLLProj_patients[[patient]] <- CLLProj_MBL_patients[[patient]]
+}
+
+for (patient in paste0("MBL", c(seq(from = 10, to = 15), "7dup"))) {
+  CLLProj_patients[[patient]] <- CLLProj_LC_MBL_patients[[patient]]
+}
+
+celltype_annotation_umap <- readRDS(file.path(project_dir, "RDS_Objects/Annotation_UMAP.RDS"))
+```
+
+```{r 00_cnv_matrix_make.R}
+# Function to create a GRanges object based on resolution and step size of 2Mio bp
+format_one <- function(chr, size, res = 10000000, by_res = 2000000) {
+  ranges_df <- data.frame(
+    chr = chr,
+    start = seq(from = 0, to = size, by = by_res),
+    end = seq(from = 0, to = size, by = by_res) + res
+  ) %>%
+    dplyr::mutate(idx = 1:n())
+
+  # Make sure that at least half of the range is available based on max size
+  ranges_df[size - ranges_df$end > by_res / 2 * (-1), ]
+}
+
+# Setup cnv blocks
+lapply(1:dim(sizes)[1], function(x) {
+  format_one(sizes[x, 1], sizes[x, 2])
+}) %>%
+  rbindlist() %>%
+  data.frame() -> gr_df
+region_gr <- makeGRangesFromDataFrame(gr_df)
+labels <- paste(gr_df$chr, as.character(gr_df$start), as.character(gr_df$end), as.character(gr_df$idx), sep = "_")
+
+
+# Import fragments
+make_basic_mat <- function(frag_file, barcodes) {
+  # Import and subset frags
+  frags <- fread(frag_file)
+  frags <- frags[V4 %in% barcodes]
+  frag_gr <- makeGRangesFromDataFrame(data.frame(frags) %>%
+    setnames(c("chr", "start", "end", "bc", "pcr")), keep.extra.columns = TRUE)
+
+  # Remove blacklist
+  ov_bl <- findOverlaps(frag_gr, bl)
+  boo <- (1:length(frag_gr) %ni% queryHits(ov_bl)) & width(frag_gr) < 2000
+  print(sum(!boo))
+  frag_gr <- frag_gr[boo]
+
+  # Find overlaps
+  ov <- findOverlaps(frag_gr, region_gr)
+  barcodes <- mcols(frag_gr)[["bc"]]
+  sum_df <- data.frame(
+    barcode = barcodes[queryHits(ov)],
+    region_idx = subjectHits(ov)
+  ) %>%
+    dplyr::group_by(barcode, region_idx) %>%
+    dplyr::summarize(count = n())
+  square <- reshape2::dcast(sum_df, region_idx ~ barcode, value.var = "count", fill = 0)
+  row_labels <- labels[square[, 1]]
+  square <- square[, -1]
+  rownames(square) <- row_labels
+
+  # Define consistent set of regions
+  square <- square[regions_pbmc10k, ]
+  square
+}
+```
+
+# Analysis
+
+## Make T cell reference 
+
+```{r Get_barcodes_of_all_Tcells}
+# From HC-MBLs and CLLs
+T_label_barcodes <- CLLProj_patients[c(paste0("CLL", seq(1:10)), paste0("MBL", seq(1:4)), paste0("MBL", seq(from = 6, to = 9)))] %>%
+  map(~ .@cellColData %>%
+    as_tibble(rownames = "label_cellbarcode") %>%
+    dplyr::filter(My_annotation == "T") %>%
+    dplyr::select(label_cellbarcode)) %>%
+  bind_rows()
+
+# From HC-MBLs and LC-MBLs
+T_label_barcodes_LC <- CLLProj_patients[c(paste0("CLL", seq(1:10)), paste0("MBL", seq(1:4)), paste0("MBL", seq(from = 6, to = 10)))] %>%
+  map(~ .@cellColData %>%
+    as_tibble(rownames = "label_cellbarcode") %>%
+    dplyr::filter(My_annotation == "T") %>%
+    dplyr::select(label_cellbarcode)) %>%
+  bind_rows()
+
+# T_barcodes <- CLLProj_patients %>%
+# map(~ .@cellColData %>%
+#                            as_tibble(rownames = "label_cellbarcode") %>%
+#                            dplyr::filter(My_annotation =="T") %>%
+#                            dplyr::select(label_cellbarcode) %>%
+#                            tidyr::separate(label_cellbarcode, c(NA, "cellbarcode"), sep="#") %>%
+#                            select(cellbarcode)) %>%
+#   bind_rows()
+
+# Which samples include T cells, to limit unnecessary computation.
+T_samples <- T_label_barcodes %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#") %>%
+  dplyr::select(label) %>%
+  table() %>%
+  names()
+
+T_samples_LC <- T_label_barcodes_LC %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#") %>%
+  dplyr::select(label) %>%
+  table() %>%
+  names()
+```
+
+```{r Filter_fragement_files}
+# For HC samples
+samples_oi <- metadata %>%
+  dplyr::filter(label %in% T_samples) %>%
+  dplyr::select(patient_id, pool) %>%
+  pull(var = patient_id, name = pool)
+
+library_file_paths <- purrr::map(names(samples_oi), ~ paste0(library_path, .x, "/fragments.tsv.gz")) %>%
+  unlist()
+
+all_fragment_files <- library_file_paths %>%
+  map(~ fread(., col.names = c("V1", "V2", "V3", "V4", "V5"))) %>%
+  set_names(metadata %>%
+    dplyr::filter(label %in% T_samples) %>%
+    dplyr::pull(label))
+
+all_fragment_file <- all_fragment_files %>%
+  map2(names(.), ~ dplyr::mutate(.x, "label" = .y)) %>%
+  bind_rows()
+
+all_T_fragment_file <- all_fragment_file %>%
+  as_tibble() %>%
+  tidyr::unite("label_barcode", c(label, V4), sep = "#", remove = FALSE) %>%
+  dplyr::filter(label_barcode %in% T_label_barcodes$label_cellbarcode)
+
+# For all incl LC samples
+samples_oi_LC <- metadata %>%
+  dplyr::filter(label %in% T_samples_LC) %>%
+  dplyr::select(patient_id, pool) %>%
+  pull(var = patient_id, name = pool)
+
+library_file_paths_LC <- purrr::map(names(samples_oi_LC), ~ paste0(library_path, .x, "/fragments.tsv.gz")) %>%
+  unlist()
+
+all_fragment_files_LC <- library_file_paths_LC %>%
+  map(~ fread(., col.names = c("V1", "V2", "V3", "V4", "V5"))) %>%
+  set_names(metadata %>%
+    dplyr::filter(label %in% T_samples_LC) %>%
+    dplyr::pull(label))
+
+all_fragment_file_LC <- all_fragment_files_LC %>%
+  map2(names(.), ~ dplyr::mutate(.x, "label" = .y)) %>%
+  bind_rows()
+
+all_T_fragment_file_LC <- all_fragment_file_LC %>%
+  as_tibble() %>%
+  tidyr::unite("label_barcode", c(label, V4), sep = "#", remove = FALSE) %>%
+  dplyr::filter(label_barcode %in% T_label_barcodes_LC$label_cellbarcode)
+```
+
+```{r Adapted_function_as_different_format}
+make_basic_mat_myself <- function(frag_file, barcodes) {
+  # Import and subset frags
+  frags <- frag_file
+  frags <- frags %>%
+    dplyr::select(-c(label_barcode, label))
+  frag_gr <- makeGRangesFromDataFrame(data.frame(frags) %>%
+    setnames(c("chr", "start", "end", "bc", "pcr")), keep.extra.columns = TRUE)
+
+  # Remove blacklist
+  ov_bl <- findOverlaps(frag_gr, bl)
+  boo <- (1:length(frag_gr) %ni% queryHits(ov_bl)) & width(frag_gr) < 2000
+  print(sum(!boo))
+  frag_gr <- frag_gr[boo]
+
+  # Find overlaps
+  ov <- findOverlaps(frag_gr, region_gr)
+  barcodes <- mcols(frag_gr)[["bc"]]
+  sum_df <- data.frame(
+    barcode = barcodes[queryHits(ov)],
+    region_idx = subjectHits(ov)
+  ) %>%
+    dplyr::group_by(barcode, region_idx) %>%
+    dplyr::summarize(count = n())
+  square <- reshape2::dcast(sum_df, region_idx ~ barcode, value.var = "count", fill = 0)
+  row_labels <- labels[square[, 1]]
+  square <- square[, -1]
+  rownames(square) <- row_labels
+
+  # Define consistent set of regions
+  square <- square[regions_pbmc10k, ]
+  square
+}
+```
+
+```{r 01_make_mats_from_data_baseline}
+# Create baseline CNV matrix from public, healthy data
+# get barcodes
+# pbmc_ATACv2_nextgem_Chromium_Controller_barcodes <- data.frame(fread(paste0(project_dir, "/data/reference_genomes/10X_10k_human_pbmc_atac_v2_healthy/10k_pbmc_ATACv2_nextgem_Chromium_Controller_singlecell.csv"))) %>%
+#   filter(is__cell_barcode ==1) %>%
+#   pull(barcode)
+
+# get fragments by barcode public reference
+# mat <- make_basic_mat(paste0(project_dir, "/data/reference_genomes/10X_10k_human_pbmc_atac_v2_healthy/10k_pbmc_ATACv2_nextgem_Chromium_Controller_fragments.tsv.gz"),
+#                       pbmc_ATACv2_nextgem_Chromium_Controller_barcodes
+# )
+
+# saveRDS(mat, file = paste0(project_dir, "/data/reference_genomes/10X_10k_human_pbmc_atac_v2_healthy/pbmc_ATACv2_nextgem_Chromium_Controller_cnv.rds"))
+
+# create own t cell reference
+mat <- make_basic_mat_myself(
+  all_T_fragment_file,
+  all_T_fragment_file$label_barcode
+)
+
+# create own t cell reference for HC incl. LC
+mat_LC <- make_basic_mat_myself(
+  all_T_fragment_file_LC,
+  all_T_fragment_file_LC$label_barcode
+)
+
+saveRDS(mat, file = file.path(data_dir, "reference_genomes/T_cells_MBL_CLL_cohort_cnv.rds"))
+saveRDS(mat_LC, file = file.path(data_dir, "reference_genomes/T_cells_MBL_CLL_LC_MBL_cohort_cnv.rds"))
+```
+
+## Calculate Matrices for samples
+```{r 01_make_mats_from_data_samples}
+metadata <- metadata %>%
+  # filter(!patient_id %in% c("CLL6")) %>%
+  dplyr::mutate(patient_id = factor(patient_id, levels = c(paste0("CLL", 1:10), paste0("MBL", c(1:4, 6:9))))) %>%
+  dplyr::arrange(patient_id, desc(disease))
+
+MBL_CLL_barcodes <- list()
+
+for (patient in unique(metadata$patient_id)) {
+  print(patient)
+  barcodes_MBL <- c()
+  barcodes_CLL <- c()
+  if (str_starts(patient, "CLL")) {
+    barcodes_MBL <- CLLProj_patients[[patient]]$cellNames[which(str_ends(CLLProj_patients[[patient]]$Sample, "\\.1"))] %>%
+      str_split_fixed(pattern = "#", n = 2) %>%
+      .[, 2]
+    label_MBL <- paste0(patient, ".1")
+    MBL_CLL_barcodes[[label_MBL]] <- barcodes_MBL
+
+    barcodes_CLL <- CLLProj_patients[[patient]]$cellNames[which(str_ends(CLLProj_patients[[patient]]$Sample, "\\.2"))] %>%
+      str_split_fixed(pattern = "#", n = 2) %>%
+      .[, 2]
+    label_CLL <- paste0(patient, ".2")
+    MBL_CLL_barcodes[[label_CLL]] <- barcodes_CLL
+  } else {
+    barcodes_MBL <- CLLProj_patients[[patient]]$cellNames %>%
+      str_split_fixed(pattern = "#", n = 2) %>%
+      .[, 2]
+    MBL_CLL_barcodes[[patient]] <- barcodes_MBL
+  }
+}
+
+# Get list of all fragment files
+fragemnt_files <- map(metadata$pool, ~ paste0(library_path, ., "/fragments.tsv.gz")) %>%
+  set_names(metadata$label)
+
+# create matrices of CNVs for each sample except for MBL4
+pmap(
+  list(
+    names(fragemnt_files[1:28]),
+    names(fragemnt_files[1:28]),
+    fragemnt_files[1:28],
+    MBL_CLL_barcodes[1:28]
+  ),
+  ~ make_basic_mat(..3, ..4) %>%
+    saveRDS(paste0(project_dir, "/results/ArchR_", ..1, "/RDS_objects/", ..2, "_Tref_cnv.rds"))
+)
+
+# Process MBL_CLL data
+# MBL_CLL_barcodes <- CLLProj_patients$CLL10$cellNames[which(CLLProj_patients$CLL10$Sample == 'CLL10.1' )] %>% str_split_fixed(pattern = "#", n=2) %>% .[,2]
+
+# mat <- make_basic_mat(paste0(project_dir, "/data/ATAC/Pool128_3/fragments.tsv.gz"),
+#                       MBL_CLL_barcodes
+# )
+# saveRDS(mat, file = paste0(ArchR_project, "RDS_objects/CLL10.1_cnv.rds"))
+```
+
+
+```{r}
+# For LC MBL samples with LC reference
+MBL_CLL_barcodes_LC <- list()
+
+for (patient in c("MBL10", "MBL7dup", paste0("MBL", seq(from = 11, to = 15)))) {
+  print(patient)
+  barcodes_MBL <- c()
+  barcodes_CLL <- c()
+  if (str_starts(patient, "CLL")) {
+    barcodes_MBL <- CLLProj_patients[[patient]]$cellNames[which(str_ends(CLLProj_patients[[patient]]$Sample, "\\.1"))] %>%
+      str_split_fixed(pattern = "#", n = 2) %>%
+      .[, 2]
+    label_MBL <- paste0(patient, ".1")
+    MBL_CLL_barcodes[[label_MBL]] <- barcodes_MBL
+
+    barcodes_CLL <- CLLProj_patients[[patient]]$cellNames[which(str_ends(CLLProj_patients[[patient]]$Sample, "\\.2"))] %>%
+      str_split_fixed(pattern = "#", n = 2) %>%
+      .[, 2]
+    label_CLL <- paste0(patient, ".2")
+    MBL_CLL_barcodes[[label_CLL]] <- barcodes_CLL
+  } else {
+    barcodes_MBL <- CLLProj_patients[[patient]]$cellNames %>%
+      str_split_fixed(pattern = "#", n = 2) %>%
+      .[, 2]
+    MBL_CLL_barcodes[[patient]] <- barcodes_MBL
+  }
+}
+
+# create matrices of CNVs for each sample except for MBL4
+pmap(
+  list(
+    names(fragemnt_files[29:35]),
+    names(fragemnt_files[29:35]),
+    fragemnt_files[29:35],
+    MBL_CLL_barcodes[c(1, 7, 2, 3, 4, 5, 6)]
+  ),
+  ~ make_basic_mat(..3, ..4) %>%
+    saveRDS(paste0(project_dir, "/results/ArchR_", ..1, "/RDS_objects/", ..2, "_LC_Tref_cnv.rds"))
+)
+```
+
+## Calculate Deviation scores
+
+```{r 02_cnv_analysis.R}
+# Compute baseline features per bin
+# healthy pbmc reference
+# base_pbmcs <- readRDS(paste0(project_dir, "/data/reference_genomes/10X_10k_human_pbmc_atac_v2_healthy/pbmc_ATACv2_nextgem_Chromium_Controller_cnv.rds"))
+
+# patient specific T cell reference
+base_pbmcs <- readRDS(file.path(project_dir, "data/reference_genomes/T_cells_MBL_CLL_cohort_cnv.rds"))
+base_pbmcs[is.na(base_pbmcs)] <- 0
+cpm_norm <- (t(t(base_pbmcs) / colSums(base_pbmcs)) * 100000)
+row_means <- rowMeans(cpm_norm)
+row_std <- sqrt(rowVars(cpm_norm))
+```
+
+```{r Zscore_functions}
+# Functions to make Z score w.r.t. baseline from 10x
+makeDevScoreMat <- function(mat, mean_ref_ct_tile, std_ref_ct_tile) {
+  # normalise counts per tile and cell to all counts per cell
+  mat_cpm_norm <- (t(t(mat) / colSums(mat)) * 100000)
+  # zscore calculation according to (x-µ/sigma), where x=raw score, µ=population mean and sigma=population standard deviation
+  devscore_mat <- (mat_cpm_norm - mean_ref_ct_tile) / std_ref_ct_tile
+}
+```
+
+```{r Calculate_Devcores}
+devscores_all <- list()
+
+for (s in metadata$label) {
+  print(s)
+  patient <- metadata %>%
+    mutate(label = as.character(label)) %>%
+    filter(label == s) %>%
+    pull(patient_id) %>%
+    as.character()
+
+  mat <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_Tref_cnv.rds"))
+  bcs <- c()
+  cluster.separators <- c()
+
+  for (cluster in c("B", "MBL_B_Cells", "CLL_B_Cells", "T", "Mono", "NK", "DC", "other")) {
+    boo <- CLLProj_patients[[patient]]$cellNames[which(CLLProj_patients[[patient]]$My_annotation == cluster & CLLProj_patients[[patient]]$cellNames %>%
+      str_split_fixed(pattern = "#", n = 2) %>%
+      .[, 1] == s)]
+    # boo = CLLProj_patients$CLL10$cellNames[which(CLLProj_patients$CLL10$My_annotation == cluster & CLLProj_patients$CLL10$cellNames %>% str_split_fixed(pattern = '#', n=2) %>% .[,1] =="CLL10.1")]
+    boo <- str_split_fixed(boo, pattern = "#", n = 2)[, 2]
+    boo <- boo[which(boo %in% colnames(mat))]
+    names(boo) <- rep(cluster, length(boo))
+
+    saveRDS(boo, paste0(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", cluster, "_", s, "_boo.rds")))
+
+    bcs <- c(bcs, boo)
+    cluster.separators <- c(cluster.separators, length(bcs))
+  }
+
+  saveRDS(bcs, paste0(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_bcs.rds")))
+
+  mat[is.na(mat)] <- 0
+  mat <- mat[, bcs]
+
+  # Compute Deviation scores
+  devscore <- makeDevScoreMat(mat, row_means, row_std)
+  devscore <- devscore[-which(grepl("NA", rownames(devscore))), ]
+  score_base <- makeDevScoreMat(base_pbmcs, row_means, row_std) # ?
+  region_meta <- str_split_fixed(rownames(devscore), "_", 4)
+
+  keep <- TRUE
+  ordering <- factor(region_meta[keep, 1], levels = unique(region_meta[keep, 1]))
+
+  chromosome.separators <- c()
+  for (i in seq(1, length(unique(ordering)))) {
+    chromosome.separators <- c(chromosome.separators, sum(table(ordering)[1:i]))
+  }
+
+  devscore <- t(devscore)
+  devscore <- devscore[bcs, ]
+
+  devscores_all[[s]] <- devscore
+}
+
+saveRDS(devscores_all, file.path(RDS_dir, "devscores_all.RDS"))
+```
+
+```{r}
+# devscores for LC MBL with LC reference
+devscores_all_LC <- list()
+
+for (s in paste0("MBL", c("7dup", c(10:15)))) {
+  print(s)
+  patient <- metadata %>%
+    mutate(label = as.character(label)) %>%
+    filter(label == s) %>%
+    pull(patient_id) %>%
+    as.character()
+
+  mat <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_LC_Tref_cnv.rds"))
+  bcs <- c()
+  cluster.separators <- c()
+
+  for (cluster in c("B", "MBL_B_Cells", "CLL_B_Cells", "T", "Mono", "NK", "DC", "other")) {
+    boo <- CLLProj_patients[[patient]]$cellNames[which(CLLProj_patients[[patient]]$My_annotation == cluster & CLLProj_patients[[patient]]$cellNames %>%
+      str_split_fixed(pattern = "#", n = 2) %>%
+      .[, 1] == s)]
+
+    boo <- str_split_fixed(boo, pattern = "#", n = 2)[, 2]
+    boo <- boo[which(boo %in% colnames(mat))]
+    names(boo) <- rep(cluster, length(boo))
+
+    saveRDS(boo, paste0(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", cluster, "_", s, "_LC_boo.rds")))
+
+    bcs <- c(bcs, boo)
+    cluster.separators <- c(cluster.separators, length(bcs))
+  }
+
+  saveRDS(bcs, paste0(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_LC_bcs.rds")))
+
+  mat[is.na(mat)] <- 0
+  mat <- mat[, bcs]
+
+  # Compute Deviation scores
+  devscore <- makeDevScoreMat(mat, row_means, row_std)
+  devscore <- devscore[-which(grepl("NA", rownames(devscore))), ]
+  score_base <- makeDevScoreMat(base_pbmcs, row_means, row_std)
+  region_meta <- str_split_fixed(rownames(devscore), "_", 4)
+
+  keep <- TRUE
+  ordering <- factor(region_meta[keep, 1], levels = unique(region_meta[keep, 1]))
+
+  chromosome.separators <- c()
+  for (i in seq(1, length(unique(ordering)))) {
+    chromosome.separators <- c(chromosome.separators, sum(table(ordering)[1:i]))
+  }
+
+  devscore <- t(devscore)
+  devscore <- devscore[bcs, ]
+
+  devscores_all_LC[[s]] <- devscore
+}
+
+saveRDS(devscores_all_LC, file.path(RDS_dir, "devscores_all_LC.RDS"))
+```
+
+## CNV Heatmap
+
+```{r Calculate_Devcores_downsampled}
+devscores_downsampled <- list()
+
+for (s in metadata$label) {
+  # set.seed(123)
+  print(s)
+  patient <- metadata %>%
+    mutate(label = as.character(label)) %>%
+    filter(label == s) %>%
+    pull(patient_id) %>%
+    as.character()
+  mat <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_Tref_cnv.rds"))
+  # mat = readRDS(paste0(ArchR_project, "RDS_objects/CLL10.1_cnv.rds"))
+  bcs <- c()
+
+  cluster.separators <- c()
+  for (cluster in c("B", "MBL_B_Cells", "CLL_B_Cells", "T", "Mono", "NK", "DC", "other")) {
+    boo <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", cluster, "_", s, "_boo.rds"))
+
+    # downsample to 500 cells
+    if (length(boo) > 500) {
+      boo <- boo[sample(length(boo), 500)]
+    }
+
+    names(boo) <- rep(cluster, length(boo))
+    bcs <- c(bcs, boo)
+    cluster.separators <- c(cluster.separators, length(bcs))
+  }
+  # saveRDS(bcs, paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_bcs.rds"))
+  # saveRDS(cluster.separators, paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_cluster.separators.rds"))
+
+  mat[is.na(mat)] <- 0
+  mat <- mat[, bcs]
+
+  # Compute Zscores
+  devscore <- makeDevScoreMat(mat, row_means, row_std)
+  devscore <- devscore[-which(grepl("NA", rownames(devscore))), ]
+  region_meta <- str_split_fixed(rownames(devscore), "_", 4)
+
+  keep <- TRUE
+  ordering <- factor(region_meta[keep, 1], levels = unique(region_meta[keep, 1]))
+
+  chromosome.separators <- c()
+  for (i in seq(1, length(unique(ordering)))) {
+    chromosome.separators <- c(chromosome.separators, sum(table(ordering)[1:i]))
+  }
+  saveRDS(chromosome.separators, paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_chromosome.separators.rds"))
+
+
+  devscore <- t(devscore)
+  devscore <- devscore[bcs, ]
+
+  devscores_downsampled[[s]] <- devscore
+}
+# saveRDS(devscores_downsampled, file.path(RDS_dir,"devscores_downsampled.RDS"))
+```
+
+
+```{r}
+# devscores downsampled LC reference
+devscores_downsampled_LC <- list()
+
+for (s in paste0("MBL", c("7dup", c(10:15)))) {
+  # for (s in paste0("MBL", c(15:15))) {
+
+  set.seed(123)
+  print(s)
+  patient <- metadata %>%
+    mutate(label = as.character(label)) %>%
+    filter(label == s) %>%
+    pull(patient_id) %>%
+    as.character()
+  mat <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_LC_Tref_cnv.rds"))
+  bcs <- c()
+
+  cluster.separators <- c()
+  for (cluster in c("B", "MBL_B_Cells", "CLL_B_Cells", "T", "Mono", "NK", "DC", "other")) {
+    boo <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", cluster, "_", s, "_LC_boo.rds"))
+
+    # downsample to 500 cells
+    if (length(boo) > 500) {
+      boo <- boo[sample(length(boo), 500)]
+    }
+
+    names(boo) <- rep(cluster, length(boo))
+    bcs <- c(bcs, boo)
+    cluster.separators <- c(cluster.separators, length(bcs))
+  }
+  # saveRDS(bcs, paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_LC_bcs.rds"))
+  # saveRDS(cluster.separators, paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_LC_cluster.separators.rds"))
+
+  mat[is.na(mat)] <- 0
+  mat <- mat[, bcs]
+
+  # Compute Zscores
+  devscore <- makeDevScoreMat(mat, row_means, row_std)
+  devscore <- devscore[-which(grepl("NA", rownames(devscore))), ]
+  region_meta <- str_split_fixed(rownames(devscore), "_", 4)
+
+  keep <- TRUE
+  ordering <- factor(region_meta[keep, 1], levels = unique(region_meta[keep, 1]))
+
+  chromosome.separators <- c()
+  for (i in seq(1, length(unique(ordering)))) {
+    chromosome.separators <- c(chromosome.separators, sum(table(ordering)[1:i]))
+  }
+  # saveRDS(chromosome.separators, paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_LC_chromosome.separators.rds"))
+
+
+  devscore <- t(devscore)
+  devscore <- devscore[bcs, ]
+
+  devscores_downsampled_LC[[s]] <- devscore
+}
+
+saveRDS(devscores_downsampled_LC, paste0(RDS_dir, "devscores_downsampled_LC.RDS"))
+```
+
+```{r Plot_Devscores_downsampled}
+devscores_downsampled <- readRDS(file.path(RDS_dir, "devscores_downsampled.RDS"))
+grob_hp <- list()
+for (s in unique(metadata$label)) {
+  # for (s in paste0("MBL", c("7dup", c(10:15)))) {
+  print(s)
+  patient <- metadata %>%
+    mutate(label = as.character(label)) %>%
+    filter(label == s) %>%
+    pull(patient_id) %>%
+    as.character()
+
+  bcs <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_bcs.rds"))
+  cluster.separators <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_cluster.separators.rds"))
+  chromosome.separators <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_chromosome.separators.rds"))
+
+  MBL_CLL_colours <- annotation_colours_named
+  side.colors <- c(MBL_CLL_colours[names(bcs)])
+  devscore <- devscores_downsampled[[s]]
+
+  # Cap for visualiation
+  devscore[devscore > 3] <- 3
+  devscore[devscore < -3] <- -3
+  devscore[devscore < 1 & devscore > -1] <- 0
+
+  pdf(paste0(project_dir, "/results/ArchR_", patient, "/Plots/CNVs_", s, "T_reference.pdf"),
+    width = 8,
+    height = 2
+  )
+
+  # png(paste0(ArchR_project, "Plots/CNVs_CLL10.1.jpg"), width = 4*1200, height = 1*1200, res = 600)
+  heatmap.2(devscore,
+    dendrogram = "none",
+    Rowv = "True",
+    Colv = "None",
+    key = F,
+    col = as.character(jdb_palette("solar_basic", type = "continuous")),
+    breaks = seq(-3, 3, 0.006),
+    trace = "none", 
+    scale = "none",
+    labRow = F,
+    labCol = F,
+    colsep = chromosome.separators,
+    rowsep = cluster.separators,
+    RowSideColors = side.colors,
+    margins = c(2, 2),
+    lhei = c(0.01, 1),
+    lwid = c(0.1, 10),
+    sepcolor = "white",
+    sepwidth = c(0.05, 0.05),
+    xlab = "Chromosome",
+    ylab = "Cells"
+  )
+  dev.off()
+
+  draw_CNV_heatmap <- function() {
+    heatmap.2(
+      x = devscore,
+      dendrogram = "none",
+      Rowv = FALSE,
+      Colv = FALSE,
+      key = FALSE,
+      keysize = 1.5,
+      density.info = "none",
+      key.title = "Deviation score",
+      key.xlab = NA,
+      col = as.character(jdb_palette("solar_basic", type = "continuous")),
+      breaks = seq(-3, 3, 0.006),
+      trace = "none",
+      scale = "none",
+      labRow = "",
+      labCol = "",
+      colsep = chromosome.separators,
+      rowsep = cluster.separators,
+      RowSideColors = side.colors,
+      sepcolor = "white",
+      sepwidth = c(0.05, 0.05),
+      xlab = "Chromosome",
+      ylab = "Cells"
+    )
+  }
+  grob_hp[[s]] <- gridGraphics::grid.echo(draw_CNV_heatmap, newpage = TRUE)
+  grob_hp[[s]] <- grid.grab()
+}
+
+saveRDS(grob_hp, file.path(RDS_dir, "CNV_heatmaps.RDS"))
+```
+
+```{r}
+# LC reference
+devscores_downsampled_LC <- readRDS(file.path(RDS_dir, "devscores_downsampled_LC.RDS"))
+grob_hp_LC <- list()
+# for (s in paste0("MBL", c("7dup", c(10:15)))) {
+for (s in paste0("MBL", c(15:15))) {
+  print(s)
+  patient <- metadata %>%
+    mutate(label = as.character(label)) %>%
+    filter(label == s) %>%
+    pull(patient_id) %>%
+    as.character()
+
+  bcs <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_LC_bcs.rds"))
+  cluster.separators <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_LC_cluster.separators.rds"))
+  chromosome.separators <- readRDS(paste0(project_dir, "/results/ArchR_", patient, "/RDS_objects/", s, "_LC_chromosome.separators.rds"))
+
+  MBL_CLL_colours <- annotation_colours_named
+  side.colors <- c(MBL_CLL_colours[names(bcs)])
+  devscore <- devscores_downsampled_LC[[s]]
+
+  # Cap for visualiation
+  devscore[devscore > 3] <- 3
+  devscore[devscore < -3] <- -3
+  devscore[devscore < 1 & devscore > -1] <- 0
+
+  pdf(paste0(project_dir, "/results/ArchR_", patient, "/Plots/CNVs_", s, "LC_T_reference_with_legend.svg"),
+    width = 8,
+    height = 4
+  )
+
+  heatmap.2(devscore,
+    dendrogram = "none",
+    Rowv = "True",
+    Colv = "None",
+    key = TRUE,
+    keysize = 1.5,
+    density.info = "none",
+    key.title = "Deviation score",
+    key.xlab = "none",
+    col = as.character(jdb_palette("solar_basic", type = "continuous")),
+    breaks = seq(-3, 3, 0.006),
+    trace = "none",
+    scale = "none",
+    labRow = F,
+    labCol = F,
+    colsep = chromosome.separators,
+    rowsep = cluster.separators,
+    RowSideColors = side.colors,
+    sepcolor = "white",
+    sepwidth = c(0.05, 0.05),
+    xlab = "Chromosome",
+    ylab = "Cells"
+  )
+  dev.off()
+
+  draw_CNV_heatmap <- function() {
+    heatmap.2(
+      x = devscore,
+      dendrogram = "none",
+      Rowv = FALSE,
+      Colv = FALSE,
+      key = FALSE,
+      keysize = 1.5,
+      density.info = "none",
+      key.title = "Deviation score",
+      key.xlab = NA,
+      col = as.character(jdb_palette("solar_basic", type = "continuous")),
+      breaks = seq(-3, 3, 0.006),
+      trace = "none",
+      scale = "none",
+      labRow = "",
+      labCol = "",
+      colsep = chromosome.separators,
+      rowsep = cluster.separators,
+      RowSideColors = side.colors,
+      sepcolor = "white",
+      sepwidth = c(0.05, 0.05),
+      xlab = "Chromosome",
+      ylab = "Cells"
+    )
+  }
+  grob_hp_LC[[s]] <- gridGraphics::grid.echo(draw_CNV_heatmap, newpage = TRUE)
+  grob_hp_LC[[s]] <- grid.grab()
+}
+
+saveRDS(grob_hp_LC, file.path(RDS_dir, "LC_MBL_CNV_heatmaps_LC_T_reference.RDS"))
+```

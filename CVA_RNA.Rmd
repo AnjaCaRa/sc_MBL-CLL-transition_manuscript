@@ -1,0 +1,341 @@
+---
+title: "CVA_RNA_MBL_CLL"
+author: "Anja_Rathgeber"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# GOAL
+Identify allele-specific CNVs from scRNA data with single cell resolution.
+
+# Load libraries
+```{r libraries}
+library(Seurat)
+library(numbat)
+library(tidyverse)
+library(RColorBrewer)
+library(ggpubr)
+library(circlize)
+library(ComplexHeatmap)
+``` 
+
+# Set paths
+```{r paths}
+source("config_paths.R")
+
+data_dir <- file.path(project_dir, "data")
+results_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(results_dir, "GEX_analysis")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+plotting_dir <- file.path(analysis_dir, "Plots")
+GEX_analysis_tsv_dir <- file.path(results_dir, "GEX_analysis/tsv_data")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r load_data}
+metadata <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata_gex.tsv"))
+
+label2pool <- metadata %>%
+  dplyr::select(label, pool) %>%
+  unique() %>% 
+  deframe()
+
+label2plottingid <- metadata %>%
+  dplyr::select(label, plotting_id) %>%
+  unique() %>% 
+  deframe()
+
+# Seurat object
+gex_scaled_all <- readRDS(file.path(RDS_dir, "gex_scaled_all.RDS"))
+                          
+celltype_annotation_RNA <- read_tsv(file.path(results_dir, "20250513_RNA_celltype_annotation_healthy.tsv"))
+```
+
+```{r}
+nb_lst <- map(metadata$label[c(7,13, 18, 23, 24,29, 32, 34,35)], ~ Numbat$new(out_dir = file.path(project_dir_ext, "numbat", label2pool[.]))) %>%
+  purrr::set_names(metadata$label[c(7,13, 18, 23, 24,29, 32, 34,35)])
+```
+
+# Analysis
+```{r}
+genotype_colour <- c("1" = "gray", brewer.pal(n = 8, name = "Set1") %>%
+                       set_names(c(1:length(brewer.pal(n = 8, name = "Set1")) + 1)))
+
+phyloheatmaps <- nb_lst[3] %>%
+  map(~ .$plot_phylo_heatmap(
+    clone_bar = TRUE,
+    p_min = 0.9,
+    pal_clone = genotype_colour
+  ))
+
+imap(phyloheatmaps ~ ggsave(.x,
+              file = file.path(plotting_dir, "CNV_RNA_phyloheatmaps", paste0("CNV_RNA_phyoloheatmaps_", .y, ".png")),
+              device = "png",
+              bg = "white",
+              width = 6,
+              height = 3
+))
+```
+
+```{r}
+scatterplots_bulk <- nb_lst %>%
+  map(~ .$bulk_clones %>%
+        filter(n_cells > 50) %>%
+        plot_bulks(
+          min_LLR = 10, # filtering CNVs by evidence
+          legend = TRUE
+        ))
+
+imap(scatterplots_bulk, ~ ggsave(.x, file = file.path(plotting_dir, "CNV_RNA_bulk_scatterplots", paste0("CNV_RNA_bulk_scatterplot_", .y, ".png")),
+              device = "png",
+              bg = "white",
+              width = 10,
+              height = 7))
+```
+
+```{r}
+all_cnv_umaps <- list()
+all_genotype_umaps <- list()
+
+for (s in metadata$label[c(7,13, 18,23, 24,29, 32, 34,35)]) {
+  plist <- list()
+  muts <- nb_lst[[s]]$joint_post$seg %>% unique()
+  cnv_type <- nb_lst[[s]]$joint_post %>%
+    dplyr::select(seg, cnv_state) %>%
+    unique() %>%
+    deframe()
+
+  gex_scaled_patient <- subset(gex_scaled_all, subset = orig.ident == s)
+
+  clone_opt <- nb_lst[[s]]$clone_post %>%
+    dplyr::select(cell, clone_opt) %>%
+    dplyr::mutate(clone_opt = as.character(clone_opt)) %>%
+    deframe()
+
+  gex_scaled_patient <- AddMetaData(
+    object = gex_scaled_patient,
+    metadata = clone_opt,
+    col.name = "clone_opt"
+  )
+
+  genotype_umap <- Seurat::FeaturePlot(gex_scaled_patient,
+                                       features = "clone_opt", pt.size = 0.5
+  ) +
+    labs(x = "UMAP1", y = "UMAP2", title = "") +
+    scale_colour_manual(name = "Genotype", values = genotype_colour) +
+    theme_pub() +
+    labs(title = label2plottingid[s]) +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "right",
+      aspect.ratio = 1
+    )
+  all_genotype_umaps[[s]] <- genotype_umap
+
+  for (mut in muts) {
+    mut_probabilites <- nb_lst[[s]]$joint_post %>%
+      dplyr::filter(seg == mut) %>%
+      dplyr::select(cell, p_cnv) %>%
+      deframe()
+
+    gex_scaled_patient_cnv <- AddMetaData(
+      object = gex_scaled_patient,
+      metadata = mut_probabilites,
+      col.name = "p_cnv"
+    )
+
+    cnv_umap <- Seurat::FeaturePlot(gex_scaled_patient_cnv,
+                                    features = "p_cnv", , pt.size = 0.5
+    ) +
+      labs(x = "UMAP1", y = "UMAP2", title = "") +
+      scale_colour_gradientn(
+        colours = c("midnightblue", "white", "darkred"),
+        name = "Probability",
+        na.value = "lightgrey",
+        values = c(0, 0.5, 1),
+        limits = c(0, 1),
+        breaks = seq(0, 1, 0.25)
+      ) +
+      theme_pub() +
+      labs(title = paste0(cnv_type[mut], " ", mut)) +
+      theme(
+        axis.ticks = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        legend.position = "right",
+        aspect.ratio = 1
+      )
+    plist[[mut]] <- cnv_umap
+  }
+
+  plist_all <- ggarrange(plotlist = plist, ncol = 3, nrow = ceiling(length(plist) / 3), common.legend = TRUE, legend = "right") %>%
+    annotate_figure(top = text_grob(label2plottingid[s], color = "black", face = "plain", size = 12))
+
+  all_cnv_umaps[[s]] <- plist_all
+
+  write_tsv(nb_lst[[s]]$joint_post, file.path(analysis_dir, "CNV_tables", paste0("numbat_joint_post_", s, ".tsv")))
+  write_tsv(nb_lst[[s]]$clone_post, file.path(analysis_dir, "CNV_tables", paste0("numbat_clone_post_", s, ".tsv")))
+}
+
+
+all_cnv_umaps %>%
+  imap(~ ggsave(.x,
+                file = file.path(plotting_dir, "CNV_RNA_UMAPs", paste0("CNV_RNA_umap_", .y, ".png")),
+                device = "png",
+                bg = "white"
+  ))
+
+ggarrange(plotlist = all_genotype_umaps, ncol = 5, nrow = 5, legend = "right") %>%
+  ggsave(
+    file = file.path(plotting_dir, paste0("Genotype_RNA_umap.png")),
+    device = "png",
+    bg = "white", width = 18, height = 18
+  )
+```
+
+# MBL12 and MBL15 
+```{r}
+clone_post <- map(metadata$label[c( 32,35)], ~ read_tsv(file.path(project_dir_ext, "numbat",label2pool[.], "clone_post_2.tsv"))) %>%
+  purrr::set_names(metadata$label[c( 32,35)])
+
+joint_post_2 <- map(metadata$label[c( 32,35)], ~ read_tsv(file.path(project_dir_ext, "numbat", label2pool[.], "joint_post_2.tsv"))) %>%
+  purrr::set_names(metadata$label[c( 32,35)])
+
+nb_lst[metadata$label[c( 32,35)]] %>% 
+  map(
+  ~head(.$joint_post) %>% select(cell, CHROM, seg, cnv_state, p_cnv, p_cnv_x, p_cnv_y))
+```
+
+```{r}
+plot_pp_CNV_heatmap <- function(numbat_object,
+                                post_prob_colours,
+                                celltypes){
+  
+  numbat_tbl <- full_join(numbat_object$joint_post %>% 
+                            dplyr::select(cell, CHROM, seg, cnv_state, p_cnv, seg_start, seg_end, p_amp, p_del), 
+                          numbat_object$segs_consensus %>% 
+                            dplyr::select(sample, CHROM, seg, cnv_state, cnv_state_post, seg_start, seg_end), by = join_by(CHROM, seg, cnv_state, seg_start, seg_end)) %>% 
+    dplyr::mutate(CHROM_seg_start_end=paste(CHROM, seg_start, seg_end, sep="_" )) %>% 
+    tidyr::pivot_wider(id_cols = cell, names_from = CHROM_seg_start_end, values_from = p_cnv) %>% 
+    dplyr::filter(!is.na(cell))
+  
+  segment_order <- colnames(numbat_tbl) %>% as_tibble %>% dplyr::filter(value != "cell") %>% 
+    tidyr::separate(value, into=c("CHROM", "seg_start", "seg_end"), remove=FALSE) %>% 
+    dplyr::mutate(CHROM=as.numeric(CHROM)) %>% 
+    dplyr::arrange(CHROM, seg_start) %>% 
+    dplyr::mutate(value=factor(value, value)) %>% 
+    dplyr::select(value) %>% 
+    unique() %>% 
+    dplyr::mutate(value=as.character(value)) %>% 
+    dplyr::pull(value)
+  
+  segment_widths <- colnames(numbat_tbl) %>% 
+    as_tibble %>% 
+    dplyr::filter(value != "cell") %>% 
+    tidyr::separate(value, into=c("CHROM", "seg_start", "seg_end"), remove=FALSE) %>% 
+    dplyr::mutate(CHROM=as.numeric(CHROM)) %>% 
+    dplyr::arrange(CHROM, seg_start) %>% 
+    dplyr::mutate(seg_end=as.numeric(seg_end),
+                  seg_start=as.numeric(seg_start),
+                  seg_width=seg_end-seg_start,
+                  seg_width_norm=seg_width/sum(seg_width)) %>% 
+    pull(seg_width_norm)
+  
+  numbat_matrix <- numbat_tbl %>% 
+    column_to_rownames("cell") %>% 
+    as.matrix() %>% 
+    .[,segment_order]
+
+  barcode2cnv <- numbat_object$joint_post %>% 
+      dplyr::mutate(cnv_state_cutoff=if_else(p_cnv >= 0.5, cnv_state, "Copy number neutral"),
+                    cnv_state_cutoff=case_when(cnv_state_cutoff == "amp" ~ "Amplification",
+                                               cnv_state_cutoff == "del" ~ "Deletion", .default = cnv_state_cutoff)) %>% 
+      dplyr::select(cell, cnv_state_cutoff) %>% 
+      deframe
+  
+  barcode2celltype <- celltypes
+
+  celltype2colour <- c("LC-MBL B Cell"="#FCBDA4","HC-MBL B Cell"="#FC8D62", "CLL B Cell" ="#66C2A5","B"="darkred", "other"="lightblue", "NK"="gold", "Mono"="tan", "T"="darkblue", "DC"="darkmagenta")
+  
+  CNV2colour <- c("Amplification" = "darkred", "Deletion" = "darkblue", "Copy number neutral"="lightgrey")
+  
+  row_ha <- rowAnnotation(
+    "Cell type" = anno_simple(
+      x = barcode2celltype[rownames(numbat_matrix)],
+      col = celltype2colour, # is list of named vector
+      border = TRUE,
+      width = unit(0.19, "cm")
+    ),
+    "CNV" = anno_simple(
+      x = barcode2cnv[rownames(numbat_matrix)],
+      col = CNV2colour, # is list of named vector
+      border = TRUE,
+      width = unit(0.19, "cm")
+    ),
+    show_annotation_name = TRUE,
+    show_legend = FALSE
+  )
+  
+  size_anno <- HeatmapAnnotation(
+                                  seg_width = anno_barplot(segment_widths, border = FALSE, gp = gpar(fill = "grey")),
+                                  annotation_name_side = "left",    show_annotation_name = FALSE
+
+                                )
+  
+  hm <- ComplexHeatmap::Heatmap(matrix = numbat_matrix, 
+                          column_split = colnames(numbat_matrix) %>% str_split(., pattern="_", n=3) %>% map_chr(~.[1]) %>% factor(levels=1:22),
+                          column_order = colnames(numbat_matrix),
+                          top_anno= size_anno,
+                          col=post_prob_colours,
+                          na_col = "lightgrey", 
+                          left_annotation = row_ha,
+                          cluster_rows = TRUE, 
+                          show_row_dend = FALSE,                           
+                          cluster_columns = FALSE, 
+                          name = "Posterior probability CNV", 
+                          border = TRUE,
+                          use_raster=TRUE,
+                          raster_by_magick = TRUE, 
+                          row_title = "Cells", 
+                          column_title = "Chromosome",
+                          show_column_names = FALSE, 
+                          column_names_side = "top", 
+                          column_names_rot = 0,
+                          column_names_centered = TRUE,
+                          show_row_names = FALSE)
+  return(hm)
+}
+```
+
+```{r fig.width=12, fig.height=15}
+celltype_annotation <- celltype_annotation_RNA %>% 
+  dplyr::left_join(metadata %>% dplyr::select(label, patient_id)) %>% 
+  dplyr::mutate(label_cellbarcode=str_replace(string = label_cellbarcode, pattern = "#", replacement = "_")) %>% 
+  split(.$patient_id) %>% 
+  map(~dplyr::select(., label_cellbarcode, My_annotation_LC) %>% unique() %>% 
+  deframe())
+
+heatmap_colours <- list("MBL12"=colorRamp2(breaks = c(0, 0.5, 1), c("white", "lightblue1", "midnightblue")),
+                        "MBL15"=colorRamp2(breaks = c(0, 0.5, 1), c("white", "lightpink1", "darkred")))
+
+CNV_heatmaps <- map(c("MBL12", "MBL15"), 
+                    ~plot_pp_CNV_heatmap(numbat_object = nb_lst[[.x]],
+                            post_prob_colours = heatmap_colours[[.x]],
+                            celltypes=celltype_annotation[[.x]])) %>% purrr::set_names(c("MBL12", "MBL15"))
+
+hm_MBL12_grob <- grid::grid.grabExpr(draw(CNV_heatmaps$MBL12))
+hm_MBL15_grob <- grid::grid.grabExpr(draw(CNV_heatmaps$MBL15))
+
+plot_grid(hm_MBL12_grob, hm_MBL15_grob, nrow=2, ncol=1)
+
+saveRDS(hm_MBL12_grob, file.path(RDS_dir, "hm_MBL12_grob.RDS"))
+saveRDS(hm_MBL15_grob, file.path(RDS_dir, "hm_MBL15_grob.RDS"))
+
+CNV_heatmaps$MBL12
+```

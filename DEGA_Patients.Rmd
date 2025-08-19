@@ -1,0 +1,256 @@
+---
+title: "Differential Gene Expression analysis between patients"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL
+The aim of this script is to find out if there are differentially expressed genes between all patients.
+
+# Load libraries
+```{r}
+library(readr)
+library(dplyr)
+library(tibble)
+library(ggpubr)
+library(ggrepel)
+library(Seurat)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+# Set paths
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir_remote, "data")
+library_path <- file.path(data_dir, "GEX")
+result_dir <-file.path(project_dir_remote, "results")
+analysis_dir <- file.path(result_dir, "GEX_analysis")
+
+plotting_dir <- file.path(analysis_dir, "plots")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+```
+
+# Load data
+```{r}
+source(file.path(scripts_dir_remote, "publication_theme.R"))
+```
+
+
+```{r}
+metadata <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata_gex.tsv")) %>% 
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE)
+
+patient_id2plotting_id <- metadata %>%
+  dplyr::select(patient_id, plotting_id) %>%
+  deframe()
+
+label2plotting_id <- metadata %>% 
+  dplyr::select(label, plotting_id) %>% 
+  deframe()
+```
+
+# Analysis
+## Differential expression
+### Patients
+```{r}
+gex_scaled_all <- readRDS(file.path(project_dir_remote, "results/RDS_objects/gex_scaled_all.RDS"))
+DefaultAssay(gex_scaled_all) <- "SCT"
+gex_scaled_all_batch_corrected <- SCTransform(gex_scaled_all, vars.to.regress = "sequencing_date", verbose = TRUE)
+saveRDS(gex_scaled_all_batch_corrected, file.path(RDS_dir, "gex_scaled_all_batch_corrected.RDS"))
+```
+
+```{r}
+# using LR/MAST and covariate is computationally too expensive and takes 5 days (covariate has to be accounted for as sequencing date has high impact)
+gex_scaled_all_batch_corrected <- readRDS(file.path(RDS_dir, "gex_scaled_all_batch_corrected.RDS"))
+Idents(gex_scaled_all_batch_corrected) <- "patient_id"
+
+patient_markers <- FindAllMarkers(
+  object = gex_scaled_all_batch_corrected,
+  assay = "SCT",  # Use SCTransform normalization if applicable
+  test.use = "wilcox") %>%
+dplyr::mutate(significance = if_else(abs(p_val_adj) <= 0.05 & abs(avg_log2FC) >= 1, TRUE,  FALSE))
+saveRDS(patient_markers, file.path(RDS_dir, "patient_markers.RDS"))
+
+patient_markers <- readRDS(file.path(RDS_dir, "patient_markers.RDS"))
+```
+
+```{r}
+top <- patient_markers %>%
+    dplyr::filter(significance ==TRUE) %>% 
+    group_by(cluster) %>%
+    ungroup() %>% 
+  dplyr::mutate(cluster=factor(cluster, levels=patient_order)) %>% 
+  arrange(cluster, desc(avg_log2FC))
+  
+
+non_MBL7dup_cells <- gex_scaled_all_batch_corrected@meta.data %>% 
+  dplyr::filter(patient_id != "MBL7dup") %>% 
+  unique() %>% 
+  rownames()
+```
+
+```{r DoHeatmap, fig.height=4, fig.width=3}
+Idents(gex_scaled_all_batch_corrected) <- "patient_id"
+non_MBL7dup_gex_scaled_all_batch_corrected <- subset(gex_scaled_all_batch_corrected, cells=non_MBL7dup_cells)
+non_MBL7dup_gex_scaled_all_batch_corrected$patient_id <- factor(non_MBL7dup_gex_scaled_all_batch_corrected$patient_id, levels=patient_order)
+
+set.seed(123)
+non_MBL7dup_gex_scaled_all_batch_corrected_down <- subset(non_MBL7dup_gex_scaled_all_batch_corrected, downsample=1000)
+# not possible to sort patients here
+
+non_MBL7dup_gex_scaled_all_batch_corrected_down$patient_id <- factor(
+non_MBL7dup_gex_scaled_all_batch_corrected_down$patient_id,
+levels = patient_order)
+patient_DEG_heatmap <- DoHeatmap(non_MBL7dup_gex_scaled_all_batch_corrected_down, 
+          features = unique(top$gene),
+          raster = TRUE,
+          group.by = "patient_id", 
+          group.colors=c(my_unpaired_colours_named , my_paired_colours_named),
+          assay="SCT",
+          slot="scale.data",
+          label=FALSE,
+          draw.lines = FALSE,
+          group.bar.height = 0.03)+
+  scale_fill_gradient2(low="midnightblue", mid="white", high="darkred", midpoint=0,  limits=c(-2.5, 2.5))+
+  theme_pub()+
+  labs(y=paste0(length(unique(top$gene)), " genes"))+
+  theme(axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank(), 
+        legend.position = "bottom", 
+        legend.direction = "horizontal")+
+  guides(colour = "none")
+ 
+ggsave(plot = patient_DEG_heatmap, filename = file.path(plotting_dir, "patient_DEG_heatmap.png"), width =3 , height=25)
+```
+
+```{r ComplexHeatmap_mean_expression}
+top <- top %>% 
+  dplyr::filter(! (gene %in% c("CD37", "RPS4X", "RPL7A", "EEF1D", "HLA-A", "UBC", "RPL37A")))
+
+scaled_data <- GetAssayData(object = non_MBL7dup_gex_scaled_all_batch_corrected, 
+                            slot = "scale.data", 
+                            assay = "SCT") %>% 
+  .[unique(top$gene), ]
+
+nonzero_mean <- function(x){
+  x_nonzero <- x[x != 0]
+  if ( length(x_nonzero) ==0 ){
+    return(NA)
+  } else {
+    return(mean(x_nonzero))
+  }
+}
+
+# Aggregate per patient (mean per gene excluding zeros)
+patient_mean <- do.call(cbind, lapply(unique(non_MBL7dup_gex_scaled_all_batch_corrected@meta.data[["patient_id"]]), function(patient) {
+  print(patient)
+  cells <- which(non_MBL7dup_gex_scaled_all_batch_corrected@meta.data[["patient_id"]] == patient)
+  apply(scaled_data[, cells, drop = FALSE], 1, nonzero_mean)
+}))
+colnames(patient_mean) <- unique(non_MBL7dup_gex_scaled_all_batch_corrected@meta.data[["patient_id"]])
+
+write.table(patient_mean, file.path(tsv_dir, "patient_mean_expession.tsv"), sep = "\t", quote = FALSE, row.names = TRUE, col.names = TRUE)
+
+patient_mean <- read.table(file.path(tsv_dir, "patient_mean_expession.tsv")) %>% as.matrix
+```
+
+```{r}
+patient_order <- metadata %>%
+  dplyr::filter(patient_id !="MBL7dup") %>% 
+  dplyr::select(patient_id, plotting_id) %>% 
+  unique %>% 
+  dplyr::mutate(plotting_id=factor(plotting_id, levels=paste0("P", 1:24))) %>% 
+  arrange(plotting_id) %>% 
+  pull(patient_id)
+
+# In case we want to annotate by condition as well
+patient_condition <- metadata %>% dplyr::filter(data_type=="GEX") %>%
+                           dplyr::select(patient_id, MBL_CLL_subtype) %>%
+                           tidyr::pivot_wider(id_cols = patient_id, names_from=MBL_CLL_subtype, values_from = MBL_CLL_subtype) %>%
+                           unique() %>%
+                           dplyr::mutate(Condition=
+                                           case_when(!is.na(LC_MBL) ~ "LC-MBL",
+                                                     !is.na(HC_MBL) & !is.na(CLL) ~ "CLL",
+                                                      is.na(HC_MBL) & !is.na(CLL) ~ "CLL",
+                                                     !is.na(HC_MBL) & is.na(CLL) ~ "HC-MBL",
+                                                     .default=NA)) %>%
+                           dplyr::select(patient_id, Condition) %>% deframe()
+
+patient2condition <- my_MBL_CLL_colours_named[patient_condition]
+names(patient2condition) <- names(patient_condition)
+
+top_annotation_col_anno <- HeatmapAnnotation(
+  Condition= anno_simple(patient_order, col=patient2condition, border=TRUE),
+  Patient = anno_simple(patient_order, col=c(my_unpaired_colours_named, my_paired_colours_named), border = TRUE),
+  annotation_height = unit(4, "mm"),
+  gap = unit(0.5, "mm"),
+  annotation_name_side = "left",
+  annotation_name_gp = gpar(fontsize = 10,
+                            fontfamily ="Arial"))
+```
+
+```{r, fig.width=3, fig.height=5}
+gene_order <- c()
+for (patient in patient_order) {
+  ordered_genes <- patient_mean %>%
+    as_tibble(rownames = "gene") %>%
+    dplyr::select(gene, all_of(patient)) %>%
+    filter(.data[[patient]] > 0) %>%
+    arrange(desc(.data[[patient]])) %>%
+    pull(gene)
+
+  # Append unique values while keeping order
+  gene_order <- unique(c(gene_order, ordered_genes))
+}
+
+gene_order <- rev(levels(patient_DEG_heatmap[[1]][["data"]][["Feature"]]))
+write.table(gene_order, file.path(tsv_dir, "gene_order_patient_DEG_heatmap.tsv"), sep="\t", quote=FALSE, row.names=TRUE, col.names=TRUE)
+
+hm <- Heatmap(matrix = scale(patient_mean[, patient_order]),
+ col=colorRamp2(breaks = c(-quantile(scale(patient_mean[gene_order, patient_order]), 0.98), 0,
+                           quantile(scale(patient_mean[gene_order, patient_order]), 0.98)), 
+                colors = c("midnightblue", "white", "darkred")),
+       top_annotation = top_annotation_col_anno,
+       name = "Expression", 
+       border = TRUE, 
+       na_col = "white", 
+       cluster_rows = FALSE, 
+       cluster_columns = FALSE,
+       row_title = paste0(length(unique(top$gene)), " genes"),
+       row_title_gp =gpar(fontsize = 10, fontface = "plain"),
+       use_raster = TRUE, 
+       raster_by_magick = TRUE,
+       show_row_dend = FALSE, 
+       show_column_names = FALSE, 
+       show_row_names = FALSE,
+       heatmap_legend_param = list(
+                  direction = "horizontal",
+                  legend_direction = "horizontal",
+                  at = c(-3, 0, 3), 
+                  title_gp = gpar(fontsize = 10, fontface = "plain"),
+                  row_title_gp = gpar(fontsize=10, fontface="plain"),
+                  labels_gp = gpar(
+                       fontsize = 10,
+                       fontface = "plain"),
+                  legend_width = unit(2, "cm"))) 
+
+hm_grob <- grid::grid.grabExpr(draw(hm, heatmap_legend_side = "bottom"))
+cowplot::plot_grid(hm_grob, nrow=1, ncol=1)
+saveRDS(hm_grob, file.path(RDS_dir, "genes_patient_heatmap.RDS"))
+```
+

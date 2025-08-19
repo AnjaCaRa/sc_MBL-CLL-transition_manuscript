@@ -1,0 +1,3826 @@
+---
+title: "Differential Chromatin Accessibility Analysis Full Cohort"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL
+The aim of this script is to find out if there are recurrent differentially accessible chromatin regions between MBL and CLL samples across patients. Also if there is differentially accessible chromatin between progressive and non-progressive MBLs.
+
+# Load libraries
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(ArchR)
+library(readxl)
+library(ggrepel)
+library(ggallin)
+library(tidyverse)
+library(glue)
+library(ggpubr)
+library(SeuratDisk)
+library(Seurat)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(Cairo)
+library(scales)
+library(harmony)
+library(chromVAR)
+library(patchwork)
+library(BiocParallel)
+library(circlize)
+library(ComplexHeatmap)
+library(magick)
+register(MulticoreParam(8))
+```
+
+```{r Run_parameters}
+set.seed(1)
+addArchRThreads(threads = 8)
+addArchRGenome("hg38")
+```
+
+# Set paths
+
+```{r }
+# local
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+library_path <- file.path(data_dir, "ATAC")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "DCA_analysis")
+tsv_dir <- file.path(analysis_dir, "tsv_data") 
+  
+ArchR_project <- file.path("ArchR_35_samples/ArchR_all_samples")
+ArchR_project_subset <- file.path("ArchR_35_samples/ArchR_all_samples_subsetted")
+ArchR_project_LC_subset <- file.path("ArchR_35_samples/ArchR_LC_B")
+ArchR_project_Blike <- file.path("ArchR_35_samples/ArchR_Blike")
+
+ArchR_dir_Annotation <- file.path(project_dir_ext, "ArchR_Projects_4_Annotation")
+ArchR_dir <- file.path(project_dir_ext, ArchR_project)
+ArchR_dir_subset <- file.path(project_dir_ext, ArchR_project_subset)
+ArchR_dir_LC_subset <- file.path(project_dir_ext, ArchR_project_LC_subset)
+ArchR_dir_Blike <- file.path(result_dir, ArchR_project_Blike)
+  
+plotting_dir <- file.path(ArchR_dir, "Plots")
+plotting_dir_subset <- file.path(ArchR_dir_subset, "Plots")
+plotting_dir_LC_subset <- file.path(ArchR_dir_LC_subset, "Plots")
+plotting_dir_Blike <- file.path(ArchR_dir_Blike, "Plots")
+
+RDS_dir <- file.path(ArchR_dir, "RDS_objects")
+RDS_dir_subset <- file.path(ArchR_dir_subset, "RDS_objects")
+RDS_dir_LC_subset <- file.path(ArchR_dir_LC_subset, "RDS_objects")
+RDS_dir_Blike <- file.path(ArchR_dir_Blike, "RDS_objects")
+```
+
+# Load data
+```{r}
+# local
+source(file.path(project_dir, "scripts/publication_theme.R"))
+source(file.path(project_dir, "scripts/heatmap_plotting_functions.R"))
+```
+
+```{r }
+metadata <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv"))
+
+patient_id2plotting_id <- metadata %>%
+  dplyr::select(patient_id, plotting_id) %>%
+  unique() %>%
+  deframe()
+```
+
+## Reference data set Hao and Hao et al 2021
+
+```{r Load_RNA_reference}
+if (!file.exists("scRNA-PBMcs_Hao_and_Hao_et_2021.h5seurat")) {
+  dir.create(file.path(data_dir, "reference_genomes"))
+  download.file(
+    url = "https://atlas.fredhutch.org/data/nygc/multimodal/pbmc_multimodal.h5seurat",
+    destfile = file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat")
+  )
+}
+
+Hao_seRNA <- LoadH5Seurat(file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat"))
+Hao_seRNA
+```
+
+```{r Create_RNA_reference_assay, fig.width=2, fig.height=2}
+# As this dataset does not have an RNA assay, the non-SCT values need to be reconstructed to an RNA assay for the reference
+rna_counts <- CreateAssayObject(Hao_seRNA@assays[["SCT"]]@counts)
+
+NormalizeData(
+  rna_counts,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000,
+  margin = 1,
+  verbose = TRUE
+)
+
+Hao_seRNA@assays[["RNA"]] <- rna_counts
+```
+
+## ArrowFiles
+
+```{r Load_all_samples}
+# Run this only as chuck as Arrow files are otherwise not in correct folder
+setwd(file.path(project_dir_ext, "ArchR_35_samples"))
+
+# Get all libraries files and paths
+# Subset1
+sample_subset <- c(
+  "CLL1.1",
+  "CLL1.2",
+  "CLL2.1",
+  "CLL2.2",
+  "CLL3.1",
+  "CLL3.2",
+  "CLL4.1",
+  "CLL4.2",
+  "CLL5.1",
+  "CLL5.2",
+  "CLL6.1",
+  "CLL6.2",
+  "CLL7.1",
+  "CLL7.2",
+  "CLL8.1",
+  "CLL8.2",
+  "CLL9.1",
+  "CLL9.2",
+  "CLL10.1",
+  "CLL10.2",
+  "MBL1",
+  "MBL2",
+  "MBL3",
+  "MBL4",
+  "MBL6",
+  "MBL7",
+  "MBL7dup",
+  "MBL8",
+  "MBL9",
+  "MBL10",
+  "MBL11",
+  "MBL12",
+  "MBL13",
+  "MBL14",
+  "MBL15"
+)
+
+# Get all libraries and samples names
+sample_names <- metadata %>%
+  dplyr::filter(data_type == "ATAC") %>%
+  dplyr::select(label, pool) %>%
+  dplyr::filter(label %in% sample_subset) %>%
+  dplyr::arrange(pool) %>%
+  dplyr::pull(var = label, name = pool)
+
+# Select library_file_paths based on sample_names
+library_file_paths <- purrr::map(names(sample_names), ~ file.path(library_path, .x, "fragments.tsv.gz")) %>%
+  unlist()
+
+ArrowFiles <- createArrowFiles(
+  outputNames = sample_names,
+  inputFiles = library_file_paths,
+  sampleNames = sample_names,
+  minTSS = 4,
+  minFrags = 1000,
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE,
+  threads = 1,
+  subThreading = FALSE
+)
+
+ArrowFiles <- paste0(project_dir_ext, "ArchR_35_samples/", sample_names, ".arrow")
+```
+
+## Annotation data from pooled subsets
+
+```{r}
+Subset1 <- readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/Save-ArchR-Project.rds"))
+Subset2 <- readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/Save-ArchR-Project.rds"))
+Subset3 <- readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/Save-ArchR-Project.rds"))
+Subset4 <- readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset4/Save-ArchR-Project.rds"))
+```
+
+# Doublet Inference
+
+```{r Doublet_Inference}
+setwd(paste0(project_dir_ext, "ArchR_35_samples/"))
+
+doubScores <- addDoubletScores(
+  input = ArrowFiles,
+  k = 10, # Refers to how many cells near a "pseudo-doublet" to count.
+  knnMethod = "UMAP", # Refers to the embedding to use for nearest neighbor search with doublet projection.
+  LSIMethod = 1
+)
+# dir.create(paste0(ArchR_dir, "RDS_objects"))
+saveRDS(doubScores, file = file.path(RDS_dir, "doubScores.RDS"))
+```
+
+# Create ArchR Project
+
+```{r Make_ArchRProject}
+setwd(file.path(project_dir_ext, "ArchR_35_samples"))
+
+CLLProj <- ArchRProject(
+  ArrowFiles = ArrowFiles,
+  outputDirectory = "ArchR_all_samples",
+  copyArrows = TRUE,
+  threads = 1
+)
+
+saveArchRProject(
+  ArchRProj = CLLProj,
+  outputDirectory = ArchR_dir,
+  load = FALSE,
+  overwrite = TRUE
+)
+
+CLLProj <- loadArchRProject(path = ArchR_dir)
+```
+
+## Remove doublets
+
+```{r remove_doublets}
+setwd(file.path(project_dir_ext, "ArchR_35_samples"))
+
+CLLProj <- filterDoublets(ArchRProj = CLLProj)
+
+saveArchRProject(
+  ArchRProj = CLLProj,
+  outputDirectory = ArchR_dir,
+  load = FALSE,
+  overwrite = TRUE
+)
+```
+
+## LSI Dimensionality Reduction
+
+```{r LSI_Dimensionality_Reduction}
+setwd(ArchR_dir)
+CLLProj <- addIterativeLSI(
+  seed = 1,
+  ArchRProj = CLLProj,
+  useMatrix = "TileMatrix",
+  name = "IterativeLSI",
+  iterations = 2,
+  clusterParams = list( # See Seurat::FindClusters
+    resolution = c(0.2),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30, 
+  threads = 1, 
+  force = TRUE
+)
+
+CLLProj <- addIterativeLSI(
+  seed = 1,
+  ArchRProj = CLLProj,
+  useMatrix = "TileMatrix",
+  name = "IterativeLSI_0.4",
+  iterations = 2,
+  clusterParams = list( # See Seurat::FindClusters
+    resolution = c(0.4),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30, threads = 1
+)
+
+saveArchRProject(ArchRProj = CLLProj, outputDirectory = ArchR_dir, load = FALSE, overwrite = TRUE)
+```
+
+## Seurat Clustering
+
+```{r}
+setwd(file.path(project_dir, "results/ArchR_35_samples/"))
+
+# Try combinations between different LSI resolutions and clustering resolutions
+param_combinations <- tidyr::expand_grid(
+  dimred = c(
+    "IterativeLSI", "IterativeLSI_0.4"
+  ),
+  resolution = c(0.2, 0.3, 0.4, 0.6)
+)
+
+for (row in 1:nrow(param_combinations)) {
+  resolution <- param_combinations$resolution[[row]]
+  dimred <- param_combinations$dimred[[row]]
+
+  CLLProj <- addClusters(
+    input = CLLProj,
+    seed = 1,
+    reducedDims = dimred,
+    method = "Seurat",
+    name = glue("Clusters_{resolution}_{dimred}"),
+    resolution = resolution
+  )
+}
+saveArchRProject(
+  ArchRProj = CLLProj,
+  outputDirectory = ArchR_dir,
+  load = FALSE,
+  overwrite = TRUE
+)
+```
+
+# UMAP
+
+```{r UMAP_Embedding}
+setwd(file.path(project_dir, "results/ArchR_35_samples"))
+
+dimred_df <- tidyr::expand_grid(
+  dimred = c(
+    "IterativeLSI",
+    "IterativeLSI_0.4"))
+
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  CLLProj <- addUMAP(
+    seed = 1,
+    ArchRProj = CLLProj,
+    reducedDims = dimred,
+    name = glue("UMAP_{dimred}"),
+    nNeighbors = 30,
+    minDist = 0.5,
+    metric = "cosine"
+  )
+}
+
+saveArchRProject(ArchRProj = CLLProj, outputDirectory = ArchR_dir, load = FALSE, overwrite = TRUE)
+```
+
+```{r Plot_UMAP_Sample, fig.width=30, fig.height=10}
+setwd(file.path(project_dir_ext, "ArchR_35_samples"))
+umap_samples <- list()
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  umaps <- plotEmbedding(
+    ArchRProj = CLLProj,
+    colorBy = "cellColData",
+    name = "Sample",
+    embedding = glue("UMAP_{dimred}"),
+    plotAs = "points",
+    pal = c(my_paired_colours_named, my_unpaired_colours_named)
+  ) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    geom_point(size = 1, stroke=NA) +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    ) +
+    guides(colour = guide_legend(
+      keywidth = 0.5,
+      keyheight = 0.5,
+      override.aes = list(size = 3)
+    ))
+
+  umap_samples[[row]] <- umaps
+}
+```
+
+```{r}
+patientid_annotation <- tibble(
+  "label_cellbarcode" = CLLProj$cellNames,
+  "patient_id" = CLLProj$cellNames %>% c() %>%
+    str_split("#", simplify = TRUE) %>% .[, 1] %>%
+    str_split("\\.", simplify = TRUE) %>% .[, 1]
+)
+
+CLLProj <- addCellColData(
+  ArchRProj = CLLProj,
+  data = patientid_annotation %>% pull(patient_id),
+  cells = patientid_annotation %>% pull(label_cellbarcode),
+  name = "patient_id"
+)
+
+umap_patients <- plotEmbedding(
+  ArchRProj = CLLProj,
+  colorBy = "cellColData",
+  name = "patient_id",
+  embedding = "UMAP_IterativeLSI",
+  plotAs = "points",
+  pal = my_unpaired_colours_named
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+```
+
+```{r , fig.width=5, fig.height=5}
+umap_coordinates <- CLLProj@embeddings@listData[["UMAP_IterativeLSI"]]@listData[["df"]] %>% as_tibble(rownames = "label_cellbarcode")
+
+patient_annotation <- CLLProj@cellColData %>%
+  as_tibble(rownames = "label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, patient_id)
+
+umap_patient_annotation <- patient_annotation %>%
+  dplyr::left_join(umap_coordinates)
+
+patient_annotation_umap <- umap_patient_annotation %>%
+  dplyr::filter(patient_id != "MBL7dup") %>%
+  ggplot(aes(x = `IterativeLSI#UMAP_Dimension_1`, y = `IterativeLSI#UMAP_Dimension_2`, colour = patient_id)) +
+  geom_point(size = 0.5, stroke = NA) +
+  coord_equal() +
+  scale_colour_manual(name = "Patients", values = c(my_unpaired_colours_named)) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    aspect.ratio = 1
+  ) +
+  guides(colour = guide_legend(
+    keywidth = 0.5,
+    keyheight = 0.5,
+    override.aes = list(size = 3)
+  ))
+patient_annotation_umap
+```
+
+# Add cell type annotation
+
+```{r}
+CLLProj <- addGeneIntegrationMatrix(
+  ArchRProj = CLLProj,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "GeneIntegrationMatrix_IterativeLSI",
+  reducedDims = "IterativeLSI",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "predictedCell_Un_Hao_IterativeLSI_,",
+  nameGroup = "predictedGroup_Un_Hao_IterativeLSI",
+  nameScore = "predictedScore_Un_Hao_IterativeLSI",
+  threads = 1,
+  force = TRUE
+)
+
+CLLProj <- addGeneIntegrationMatrix(
+  ArchRProj = CLLProj,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "GeneIntegrationMatrix_IterativeLSI_0.4",
+  reducedDims = "IterativeLSI_0.4",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "predictedCell_Un_Hao_IterativeLSI_0.4",
+  nameGroup = "predictedGroup_Un_Hao_IterativeLSI_0.4",
+  nameScore = "predictedScore_Un_Hao_IterativeLSI_0.4",
+  threads = 1,
+  force = TRUE
+)
+```
+
+```{r, fig.width=10, fig.height=10}
+umap_annotation_no_subsets <- list()
+
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  annotation_plots <- plotEmbedding(rastr=TRUE,
+    randomize = TRUE,
+    ArchRProj = CLLProj,
+    colorBy = "cellColData",
+    name = "predictedGroup_Un_Hao_IterativeLSI",
+    embedding = glue("UMAP_{dimred}"),
+    plotAs = "points",
+    pal = annotation_colours_named
+  ) +
+    geom_point(size = 0.01, stroke=NA) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    ) +
+    guides(colour = guide_legend(
+      keywidth = 0.5,
+      keyheight = 0.5,
+      override.aes = list(size = 3)
+    ))
+
+  umap_annotation_no_subsets[[row]] <- annotation_plots
+}
+
+# Following plots are not ordered by celltype, currently T cells are hidden in this view! See next plot for ordering!
+ggarrange(
+  plotlist = umap_annotation_no_subsets,
+  ncol =2,
+  nrow = 1,
+  common.legend = TRUE, 
+  legend="bottom") %>%
+  ggsave(bg = "white",
+    plot = ., filename = file.path(plotting_dir, "Annotation_UMAPs_no_subsets.png"),
+    width = 10,
+    height = 5
+  )
+```
+
+## Subset with manual annotation
+
+```{r}
+annotation_subset1 <- tibble("label_cellbarcode" = Subset1$cellNames, "My_annotation" = Subset1@cellColData$My_Annotation) %>%
+  dplyr::mutate(My_annotation = if_else(str_starts(label_cellbarcode, "MBL3") & My_annotation == "CLL_B_Cells", "MBL_B_Cells", My_annotation))
+
+annotation_subset2 <- tibble("label_cellbarcode" = Subset2$cellNames, "My_annotation" = Subset2@cellColData$My_Annotation)
+
+annotation_subset3 <- tibble("label_cellbarcode" = Subset3$cellNames, "My_annotation" = Subset3@cellColData$My_Annotation)
+
+annotation_subset4 <- tibble("label_cellbarcode" = Subset4$cellNames, "My_annotation" = Subset4@cellColData$My_Annotation)
+
+My_annotation <- bind_rows(annotation_subset1, annotation_subset2, annotation_subset3, annotation_subset4) %>%
+  dplyr::filter(label_cellbarcode %in% CLLProj$cellNames)
+
+
+umap_annotation_My_annotation <- list()
+
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  annotation_plots <- plotEmbedding(
+    randomize = TRUE,
+    ArchRProj = CLLProj,
+    colorBy = "cellColData",
+    name = "My_annotation",
+    embedding = glue("UMAP_{dimred}"),
+    plotAs = "points",
+    pal = annotation_colours_named
+  ) +
+    geom_point(size = 0.01, stroke="NA") +
+    labs(x = "UMAP1", y = "UMAP2") +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    ) +
+    guides(colour = guide_legend(
+      keywidth = 0.5,
+      keyheight = 0.5,
+      override.aes = list(size = 3)
+    ))
+
+  umap_annotation_My_annotation[[row]] <- annotation_plots
+}
+```
+
+```{r}
+CLLProj <- addCellColData(
+  ArchRProj = CLLProj,
+  data = My_annotation[["My_annotation"]],
+  cells = My_annotation[["label_cellbarcode"]],
+  name = "My_annotation",
+)
+
+# drop cells which are not annotated as probably marked as doublets in subset analysis due to doublet simulation
+cellindex <- BiocGenerics::which(!is.na(CLLProj@cellColData$My_annotation))
+celllabel <- CLLProj$cellNames[cellindex]
+
+CLLProj <- subsetArchRProject(
+  ArchRProj = CLLProj,
+  cells = celllabel,
+  outputDirectory = ArchR_dir_subset,
+  dropCells = TRUE,
+  force = TRUE
+)
+
+My_annotation <- tibble("label_cellbarcode"=CLLProj$cellNames, "My_annotation"=CLLProj$My_annotation)
+
+write_tsv(My_annotation, file.path(result_dir, "CLlProj_35_samples_subsetted_My_annotation.tsv"))
+
+saveArchRProject(ArchRProj = CLLProj, 
+                 outputDirectory = ArchR_dir_subset, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+
+CLLProj <- loadArchRProject(ArchR_dir_subset)
+```
+
+## More LSI iterations
+```{r}
+setwd(ArchR_dir_subset)
+CLLProj <- addIterativeLSI(
+  seed = 1,
+  ArchRProj = CLLProj,
+  useMatrix = "TileMatrix",
+  name = "IterativeLSI10",
+  iterations = 10,
+  clusterParams = list( # See Seurat::FindClusters
+    resolution = c(0.2),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30, 
+  threads = 1, 
+  force = TRUE
+)
+```
+
+## Batch correction
+
+```{r}
+CLLProj <- loadArchRProject(path = ArchR_dir_subset)
+
+CLLProj <- addHarmony(
+  ArchRProj = CLLProj,
+  reducedDims = "IterativeLSI",
+  name = "Harmony_IterativeLSI",
+  groupBy = "Sample", 
+  verbose=TRUE
+)
+
+CLLProj <- addHarmony(
+  ArchRProj = CLLProj,
+  reducedDims = "IterativeLSI10",
+  name = "Harmony_IterativeLSI10",
+  groupBy = "Sample", 
+  verbose=TRUE
+)
+
+saveArchRProject(ArchRProj = CLLProj, outputDirectory = ArchR_dir_subset, load = FALSE, overwrite = TRUE)
+```
+
+```{r, fig.width=60, fig.height=80}
+param_combinations <- tidyr::expand_grid(
+  dimred = c(
+    "IterativeLSI", "IterativeLSI10", "Harmony_IterativeLSI", "Harmony_IterativeLSI10"),
+  resolution = c(0.2, 0.3, 0.4, 0.6)
+)
+
+dimred_df <- tidyr::expand_grid(
+  dimred = c(
+    "IterativeLSI",
+    "IterativeLSI10",
+    "Harmony_IterativeLSI",
+    "Harmony_IterativeLSI10"))
+
+umap_clusters <- list()
+
+for (row in 1:nrow(param_combinations)) {
+  resolution <- param_combinations$resolution[[row]]
+  dimred <- param_combinations$dimred[[row]]
+  print(resolution)
+  print(dimred)
+
+  cluster_plots <- plotEmbedding(
+    ArchRProj = CLLProj,
+    colorBy = "cellColData",
+    name = glue("Clusters_{resolution}_{dimred}"),
+    embedding = glue("UMAP_{dimred}"),
+    plotAs = "points"
+  ) +
+    geom_point(size = 0.5) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+
+  umap_clusters[[row]] <- cluster_plots
+}
+
+ggarrange(plotlist = umap_clusters, ncol = 4, nrow = 4) %>%
+  ggsave(
+    plot = ., filename = file.path(plotting_dir_subset, "Cluster_UMAPs.png"),
+    width = 15,
+    height = 15, bg="white"  )
+```
+
+```{r}
+umap_samples <- list()
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  umaps <- plotEmbedding(rastr = TRUE,
+    ArchRProj = CLLProj,
+    colorBy = "cellColData",
+    name = "Sample",
+    embedding = glue("UMAP_{dimred}"),
+    plotAs = "points",
+    pal = c(my_paired_colours_named, my_unpaired_colours_named)
+  ) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    geom_point(size = 0.01, stroke=NA) +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    ) +
+    guides(colour = guide_legend(
+      keywidth = 0.5,
+      keyheight = 0.5,
+      override.aes = list(size = 3)
+    ))
+
+  umap_samples[[row]] <- umaps
+}
+
+ggarrange(plotlist = umap_samples, ncol = 4,common.legend = TRUE, legend = "bottom") %>%
+  ggsave(
+    plot = ., filename = file.path(plotting_dir_subset, "Sample_UMAPs.png"),
+    width =15,
+    height = 5, 
+    bg = "white"
+  )
+```
+
+```{r Plot_technology, fig.width=30, fig.height=10}
+label2technology <- deframe(metadata %>%
+  dplyr::filter(data_type == "ATAC") %>%
+  dplyr::select(label, technology))
+label2technology[CLLProj$Sample]
+CLLProj@cellColData$technology <- unname(label2technology[CLLProj$Sample])
+
+umap_technology <- list()
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  umaps <- plotEmbedding(
+    ArchRProj = CLLProj,
+    colorBy = "cellColData",
+    name = "technology",
+    embedding = glue("UMAP_{dimred}"),
+    plotAs = "points"
+  ) +    geom_point(size = 0.01, stroke=NA) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+
+  umap_technology[[row]] <- umaps
+}
+
+ggarrange(plotlist = umap_technology, ncol = 4, common.legend = TRUE, legend = "bottom") %>%
+  ggsave(
+    plot = ., filename = file.path(plotting_dir_subset, "Technology_UMAPs.png"),
+    width = 15, 
+    bg="white",
+    height = 5)
+```
+
+```{r}
+seqdate_annotation <- tibble("label_cellbarcode" = CLLProj$cellNames) %>%
+    tidyr::separate(label_cellbarcode, into=c("label", "cellbarcode"), sep="#", remove = F) %>% 
+    dplyr::left_join(metadata %>% dplyr::filter(data_type =="ATAC") %>% dplyr::select(label, sequencing_date)) %>% 
+    dplyr::mutate(sequencing_date=as.numeric(as.factor(sequencing_date))) %>% 
+    dplyr::select(label_cellbarcode, sequencing_date) %>%
+    deframe()
+
+CLLProj <- addCellColData(
+    ArchRProj = CLLProj,
+    data = seqdate_annotation,
+    cells = names(seqdate_annotation),
+    name = "sequencing_date"
+)
+
+umap_seqdate <- list()
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  umaps <- plotEmbedding(rastr = TRUE,
+    ArchRProj = CLLProj,
+    colorBy = "cellColData",
+    name = "sequencing_date",
+    embedding = glue("UMAP_{dimred}"),
+    plotAs = "points" ) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    geom_point(size = 0.01, stroke=NA) +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    ) +
+    guides(colour = guide_legend(
+      keywidth = 0.5,
+      keyheight = 0.5,
+      override.aes = list(size = 3)
+    ))
+
+  umap_seqdate[[row]] <- umaps
+}
+
+ggarrange(plotlist = umap_seqdate, ncol = 4,common.legend = TRUE, legend = "bottom") %>%
+  ggsave(
+    plot = ., filename = file.path(plotting_dir_subset, "Sequencingdate_UMAPs.png"),
+    width =15,
+    height = 5, 
+    bg = "white"
+  )
+```
+
+```{r}
+umap_celltypes <- list()
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  umaps <- plotEmbedding(rastr = TRUE,
+    ArchRProj = CLLProj,
+    colorBy = "cellColData",
+    name = "My_annotation",
+    embedding = glue("UMAP_{dimred}"),
+    plotAs = "points", randomize = TRUE,
+    pal=annotation_colours_named) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    geom_point(size = 0.01, stroke=NA) +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    ) +
+    guides(colour = guide_legend(
+      keywidth = 0.5,
+      keyheight = 0.5,
+      override.aes = list(size = 3)
+    ))
+
+  umap_celltypes[[row]] <- umaps
+}
+
+ggarrange(plotlist = umap_celltypes, ncol = 4,common.legend = TRUE, legend = "bottom") %>%
+  ggsave(
+    plot = ., filename = file.path(plotting_dir_subset, "Celltypes_UMAPs.png"),
+    width =15,
+    height = 5, 
+    bg = "white"
+  )
+```
+
+```{r}
+umap_coordinates <- CLLProj@embeddings@listData[["UMAP_IterativeLSI"]]@listData[["df"]] %>%
+  as_tibble(rownames = "label_cellbarcode")
+
+patient_annotation <- CLLProj@cellColData %>%
+  as_tibble(rownames = "label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, patient_id)
+
+umap_patient_annotation <- patient_annotation %>%
+  dplyr::left_join(umap_coordinates)
+
+patient_annotation_umap <- umap_patient_annotation %>%
+  dplyr::filter(!(patient_id %in% c("MBL7dup", "CLL6"))) %>%
+  ggplot(aes(x = `IterativeLSI#UMAP_Dimension_1`, y = `IterativeLSI#UMAP_Dimension_2`, colour = patient_id)) +
+  geom_point(size = 0.5, stroke = NA) +
+  coord_equal() +
+  scale_colour_manual(name = "Patients", values = c(my_unpaired_colours_named)) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    aspect.ratio = 1
+  ) +
+  guides(colour = guide_legend(
+    keywidth = 0.5,
+    keyheight = 0.5,
+    override.aes = list(size = 3)
+  ))
+patient_annotation_umap
+
+saveRDS(patient_annotation_umap, file.path(project_dir_subset, "RDS_Objects/UMAP_patients.RDS"))
+```
+
+```{r}
+#shuffled annotation umap
+umap_celltype_annotation <- umap_celltype_annotation %>% 
+  dplyr::mutate(My_annotation=if_else(str_starts(label_cellbarcode, "MBL10|MBL11|MBL12|MBL13|MBL14|MBL15")& My_annotation=="MBL_B_Cells", "LC_MBL_B_Cells", My_annotation))
+  
+# Create a minimal expression matrix (dummy data)
+expression_matrix <- matrix(data = rnorm(168533), nrow = 1, ncol = 168533)
+rownames(expression_matrix) <- paste0("Gene1")
+colnames(expression_matrix) <- umap_celltype_annotation$label_cellbarcode
+
+# Create Seurat object
+seurat_obj <- CreateSeuratObject(counts = expression_matrix)
+
+# Set the UMAP coordinates as embeddings
+umap_matrix <- umap_celltype_annotation %>% 
+  ungroup() %>% 
+  dplyr::select(`IterativeLSI#UMAP_Dimension_2`,`IterativeLSI#UMAP_Dimension_1`) %>% 
+  as.matrix()
+
+rownames(umap_matrix) <- umap_celltype_annotation$label_cellbarcode
+seurat_obj[['umap']] <- CreateDimReducObject(embeddings = umap_matrix, key = "UMAP_", assay = DefaultAssay(seurat_obj))
+
+# Merge annotation_tibble with the Seurat object metadata
+seurat_obj <- AddMetaData(seurat_obj, metadata = umap_celltype_annotation$My_annotation, col.name = "My_annotation")
+
+#plot
+celltype_shuffled_annotation_umap <- DimPlot(seurat_obj, reduction = "umap", group.by = "My_annotation", label = F, shuffle = TRUE, raster = F, seed = 1)+
+  scale_fill_manual(values = my_MBL_CLL_colours_named)+
+  coord_equal()+
+  scale_colour_manual(
+    name = "Cell types",
+    values = annotation_colours_named,
+    labels = c("B" = "B cells", "DC" = "Dendritic cells", 
+               "Mono" = "Monocytes", "other" = "Other cell types", 
+               "CLL_B_Cells" = "CLL cells", "MBL_B_Cells" = "HC-MBL cells",
+               "LC-LC_MBL_B_Cells"="LC-MBL cells",
+               "NK" = "Natural killer cells", 
+               "T" = "T cells")
+  ) +
+theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    aspect.ratio = 1
+  ) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Cell types") +
+  guides(colour = guide_legend(
+    keywidth = 0.5,
+    keyheight = 0.5,
+    override.aes = list(size = 3)
+  ))
+
+celltype_shuffled_annotation_umap
+
+saveRDS(celltype_shuffled_annotation_umap, file.path(analysis_dir, "RDS_objects/Annotation_UMAP.RDS"))
+
+saveRDS(seurat_obj, file.path(analysis_dir, "RDS_objects/Annotation_UMAP_seurat_obj.RDS"))
+```
+
+### Total cell count
+
+```{r}
+CLLProj_cell_counts_ATAC <- sum(!(CLLProj@cellColData@listData[["patient_id"]] %in% c("MBL7dup", "CLL6")))
+
+CLLProj_cell_counts_ATAC
+```
+
+
+### IGHV umap
+```{r}
+IGHV_status <- tibble(
+  "label_cellbarcode" = CLLProj@cellColData@rownames,
+  "patient_id" = CLLProj@cellColData$patient_id
+) %>%
+  tidyr::separate(label_cellbarcode, c("label", NA), sep = "#", remove = FALSE) %>%
+  dplyr::left_join(metadata %>% dplyr::filter(data_type=="ATAC") %>% 
+    dplyr::select(IGHV, patient_id)) %>% 
+  dplyr::select(label_cellbarcode, IGHV)
+
+IGHV_umap <- umap_celltype_annotation %>% left_join(IGHV_status) %>% 
+  ggplot(aes(x = `IterativeLSI#UMAP_Dimension_1`, y = `IterativeLSI#UMAP_Dimension_2`, colour = IGHV)) +
+  geom_point(size = 0.5, stroke = NA) +
+  coord_equal() +
+  scale_colour_manual(name = "IGHV mutational status", values = IGHV_colours, na.value = "lightgrey") +
+  labs(x = "UMAP1", y = "UMAP2", title="IGHV\nmutational status") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    aspect.ratio = 1
+  ) +
+  guides(colour = guide_legend(
+    keywidth = 0.5,
+    keyheight = 0.5,
+    override.aes = list(size = 3)
+  ))
+
+write_tsv(IGHV_umap$data, file.path(tsv_dir, "ATAC_IGHV_umap_data.tsv"))
+```
+
+### Celltype abundance
+
+```{r}
+condition <- tibble("label_cellbarcode" = CLLProj@cellColData@rownames) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+  mutate(disease = case_when(
+    str_ends(label, "\\.1") ~ "MBL",
+    # str_starts(label, "MBL") ~ "MBL",
+    str_starts(label, paste0(c("MBL4"), collapse = "|")) ~ "CLL",
+    str_starts(label, paste0(paste0("MBL", c(1:3, 6:15)), collapse = "|")) ~ "MBL",
+    str_ends(label, "\\.2") ~ "CLL",
+    TRUE ~ label
+  ))
+
+MBL_CLL_subtype <- tibble(
+  "label_cellbarcode" = CLLProj@cellColData@rownames,
+  "patient_id" = CLLProj@cellColData$patient_id
+) %>%
+  tidyr::separate(label_cellbarcode, c("label", NA), sep = "#", remove = FALSE) %>%
+  dplyr::left_join(metadata %>%
+    dplyr::select(MBL_subtype, disease, label) %>%
+    tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+    dplyr::select(label, MBL_CLL_subtype) %>% unique())
+
+
+celltype_annotation <- tibble(
+  "label_cellbarcode" = CLLProj$cellNames,
+  "celltype_annotation" = CLLProj@cellColData$My_annotation
+)
+
+celltype_data <- left_join(celltype_annotation, MBL_CLL_subtype) %>%
+  group_by(MBL_CLL_subtype, celltype_annotation) %>%
+  dplyr::summarise("cell_counts" = n())
+
+# calculate celltype abundance based on median across all samples
+celltype_abundance_plot <- left_join(celltype_annotation, MBL_CLL_subtype) %>%
+  tidyr::separate(label_cellbarcode, c("label", NA), sep = "#") %>%
+  tidyr::separate(label, c("patient_id", NA), sep = "\\.") %>%
+  group_by(MBL_CLL_subtype, celltype_annotation, patient_id) %>%
+  dplyr::filter(patient_id != "CLL6") %>%
+  dplyr::summarise(counts = n()) %>%
+  ungroup() %>%
+  group_by(MBL_CLL_subtype, celltype_annotation) %>%
+  dplyr::summarise(
+    sd_celltype_abundance = sd(counts, na.rm = TRUE),
+    median_abundance = median(counts)
+  ) %>%
+  mutate(MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL"))) %>%
+  ggplot(., aes(fill = celltype_annotation, y = median_abundance, x = MBL_CLL_subtype)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_fill_manual(
+    values = annotation_colours_named,
+    name = "Cell type",
+    labels = c("B" = "B cells", "DC" = "Dendritic cells", "Mono" = "Monocytes", "other" = "Other cell types", "CLL_B_Cells" = "CLL cells", "MBL_B_Cells" = "MBL cells", "NK" = "Natural killer cells", "T" = "T cells")
+  ) +
+  scale_x_discrete(labels = c("LC_MBL" = "LC MBL", "HC_MBL" = "HC MBL", "CLL" = "CLL")) +
+  scale_y_continuous(labels = seq(0, 100, 25), expand = expansion(mult = c(0, NA))) +
+  labs(x = "", y = "Cell type frequency [%]") +
+  theme_pub()
+
+
+saveRDS(celltype_abundance_plot, file = file.path(analysis_dir, "RDS_objects/celltype_abundance_plot.RDS"))
+
+celltype_abundance_plot
+```
+
+```{r Celltype_quantification, fig.width=20, fig.height=3}
+celltype_abundance_per_patient <- as_tibble(CLLProj@cellColData, rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, My_annotation, patient_id) %>%
+  dplyr::left_join(condition) %>%
+  dplyr::left_join(metadata %>%
+    dplyr::filter(data_type == "ATAC") %>%
+    dplyr::select(patient_id, plotting_id) %>%
+    unique()) %>%
+  group_by(disease, My_annotation, plotting_id) %>%
+  dplyr::summarise(cell_counts = n()) %>%
+  dplyr::mutate(
+    disease = factor(disease, levels = c("MBL", "CLL")),
+    plotting_id = factor(plotting_id, levels = c(paste0("P", 1:24), "P9dup"))
+  ) %>%
+  ungroup() %>%
+  ggplot(., aes(fill = My_annotation, y = cell_counts, x = disease)) +
+  geom_bar(position = "fill", stat = "identity") +
+  scale_y_continuous(
+    breaks = seq(0, 1, 0.25),
+    labels = c("0", "25", "50", "75", "100"),
+    expand = expansion(mult = c(0, NA))
+  ) +
+  scale_fill_manual(
+    values = annotation_colours_named,
+    name = "Cell type"
+  ) +
+  labs(x = "", y = "Frequency [%]") +
+  theme_pub() +
+  theme(legend.position = "bottom") +
+  facet_wrap(~plotting_id, nrow = 1, ncol = 26)
+
+celltype_abundance_per_patient
+```
+
+# Combination cell type counts per sample
+
+```{r fig.width=12, fig.height=5}
+label2plotting_id <- metadata %>%
+  dplyr::filter(data_type == "ATAC") %>%
+  dplyr::select(label, plotting_id) %>%
+  deframe()
+
+all_b_cell_plot <- CLLProj@cellColData %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, Sample, My_annotation) %>%
+  group_by(Sample, My_annotation) %>%
+  dplyr::filter((!Sample %in% c("MBL7dup", "CLL6.1", "CLL6.2"))) %>%
+  dplyr::summarise(celltype_counts = n()) %>%
+  dplyr::filter(My_annotation %in% c("B", "MBL_B_Cells", "CLL_B_Cells")) %>%
+  pivot_wider(id_cols = Sample, names_from = My_annotation, values_from = celltype_counts, values_fill = NA) %>%
+  tidyr::pivot_longer(-Sample, names_to = "celltype", values_to = "counts") %>%
+  dplyr::left_join(metadata %>% dplyr::filter(data_type == "ATAC") %>% dplyr::select(label, plotting_id, disease, MBL_subtype), by = join_by(Sample == label)) %>%
+  dplyr::arrange(desc(plotting_id)) %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  dplyr::mutate(
+    MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL")),
+    celltype = case_when(celltype == "MBL_B_Cells" & MBL_CLL_subtype == "LC_MBL" ~ "LC_MBL_B_Cells",
+      celltype == "MBL_B_Cells" & MBL_CLL_subtype == "HC_MBL" ~ "HC_MBL_B_Cells",
+      .default = celltype
+    )
+  ) %>%
+  dplyr::mutate(
+    counts = if_else(celltype == "B", -counts, counts),
+    celltype = factor(celltype, levels = c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")),
+    Sample = factor(Sample, level = c(
+       "MBL12", "MBL11", "MBL14", "MBL13","MBL15", "MBL10", "MBL6", "MBL1", "MBL7", "MBL3", "MBL8", "MBL2", "MBL9",
+      "CLL6.1", "CLL6.2", "CLL1.1", "CLL1.2", "CLL7.1", "CLL7.2", "CLL2.1", "CLL2.2", "CLL5.1", "CLL5.2", "CLL8.1",
+      "CLL8.2", "CLL4.1", "CLL4.2", "CLL10.1", "CLL10.2", "CLL9.1", "CLL9.2", "CLL3.1", "CLL3.2", "MBL4"
+    ))
+  ) %>%
+  ggplot(aes(x = Sample, y = counts, fill = celltype)) +
+  geom_bar(position = "stack", stat = "identity", width = 0.7) +
+  scale_x_discrete(labels = label2plotting_id) +
+  scale_y_continuous(limits = c(-1700, 10000)) +
+  # scale_y_continuous(trans = pseudolog10_trans,
+  #                    breaks = c(-1000, -100 ,-10,  10, 100, 1000, 10000),
+  #                    labels=c("1000", "100", "10",  "10","100" ,"1000", "10000"),
+  #                    limits=c(-1000, 13000)) +
+  scale_fill_manual(
+    name = "Cell type", values = annotation_colours_named,
+    labels = c("B" = "B cells", "CLL_B_Cells" = "CLL cells", "LC_MBL_B_Cells" = "LC-MBL cells", "HC_MBL_B_Cells" = "HC-MBL cells")
+  ) +
+  labs(x = "", title = "Cell type cell counts") +
+  theme_pub() +
+  theme(
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(angle = 90),
+    # axis.line.x = element_blank(),
+    # axis.ticks.x = element_blank(),
+    plot.title = element_text(margin = margin(t = 8, b = -20))
+  )
+
+all_b_cell_plot
+
+saveRDS(all_b_cell_plot, file = file.path(analysis_dir, "RDS_objects/all_b_cell_plot.RDS"))
+```
+
+```{r fig.width=5, fig.height=12}
+all_b_cell_plot_vertical <- CLLProj@cellColData %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, Sample, My_annotation) %>%
+  dplyr::group_by(Sample, My_annotation) %>%
+  dplyr::filter((!Sample %in% c("MBL7dup", "CLL6.1", "CLL6.2"))) %>%
+  dplyr::summarise(celltype_counts = n()) %>%
+  dplyr::filter(My_annotation %in% c("B", "MBL_B_Cells", "CLL_B_Cells")) %>%
+  pivot_wider(id_cols = Sample, names_from = My_annotation, values_from = celltype_counts, values_fill = NA) %>%
+  tidyr::pivot_longer(-Sample, names_to = "celltype", values_to = "counts") %>%
+  dplyr::left_join(metadata %>% dplyr::filter(data_type == "ATAC") %>% 
+                     dplyr::select(label, plotting_id, disease, MBL_subtype), by = join_by(Sample == label)) %>%
+  dplyr::arrange(desc(plotting_id)) %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  dplyr::mutate(
+    MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL")),
+    celltype = case_when(celltype == "MBL_B_Cells" & MBL_CLL_subtype == "LC_MBL" ~ "LC_MBL_B_Cells",
+      celltype == "MBL_B_Cells" & MBL_CLL_subtype == "HC_MBL" ~ "HC_MBL_B_Cells",
+      .default = celltype
+    )
+  ) %>%
+  dplyr::mutate(
+    counts = if_else(celltype == "B", -counts, counts),
+    celltype = factor(celltype, levels = c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")),
+    Sample = factor(Sample, level = rev(c(
+       "MBL12", "MBL11", "MBL14", "MBL13","MBL15", "MBL10", "MBL6", "MBL1", "MBL7", "MBL3", "MBL8", "MBL2", "MBL9",
+      "CLL6.1", "CLL6.2", "CLL1.1", "CLL1.2", "CLL7.1", "CLL7.2", "CLL2.1", "CLL2.2", "CLL5.1", "CLL5.2", "CLL8.1",
+      "CLL8.2", "CLL4.1", "CLL4.2", "CLL10.1", "CLL10.2", "CLL9.1", "CLL9.2", "CLL3.1", "CLL3.2", "MBL4"
+    )))
+  ) %>%
+  ggplot(aes(y = Sample, x = counts, fill = celltype)) +
+  geom_bar(position = "stack", stat = "identity", width = 0.7) +
+  scale_y_discrete(labels = label2plotting_id) +
+  scale_x_continuous(
+    breaks = c(-1250, 0, 2500, 5000, 7500, 10000),
+    labels = c("1250", "0", "2500", "5000", "7500", "10000"),
+    limits = c(-1700, 10000)
+  ) +
+  scale_fill_manual(
+    name = "Cell type", values = annotation_colours_named,
+    labels = c("B" = "B cells", "CLL_B_Cells" = "CLL cells", "LC_MBL_B_Cells" = "LC-MBL cells", "HC_MBL_B_Cells" = "HC-MBL cells")
+  ) +
+  labs(x = "", title = "") +
+  theme_pub() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(angle = 0),
+    # axis.line.x = element_blank(),
+    # axis.ticks.x = element_blank(),
+    plot.title = element_text(margin = margin(t = 8, b = -20))
+  )
+
+all_b_cell_plot_vertical
+
+
+saveRDS(all_b_cell_plot_vertical, file = file.path(analysis_dir, "RDS_objects/all_b_cell_plot_vertical.RDS"))
+```
+
+```{r}
+Blike_celltype_percentages <- CLLProj@cellColData %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, Sample, My_annotation) %>%
+  dplyr::group_by(Sample, My_annotation) %>%
+  dplyr::filter((!Sample %in% c("MBL7dup", "CLL6.1", "CLL6.2"))) %>%
+  dplyr::summarise(celltype_counts = n()) %>%
+  dplyr::filter(My_annotation %in% c("B", "MBL_B_Cells", "CLL_B_Cells")) %>%
+  pivot_wider(id_cols = Sample, names_from = My_annotation, values_from = celltype_counts, values_fill = NA) %>%
+  tidyr::pivot_longer(-Sample, names_to = "celltype", values_to = "counts") %>%
+  dplyr::left_join(metadata %>% dplyr::filter(data_type == "ATAC") %>% 
+                     dplyr::select(label, plotting_id, disease, MBL_subtype), by = join_by(Sample == label)) %>%
+  dplyr::arrange(desc(plotting_id)) %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  dplyr::mutate(
+    MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL")),
+    celltype = case_when(celltype == "MBL_B_Cells" & MBL_CLL_subtype == "LC_MBL" ~ "LC_MBL_B_Cells",
+      celltype == "MBL_B_Cells" & MBL_CLL_subtype == "HC_MBL" ~ "HC_MBL_B_Cells",
+      .default = celltype
+    )
+  ) %>% dplyr::select(Sample, celltype, counts, MBL_CLL_subtype) %>% 
+  dplyr::filter(!is.na(counts)) %>% 
+  tidyr::pivot_wider(id_cols = c(Sample, MBL_CLL_subtype), names_from = celltype, values_from = counts) %>% 
+  dplyr::mutate(Total = rowSums(across(B:CLL_B_Cells), na.rm = TRUE),
+                B_perc = B / Total * 100,
+                HC_MBL_perc = HC_MBL_B_Cells / Total * 100,
+                LC_MBL_perc = LC_MBL_B_Cells / Total * 100,
+                CLL_perc = CLL_B_Cells / Total * 100
+              ) 
+
+mean_B_percentage <- Blike_celltype_percentages %>% 
+  group_by(MBL_CLL_subtype) %>% 
+  dplyr::summarise(Mean_B_percentage=mean(B_perc, na.rm=TRUE)) %>% deframe()
+mean_B_percentage
+```
+
+# Healthy B cells comparison to malignant B cells
+
+```{r}
+b_cell_abundance_plot <- left_join(celltype_annotation, MBL_CLL_subtype) %>%
+  tidyr::separate(label_cellbarcode, c("label", NA), sep = "#") %>%
+  tidyr::separate(label, c("patient_id", NA), sep = "\\.") %>%
+  group_by(MBL_CLL_subtype, celltype_annotation, patient_id) %>%
+  dplyr::summarise(counts = n()) %>%
+  ungroup() %>%
+  group_by(MBL_CLL_subtype, celltype_annotation) %>%
+  dplyr::summarise(
+    sd_celltype_abundance = sd(counts, na.rm = TRUE),
+    median_abundance = median(counts)
+  ) %>%
+  dplyr::filter(celltype_annotation %in% c("B", "MBL_B_Cells", "CLL_B_Cells")) %>%
+  dplyr::mutate(percent = median_abundance / sum(median_abundance)) %>%
+  dplyr::filter(celltype_annotation == "B") %>%
+  dplyr::mutate(MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL"))) %>%
+  ggplot(aes(x = MBL_CLL_subtype, y = percent, fill = celltype_annotation)) +
+  geom_bar(stat = "identity") +
+  scale_x_discrete(labels = c("LC_MBL" = "LC MBL", "HC_MBL" = "HC MBL", "CLL" = "CLL")) +
+  scale_fill_manual(
+    values = annotation_colours_named,
+    name = "Cell type",
+    labels = c("B cells")
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 0.08, 0.02),
+    labels = seq(0, 8, 2),
+    expand = expansion(mult = c(0, NA)),
+    limits = c(0, 0.08)
+  ) +
+  labs(x = "", y = "B cell frequency [%]") +
+  theme_pub()
+
+b_cell_abundance_plot
+
+saveRDS(b_cell_abundance_plot, file = file.path(analysis_dir, "RDS_objects/b_cell_abundance_plot.RDS"))
+```
+
+### Add Imputation Gene Scores
+```{r}
+CLLProj <- addImputeWeights(CLLProj)
+```
+
+#### Plot Gene Scores
+```{r}
+markerGenes <- c(
+  "PAX5", "MS4A1", "EBF1", "MME", # B-Cell Trajectory
+  "CD14", "CEBPB", "MPO", # Monocytes
+  "CD3D", "CD8A", "TBX21", "IL7R", # TCells
+  "CD19", "CD5", "FCER2", "CD79b", # CLL B-Cell Marker
+  "GNLY", "NKG7", "NCAM1" # NK cells
+)
+
+gene_score_plots <- plotEmbedding(
+  ArchRProj = CLLProj,
+  colorBy = "GeneScoreMatrix",
+  name = markerGenes,
+  embedding = "UMAP_IterativeLSI",
+  imputeWeights = getImputeWeights(CLLProj),
+  plotAs = "points"
+)
+
+gene_score_plots %>%
+  imap(~.x[["data"]] %>%
+         write_tsv(file = file.path(tsv_dir, paste0("gene_scores_", .y, ".tsv"))))
+```
+
+### Add pseudobulk replicates
+
+```{r}
+CLLProj <- addGroupCoverages(
+  ArchRProj = CLLProj,
+  groupBy = "My_annotation"
+)
+```
+
+### Peak calling
+
+```{r}
+CLLProj <- addReproduciblePeakSet(
+  ArchRProj = CLLProj,
+  groupBy = "My_annotation",
+  pathToMacs2 = pathToMacs3)
+
+saveArchRProject(ArchRProj = CLLProj, 
+                 outputDirectory = ArchR_dir_subset, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+```
+
+```{r}
+CLLProj <- addPeakMatrix(CLLProj)
+
+saveArchRProject(ArchRProj = CLLProj, 
+                 outputDirectory = ArchR_dir_subset, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+
+getAvailableMatrices(CLLProj)
+```
+
+### Add TF Mofif Annotations
+
+```{r}
+CLLProj <- addMotifAnnotations(
+  ArchRProj = CLLProj,
+  motifSet = "cisbp",
+  annoName = "Motif"
+)
+
+saveArchRProject(ArchRProj = CLLProj, 
+                 outputDirectory = ArchR_dir_subset, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+```
+
+```{r}
+# background peaks added
+CLLProj <- addBgdPeaks(CLLProj, method = "chromVAR")
+```
+
+```{r}
+# motif deviation matrix added
+CLLProj <- addDeviationsMatrix(
+  ArchRProj = CLLProj,
+  bgdPeaks = getBgdPeaks(CLLProj,
+    method = "chromVAR"),
+  peakAnnotation = "Motif",
+  threads = 16
+)
+```
+
+#### Plot Motifs
+```{r fig.width=3, fig.height=3}
+# only the ones which actually are TFs of the following will be found
+motifs <- c(
+  "PAX5", "EBF1", # B-Cell Trajectory
+  "CEBPB",  "CEBPA",  # Monocytes
+  "TBX21", "RUNX1", # T-Cells
+  "CD19", "CD5", "FCER2", "CD79b", # CLL B-Cell Marker
+  "EOMES" # NK cells
+)
+
+markerMotifs <- getFeatures(CLLProj, 
+                            select = paste(motifs, collapse="|"), 
+                            useMatrix = "MotifMatrix")
+
+# Get only z-scores and remove SREBF1_22
+markerMotifs <- grep("z:", markerMotifs, value = TRUE)
+markerMotifs <- markerMotifs[markerMotifs %ni% c("z:SREBF1_22", "z:ARID2_11", "z:BCL6B_218")]
+
+motif_zscore_plots <- plotEmbedding(
+    ArchRProj = CLLProj, 
+    colorBy = "MotifMatrix", 
+    name = markerMotifs, 
+    embedding = "UMAP_IterativeLSI",
+    imputeWeights = getImputeWeights(CLLProj))
+
+motif_zscore_plots %>%
+  imap(~.x[["layers"]][[1]][["data"]] %>%
+         write_tsv(file = file.path(tsv_dir, paste0("motif_zscore_", str_split_i( .y, pattern = "z:", i = 2), ".tsv"))))
+```
+
+## Gene Tracks all celltypes
+```{r}
+B_like_annotation <- tibble(
+  "label_cellbarcode" = rownames(CLLProj@cellColData),
+  "label" = str_split_i(rownames(CLLProj@cellColData), pattern = "#", i = 1),
+  "My_annotation"=CLLProj@cellColData$My_annotation) %>%
+  dplyr::left_join(metadata %>%
+    dplyr::select(MBL_subtype, disease, label) %>%
+    tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+    dplyr::select(label, MBL_CLL_subtype) %>% unique()) %>% 
+  dplyr::mutate(B_like_annotation=case_when(My_annotation == "MBL_B_Cells" & MBL_CLL_subtype == "HC_MBL" ~ "HC_MBL_B_Cells",
+                                            My_annotation == "MBL_B_Cells" & MBL_CLL_subtype == "LC_MBL" ~ "LC_MBL_B_Cells"))
+
+CLLProj <- addCellColData(
+  ArchRProj = CLLProj,
+  data = B_like_annotation[["B_like_annotation"]],
+  cells = B_like_annotation[["label_cellbarcode"]],
+  name = "B_like_annotation", force=TRUE
+)
+
+Celltype_tracks <- list()
+Celltype_tracks["CD5"]<- plotBrowserTrack(
+  ArchRProj = CLLProj,
+  groupBy = "B_like_annotation",
+  geneSymbol = c("CD5"),
+  upstream = 15000,
+  downstream = 30000
+)
+
+Celltype_tracks["FCER2"]  <- plotBrowserTrack(
+  ArchRProj = CLLProj,
+  groupBy = "B_like_annotation",
+  geneSymbol = c("FCER2"),
+  upstream = 15000,
+  downstream = 15000
+)
+
+Celltype_tracks["MME"]  <- plotBrowserTrack(
+  ArchRProj = CLLProj,
+  groupBy = "B_like_annotation",
+  geneSymbol = c("MME"),
+  upstream = 40000,
+  downstream = 170000
+)
+
+for (track in 1:length(Celltype_tracks)) {
+  grid::grid.newpage()
+  grid::grid.draw(Celltype_tracks[[track]])
+}
+
+saveRDS(Celltype_tracks, file.path(RDS_dir_subset, "Celltype_tracks.RDS"))
+```
+
+
+# Subset to only LC-MBL and corresopnding healthy B cells
+
+```{r}
+MBL_CLL_subtype_annotation <- tibble(
+  "label_cellbarcode" = rownames(CLLProj@cellColData),
+  "label" = str_split_i(rownames(CLLProj@cellColData), pattern = "#", i = 1)
+) %>%
+  dplyr::left_join(metadata %>%
+    dplyr::select(MBL_subtype, disease, label) %>%
+    tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+    dplyr::select(label, MBL_CLL_subtype) %>% unique())
+
+CLLProj <- addCellColData(
+  ArchRProj = CLLProj,
+  data = MBL_CLL_subtype_annotation[["MBL_CLL_subtype"]],
+  cells = MBL_CLL_subtype_annotation[["label_cellbarcode"]],
+  name = "MBL_CLL_subtype"
+)
+
+idxSample_2 <- BiocGenerics::which(CLLProj@cellColData$My_annotation %in% c("MBL_B_Cells", "B") &
+  CLLProj@cellColData$MBL_CLL_subtype %in% c("LC_MBL"))
+cellsSample_2 <- CLLProj$cellNames[idxSample_2]
+
+# CLLProj_LC_B <- subsetArchRProject(
+#   ArchRProj = CLLProj,
+#   cells = cellsSample_2,
+#   outputDirectory = ArchR_dir_LC_subset,
+#   dropCells = TRUE
+# )
+
+CLLProj_LC_B <- loadArchRProject(path = ArchR_dir_LC_subset)
+```
+
+### Add pseudobulk replicates
+
+```{r}
+CLLProj_LC_B <- addGroupCoverages(
+  ArchRProj = CLLProj_LC_B,
+  groupBy = "My_annotation"
+)
+```
+
+ ### Peak calling
+
+```{r}
+CLLProj_LC_B <- addReproduciblePeakSet(
+  ArchRProj = CLLProj_LC_B,
+  groupBy = "My_annotation",
+  pathToMacs2 = pathToMacs3
+)
+
+saveArchRProject(
+  ArchRProj = CLLProj_LC_B,
+  outputDirectory = ArchR_dir_LC_subset,
+  load = FALSE,
+  overwrite = TRUE
+)
+```
+
+```{r}
+CLLProj_LC_B <- addPeakMatrix(CLLProj_LC_B)
+
+saveArchRProject(
+  ArchRProj = CLLProj_LC_B,
+  outputDirectory = ArchR_dir_LC_subset,
+  load = FALSE,
+  overwrite = TRUE
+)
+
+getAvailableMatrices(CLLProj_LC_B)
+```
+
+### Marker Peaks
+
+```{r}
+# Gets peaks which are unique to cell types
+markersPeaks_LC_B <- getMarkerFeatures(
+  ArchRProj = CLLProj_LC_B,
+  useMatrix = "PeakMatrix",
+  groupBy = "My_annotation",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon",
+  threads = 1
+)
+
+markerList_LC_B <- getMarkers(markersPeaks_LC_B, cutOff = "FDR <= 0.1 & Log2FC >= 1")
+```
+
+### Volcano Plots MarkerPeaks
+
+```{r, fig.width=10,fig.height=5}
+# unique peaks for MBL or CLL cells compared to all other cell types
+volcanoplot_MP_MBL_LC_B <- plotMarkers(
+  seMarker = markersPeaks_LC_B,
+  name = "MBL_B_Cells",
+  cutOff = "FDR <= 0.1 & Log2FC >= 1",
+  plotAs = "Volcano"
+) +
+  geom_point(size = 3) +
+  scale_colour_manual(
+    name = "DAR",
+    values = c("Down-Regulated" = "darkred", "Up-Regulated" = "#FC8D62", "Not-Differential" = "#D3D3D3"),
+    labels = c("Down-Regulated" = "B", "Up-Regulated" = "LC-MBL", "Not-Differential" = "not significant")
+  ) +
+  theme_pub()
+
+volcanoplot_MP_B <- plotMarkers(
+  seMarker = markersPeaks_LC_B,
+  name = "B",
+  cutOff = "FDR <= 0.1 & Log2FC >= 1",
+  plotAs = "Volcano"
+) +
+  geom_point(size = 3) +
+  scale_colour_manual(
+    name = "DAR",
+    values = c("Down-Regulated" = "#FC8D62", "Up-Regulated" = "darkred", "Not-Differential" = "#D3D3D3"),
+    labels = c("Down-Regulated" = "MBL", "Up-Regulated" = "B", "Not-Differential" = "not significant")
+  ) +
+  theme_pub()
+
+ggarrange(volcanoplot_MP_MBL_LC_B, volcanoplot_MP_B, ncol = 2) %>%
+  ggsave(
+    plot = .,
+    filename = file.path(plotting_dir_LC_subset, "Unique_Markers_LC_B_Volcanoplot.pdf"),
+    width = 45,
+    height = 22.5,
+    unit = "cm"
+  )
+```
+
+### Volcano plots Pairwise testing
+
+```{r}
+# unique peaks between MBL and CLL cells only!
+markerTest_LC_B <- getMarkerFeatures(
+  ArchRProj = CLLProj_LC_B,
+  useMatrix = "PeakMatrix",
+  groupBy = "My_annotation",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "MBL_B_Cells",
+  bgdGroups = "B"
+)
+
+volcanoplot_PWT_B <- plotMarkers(
+  seMarker = markerTest_LC_B,
+  name = "MBL_B_Cells",
+  cutOff = "FDR <= 0.1 & abs(Log2FC) >= 1",
+  plotAs = "Volcano",
+  rastr = TRUE
+) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.1)), color = "grey", linetype = "dashed") +
+  scale_y_continuous(
+    name = "-Log10(FDR)",
+    breaks = seq(0, 12.5, 2.5),
+    limits = c(0, 12.5),
+    expand = expansion(mult = c(0, 0.01)),
+    oob = scales::oob_squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "DARs",
+    values = c("Down-Regulated" = "darkred", "Up-Regulated" = "#FC8D62", "Not-Differential" = "#D3D3D3"),
+    labels = c("Down-Regulated" = "B", "Up-Regulated" = "MBL", "Not-Differential" = "Not significant")
+  ) +
+  theme_pub() +
+  labs(title = "")
+
+volcanoplot_PWT_B[["layers"]][[2]] <- NULL
+
+volcanoplot_PWT_B
+
+ggarrange(volcanoplot_PWT_B, ncol = 1) %>%
+  ggsave(
+    plot = .,
+    filename = file.path(plotting_dir_LC_subset, "Upregulation_MBL_Volcanoplot.pdf"),
+    width = 22.5,
+    height = 22.5,
+    unit = "cm"
+  )
+
+saveRDS(volcanoplot_PWT_B, file.path(RDS_dir_LC_subset, "volcanoplot_PWT_LC_B.RDS"))
+```
+
+### Add TF Mofif Annotations
+
+```{r}
+CLLProj_LC_B <- addMotifAnnotations(
+  ArchRProj = CLLProj_LC_B,
+  motifSet = "cisbp",
+  annoName = "Motif"
+)
+```
+
+```{r}
+# background peaks added
+CLLProj_LC_B <- addBgdPeaks(CLLProj_LC_B, method = "chromVAR")
+```
+
+```{r}
+# motif deviation matrix added
+CLLProj_LC_B <- addDeviationsMatrix(
+  ArchRProj = CLLProj_LC_B,
+  bgdPeaks = getBgdPeaks(CLLProj_LC_B,
+    method = "chromVAR"
+  ),
+  peakAnnotation = "Motif",
+  threads = 1
+)
+```
+
+### Get Matrix from project
+
+```{r}
+MotifMatrix_tmp_LC_B <- getMatrixFromProject(
+  ArchRProj = CLLProj_LC_B,
+  useMatrix = "MotifMatrix",
+  useSeqnames = NULL,
+  verbose = TRUE,
+  binarize = FALSE,
+  threads = 1
+)
+
+zscore_matrix_LC_B <- as.matrix(assays(MotifMatrix_tmp_LC_B)$z) %>%
+  as.data.frame()
+
+deviations_matrix_LC_B <- as.matrix(assays(MotifMatrix_tmp_LC_B)$deviations) %>%
+  as.data.frame()
+
+VarDeviation_LC_B <- getVarDeviations(CLLProj_LC_B,
+  name = "MotifMatrix",
+  plot = FALSE
+) %>%
+  as.data.frame()
+
+Top_TF_target_LC_B <- head(VarDeviation_LC_B$name, n = 100)
+
+zscore_part_LC_B <- zscore_matrix_LC_B[Top_TF_target_LC_B, ]
+```
+
+```{r}
+condition_LC_B <- tibble(
+  "label_cellbarcode" = CLLProj_LC_B$cellNames,
+  "My_annotation" = CLLProj_LC_B$My_annotation
+)
+
+MBL_cells_LC_B <- dplyr::filter(condition_LC_B, My_annotation == "MBL_B_Cells") %>%
+  pull(label_cellbarcode)
+
+B_cells_LC_B <- dplyr::filter(condition_LC_B, My_annotation == "B") %>%
+  pull(label_cellbarcode)
+
+# # calculate data for volcano plot
+input_zscore_matrix_LC_B <- deviations_matrix_LC_B
+
+# If no NA values are found in zcore matrix calculate statistics
+condition1_LC_B <- B_cells_LC_B
+condition2_LC_B <- MBL_cells_LC_B
+
+volcano.data_LC_B <- data.frame()
+i <- 0
+for (TF in rownames(input_zscore_matrix_LC_B)) {
+  i <- i + 1
+  print(i)
+  print(TF)
+  if (length(which(is.na(input_zscore_matrix_LC_B[TF, ]))) == 0) {
+    p.value <- wilcox.test(as.numeric(input_zscore_matrix_LC_B[TF, condition2_LC_B]), as.numeric(input_zscore_matrix_LC_B[TF, condition1_LC_B]))$p.value
+    diff.accessibility <- median(as.numeric(input_zscore_matrix_LC_B[TF, condition2_LC_B])) - median(as.numeric(input_zscore_matrix_LC_B[TF, condition1_LC_B]))
+    volcano.data_LC_B <- rbind(volcano.data_LC_B, data.frame(TF = TF, p.value = p.value, diff.accessibility = diff.accessibility))
+  }
+}
+
+volcano.data_LC_B$p.adj <- p.adjust(volcano.data_LC_B$p.value)
+volcano.data_LC_B$p.adj[which(volcano.data_LC_B$p.adj == 0)] <- min(volcano.data_LC_B$p.adj[which(volcano.data_LC_B$p.adj != 0)])
+
+volcano.data_LC_B$diff.accessibility <- as.numeric(volcano.data_LC_B$diff.accessibility)
+volcano.data_LC_B$p.adj <- as.numeric(volcano.data_LC_B$p.adj)
+
+
+volcano.data_LC_B$significant <- ifelse(abs(volcano.data_LC_B$diff.accessibility) > 1.5 & volcano.data_LC_B$p.adj <= 0.05, "significant", "not significant")
+volcano.data_LC_B <- volcano.data_LC_B %>%
+  dplyr::mutate(
+    "significant" = case_when(
+      p.adj >= 0.05 ~ "not significant",
+      abs(diff.accessibility) < 1.5 ~ "not significant",
+      diff.accessibility > 1.5 & p.adj < 0.05 ~ "MBL",
+      diff.accessibility < -1.5 & p.adj < 0.05 ~ "B"
+    ),
+    "label" = if_else(significant != "not significant", stringr::str_split_fixed(TF, pattern = "_", n = 2)[, 1], NA)
+  )
+
+
+saveRDS(volcano.data_LC_B, file = file.path(RDS_dir_LC_subset, "volcano.data_LC_B.RDS"))
+```
+
+### Plot Differential TF enrichment
+
+```{r}
+volcano.plot_LC_B <- volcano.data_LC_B %>%
+  ggplot(aes(x = diff.accessibility, y = -log10(p.adj), colour = significant, label = label)) +
+  geom_vline(xintercept = c(-1.5, 1.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(0.05), color = "grey", linetype = "dashed") +
+  geom_point(size = 1) +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40,
+    colour = "black"
+  ) +
+  scale_x_continuous(
+    name = "Difference median z-score",
+    breaks = seq(-6, 6, 2),
+    limits = c(-6, 6)
+  ) +
+  scale_y_continuous(
+    name = "-log10(FDR)",
+    limits = c(0, 350),
+    expand = expansion(mult = c(0, NA)),
+    oob = squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Differential TF motif enrichment",
+    values = c(my_MBL_CLL_colours_named, "not significant" = "lightgrey")
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+volcano.plot_LC_B
+
+volcano.plot_LC_B %>%
+  ggsave(
+    filename = file.path(plotting_dir_LC_subset, "Differential_Motif_Enrichment_Volcanoplot_LC_MBL_B.png"),
+    width = 32,
+    height = 19.2,
+    unit = "cm"
+  )
+
+saveRDS(volcano.plot_LC_B, file.path(RDS_dir_LC_subset, "volcanoplot_TF_enrichment_pb_LC_MBL_B.RDS"))
+```
+
+# Subset to healthy all B, MBL and CLL cells
+
+```{r}
+idxSample_Blike <- BiocGenerics::which(CLLProj@cellColData$patient_id != "MBL7dup" &
+  CLLProj@cellColData$My_annotation %in% c("B", "MBL_B_Cells", "CLL_B_Cells"))
+
+cellsSample_Blike <- CLLProj$cellNames[idxSample_Blike]
+
+CLLProj_Blike <- subsetArchRProject(
+  ArchRProj = CLLProj,
+  cells = cellsSample_Blike,
+  outputDirectory = ArchR_dir_Blike,
+  dropCells = TRUE
+)
+
+CLLProj_Blike <- loadArchRProject(path = ArchR_dir_Blike)
+
+# Add B_like annotation
+B_like_annotation <- tibble("label_cellbarcode" = CLLProj_Blike$cellNames) %>%
+  bind_cols(CLLProj_Blike@cellColData %>% as_tibble()) %>%
+  dplyr::mutate(B_like_annotation = case_when(My_annotation == "MBL_B_Cells" & MBL_CLL_subtype == "LC_MBL" ~ "LC_MBL_B_Cells",
+    My_annotation == "MBL_B_Cells" & MBL_CLL_subtype == "HC_MBL" ~ "HC_MBL_B_Cells",
+    .default = My_annotation
+  )) %>%
+  dplyr::select(label_cellbarcode, B_like_annotation) %>%
+  deframe()
+
+
+CLLProj_Blike <- addCellColData(
+  ArchRProj = CLLProj_Blike,
+  data = B_like_annotation,
+  cells = names(B_like_annotation),
+  name = "B_like_annotation"
+)
+
+# Add sequencing date annotation
+seqdate_annotation <- tibble("label_cellbarcode" = CLLProj_Blike$cellNames) %>%
+  tidyr::separate(label_cellbarcode, into=c("label", "cellbarcode"), sep="#", remove = F) %>% 
+  dplyr::left_join(metadata %>% dplyr::filter(data_type =="ATAC") %>% dplyr::select(label, sequencing_date)) %>% 
+  dplyr::mutate(sequencing_date=as.numeric(as.factor(sequencing_date))) %>% 
+  dplyr::select(label_cellbarcode, sequencing_date) %>%
+  deframe()
+
+CLLProj_Blike <- addCellColData(
+  ArchRProj = CLLProj_Blike,
+  data = seqdate_annotation,
+  cells = names(seqdate_annotation),
+  name = "sequencing_date"
+)
+```
+
+```{r}
+umap_seqdate <- list()
+for (row in 1:nrow(dimred_df)) {
+  dimred <- dimred_df$dimred[[row]]
+
+  umaps <- plotEmbedding(
+    ArchRProj = CLLProj_Blike,
+    colorBy = "cellColData",
+    name = "sequencing_date",
+    embedding = glue("UMAP_{dimred}"),
+    plotAs = "points" ) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    theme_pub() +
+    theme(
+      axis.ticks = element_blank(),
+      axis.text.x = element_blank(),
+      axis.text.y = element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    ) +
+    guides(colour = guide_legend(
+      keywidth = 0.5,
+      keyheight = 0.5,
+      override.aes = list(size = 3)
+    ))
+
+  umap_seqdate[[row]] <- umaps
+}
+```
+
+### Gene tracks Blike
+```{r}
+B_tracks <- plotBrowserTrack(
+  ArchRProj = CLLProj_Blike,
+  groupBy = "B_like_annotation",
+  geneSymbol = c("CD5", "FCER2", "MME"),
+  upstream = 40000,
+  downstream = 40000
+)
+
+for (track in B_tracks) {
+  grid::grid.newpage()
+  grid::grid.draw(track)
+}
+
+
+Blike_tracks <- list()
+Blike_tracks["CD5"]<- plotBrowserTrack(
+  ArchRProj = CLLProj_Blike,
+  groupBy = "B_like_annotation",
+  geneSymbol = c("CD5"),
+  upstream = 50000,
+  downstream = 50000
+)
+
+Blike_tracks["FCER2"]  <- plotBrowserTrack(
+  ArchRProj = CLLProj_Blike,
+  groupBy = "B_like_annotation",
+  geneSymbol = c("FCER2"),
+  upstream = 50000,
+  downstream = 50000
+)
+
+Blike_tracks["MME"]  <- plotBrowserTrack(
+  ArchRProj = CLLProj_Blike,
+  groupBy = "B_like_annotation",
+  geneSymbol = c("MME"),
+  upstream = 10000,
+  downstream = 170000
+)
+
+for (track in 1:length(Blike_tracks)) {
+  grid::grid.newpage()
+  grid::grid.draw(Blike_tracks[[track]])
+}
+
+saveRDS(Blike_tracks, 
+        file.path(RDS_dir_Blike,"Blike_tracks.RDS"))
+```
+
+
+### Add pseudobulk replicates
+
+```{r}
+CLLProj_Blike <- addGroupCoverages(
+  ArchRProj = CLLProj_Blike,
+  groupBy = "B_like_annotation"
+)
+```
+
+### Peak calling
+
+```{r}
+CLLProj_Blike <- addReproduciblePeakSet(
+  ArchRProj = CLLProj_Blike,
+  groupBy = "B_like_annotation",
+  pathToMacs2 = pathToMacs3
+)
+
+saveArchRProject(
+  ArchRProj = CLLProj_Blike,
+  outputDirectory = ArchR_dir_Blike,
+  load = FALSE,
+  overwrite = TRUE
+)
+```
+
+```{r}
+CLLProj_Blike <- addPeakMatrix(CLLProj_Blike)
+
+saveArchRProject(
+  ArchRProj = CLLProj_Blike,
+  outputDirectory = ArchR_dir_Blike,
+  load = FALSE,
+  overwrite = TRUE
+)
+
+getAvailableMatrices(CLLProj_Blike)
+```
+
+
+### Marker Peaks
+
+```{r}
+# Gets peaks which are unique to cell types and account for sequencing date bias
+markersPeaks_Blike <- getMarkerFeatures(
+  ArchRProj = CLLProj_Blike,
+  useMatrix = "PeakMatrix",
+  groupBy = "B_like_annotation",
+  bias = c("TSSEnrichment", "log10(nFrags)", "sequencing_date"),
+  testMethod = "wilcoxon",
+  threads = 1
+)
+markerList <- getMarkers(markersPeaks_Blike, cutOff = "FDR <= 0.05 & abs(Log2FC) >= 1")
+```
+### Volcano Plots MarkerPeaks
+
+```{r, fig.width=20,fig.height=5}
+# unique peaks for MBL or CLL cells compared to all other cell types
+volcanoplot_MP_B <- plotMarkers(
+  seMarker = markersPeaks_Blike,
+  name = "B",
+  cutOff = "FDR <= 0.05 & Log2FC >= 1",
+  plotAs = "Volcano"
+) +
+  geom_point(size = 1) +
+  scale_colour_manual(
+    name = "DAR",
+    values = c("Down-Regulated" = "gray2", "Up-Regulated" = "darkred", "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "LC-MBL and CLL cells",
+      "Up-Regulated" = "Physiologic B cells",
+      "Not-Differential" = "not significant"
+    )
+  ) +
+  theme_pub()
+
+volcanoplot_MP_LC_MBL <- plotMarkers(
+  seMarker = markersPeaks_Blike,
+  name = "LC_MBL_B_Cells",
+  cutOff = "FDR <= 0.05 & Log2FC >= 1",
+  plotAs = "Volcano"
+) +
+  geom_point(size = 1) +
+  scale_colour_manual(
+    name = "DAR",
+    values = c("Down-Regulated" = "gray2", "Up-Regulated" = "#fcbda4", "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "Physiologic and CLL cells",
+      "Up-Regulated" = "LC-MBL cells",
+      "Not-Differential" = "not significant"
+    )
+  ) +
+  theme_pub()
+
+volcanoplot_MP_HC_MBL <- plotMarkers(
+  seMarker = markersPeaks_Blike,
+  name = "HC_MBL_B_Cells",
+  cutOff = "FDR <= 0.05 & Log2FC >= 1",
+  plotAs = "Volcano"
+) +
+  geom_point(size = 3) +
+  scale_colour_manual(
+    name = "DAR",
+    values = c("Down-Regulated" = "gray2", "Up-Regulated" = "#FC8D62", "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "Physiologic and CLL cells",
+      "Up-Regulated" = "HC-MBL cells",
+      "Not-Differential" = "not significant"
+    )
+  ) +
+  theme_pub()
+
+volcanoplot_MP_CLL <- plotMarkers(
+  seMarker = markersPeaks_Blike,
+  name = "CLL_B_Cells",
+  cutOff = "FDR <= 0.05 & Log2FC >= 1",
+  plotAs = "Volcano"
+) +
+  geom_point(size = 1) +
+  scale_colour_manual(
+    name = "DAR",
+    values = c("Down-Regulated" = "gray2", "Up-Regulated" = "#66C2A5", "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "Physiologic B and LC-MBL cells",
+      "Up-Regulated" = "CLL cells",
+      "Not-Differential" = "not significant"
+    )
+  ) +
+  theme_pub()
+
+ggarrange(volcanoplot_MP_B, volcanoplot_MP_LC_MBL, volcanoplot_MP_HC_MBL, volcanoplot_MP_CLL, ncol = 4) %>%
+  ggsave(
+    plot = .,
+    filename = file.path(plotting_dir_Blike, "Unique_Markers_Blike_Volcanoplot.pdf"),
+    width = 20,
+    height = 5,
+    unit = "in"
+  )
+```
+
+### Pairwise peaks
+
+```{r }
+markerTest_LC_MBL_HC_MBL <- getMarkerFeatures(
+  ArchRProj = CLLProj_Blike,
+  useMatrix = "PeakMatrix",
+  groupBy = "B_like_annotation",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)", "sequencing_date"),
+  useGroups = "HC_MBL_B_Cells",
+  bgdGroups = "LC_MBL_B_Cells"
+)
+
+markerTest_LC_MBL_CLL <- getMarkerFeatures(
+  ArchRProj = CLLProj_Blike,
+  useMatrix = "PeakMatrix",
+  groupBy = "B_like_annotation",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)", "sequencing_date"),
+  useGroups = "CLL_B_Cells",
+  bgdGroups = "LC_MBL_B_Cells"
+)
+
+markerTest_HC_MBL_CLL <- getMarkerFeatures(
+  ArchRProj = CLLProj_Blike,
+  useMatrix = "PeakMatrix",
+  groupBy = "B_like_annotation",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)", "sequencing_date"),
+  useGroups = "CLL_B_Cells",
+  bgdGroups = "HC_MBL_B_Cells"
+)
+
+
+# unique peaks between LC-MBL and B cells only!
+markerTest_B_LC_MBL <- getMarkerFeatures(
+  ArchRProj = CLLProj_Blike,
+  useMatrix = "PeakMatrix",
+  groupBy = "B_like_annotation",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)", "sequencing_date"),
+  useGroups = "LC_MBL_B_Cells",
+  bgdGroups = "B"
+)
+
+markerTest_B_HC_MBL <- getMarkerFeatures(
+  ArchRProj = CLLProj_Blike,
+  useMatrix = "PeakMatrix",
+  groupBy = "B_like_annotation",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)", "sequencing_date"),
+  useGroups = "HC_MBL_B_Cells",
+  bgdGroups = "B"
+)
+
+markerTest_B_CLL <- getMarkerFeatures(
+  ArchRProj = CLLProj_Blike,
+  useMatrix = "PeakMatrix",
+  groupBy = "B_like_annotation",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)", "sequencing_date"),
+  useGroups = "CLL_B_Cells",
+  bgdGroups = "B"
+)
+```
+
+
+```{r}
+result <- plotMarkerHeatmap(
+  plotLog2FC = T,
+  transpose = T,
+  seMarker = markerTest_B_CLL,
+  cutOff = "FDR <= 0.05 & abs(Log2FC) >= 1.5")
+```
+
+### Volcano plots Pairwise testing
+```{r fig.width=12, fig.height=4}
+volcanoplot_PWT_LC_MBL_HC_MBL <-plotMarkers(
+  seMarker = markerTest_LC_MBL_HC_MBL,
+  name = "HC_MBL_B_Cells",
+  cutOff = "FDR <= 0.05 & abs(Log2FC) >= 1",
+  plotAs = "Volcano",
+  rastr = TRUE
+) + 
+geom_vline(xintercept = c(-1.5, 1.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.1)), color = "grey", linetype = "dashed") +
+  scale_y_continuous(
+    name = "-log10(FDR)",
+    breaks = seq(0, 30,10),
+    limits = c(0, 30),
+    # expand = expansion(mult = c(0, 0.01)),
+    oob = scales::oob_squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Peak accessible in",
+    values = c("Down-Regulated" ="#fcbda4" ,"Up-Regulated" ="#FC8D62" , "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "LC-MBL cells",
+      "Up-Regulated" = "HC-MBL cells",
+      "Not-Differential" = "Not significant"
+    )
+  ) +
+  theme_pub() 
+
+
+volcanoplot_PWT_LC_MBL_CLL <- plotMarkers(
+  seMarker = markerTest_LC_MBL_CLL,
+  name = "CLL_B_Cells",
+  cutOff = "FDR <= 0.05 & abs(Log2FC) >= 1",
+  plotAs = "Volcano",
+  rastr = TRUE
+) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.1)), color = "grey", linetype = "dashed") +
+  scale_y_continuous(
+    name = "-Log10(FDR)",
+    breaks = seq(0, 30,10),
+    limits = c(0, 30),
+    # expand = expansion(mult = c(0, 0.01)),
+    oob = scales::oob_squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Peak accessible in",
+    values = c("Down-Regulated" = "#fcbda4", "Up-Regulated" ="#66C2A5" , "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "LC-MBL cells",
+      "Up-Regulated" = "CLL cells",
+      "Not-Differential" = "Not significant"
+    )
+  ) +
+  theme_pub() 
+
+volcanoplot_PWT_HC_MBL_CLL <- plotMarkers(
+  seMarker = markerTest_HC_MBL_CLL,
+  name = "CLL_B_Cells",
+  cutOff = "FDR <= 0.05 & abs(Log2FC) >= 1",
+  plotAs = "Volcano",
+  rastr = TRUE
+) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.1)), color = "grey", linetype = "dashed") +
+  scale_y_continuous(
+    name = "-Log10(FDR)",
+    breaks = seq(0, 30,10),
+    limits = c(0,30),
+    # expand = expansion(mult = c(0, 0.01)),
+    oob = scales::oob_squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Peak accessible in",
+    values = c("Down-Regulated" = "#FC8D62", "Up-Regulated" ="#66C2A5" , "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "HC-MBL cells",
+      "Up-Regulated" = "CLL cells",
+      "Not-Differential" = "Not significant"
+    )
+  ) +
+  theme_pub() 
+
+
+
+volcanoplot_PWT_B_LC_MBL <- plotMarkers(
+  seMarker = markerTest_B_LC_MBL,
+  name = "LC_MBL_B_Cells",
+  cutOff = "FDR <= 0.05 & abs(Log2FC) >= 1",
+  plotAs = "Volcano",
+  rastr = TRUE
+) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.1)), color = "grey", linetype = "dashed") +
+  scale_y_continuous(
+    name = "-Log10(FDR)",
+    breaks = seq(0, 30,10),
+    limits = c(0,30),
+    # expand = expansion(mult = c(0, 0.01)),
+    oob = scales::oob_squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Peak accessible in",
+    values = c("Down-Regulated" = "darkred", "Up-Regulated" = "#fcbda4", "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "Physiologic B cells",
+      "Up-Regulated" = "LC-MBL cells",
+      "Not-Differential" = "Not significant"
+    )
+  ) +
+  theme_pub() #+
+  # labs(title = "")
+
+volcanoplot_PWT_B_HC_MBL <- plotMarkers(
+  seMarker = markerTest_B_HC_MBL,
+  name = "HC_MBL_B_Cells",
+  cutOff = "FDR <= 0.05 & abs(Log2FC) >= 1",
+  plotAs = "Volcano",
+  rastr = TRUE
+) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.1)), color = "grey", linetype = "dashed") +
+  scale_y_continuous(
+    name = "-Log10(FDR)",
+    breaks = seq(0, 30,10),
+    limits = c(0,30),
+    # expand = expansion(mult = c(0, 0.01)),
+    oob = scales::oob_squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Peak accessible in",
+    values = c("Down-Regulated" = "darkred", "Up-Regulated" = "#FC8D62", "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "Physiologic B cells",
+      "Up-Regulated" = "HC-MBL cells",
+      "Not-Differential" = "Not significant"
+    )
+  ) +
+  theme_pub() #+
+  # labs(title = "")
+
+volcanoplot_PWT_B_CLL <- plotMarkers(
+  seMarker = markerTest_B_CLL,
+  name = "CLL_B_Cells",
+  cutOff = "FDR <= 0.05 & abs(Log2FC) >= 1",
+  plotAs = "Volcano",
+  rastr = TRUE
+) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.1)), color = "grey", linetype = "dashed") +
+  scale_y_continuous(
+    name = "-Log10(FDR)",
+    breaks = seq(0, 30,10),
+    limits = c(0,30),
+    # expand = expansion(mult = c(0, 0.01)),
+    oob = scales::oob_squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Peak accessible in",
+    values = c("Down-Regulated" = "darkred", "Up-Regulated" = "#66C2A5", "Not-Differential" = "#D3D3D3"),
+    labels = c(
+      "Down-Regulated" = "Physiologic B cells",
+      "Up-Regulated" = "CLL cells",
+      "Not-Differential" = "Not significant"
+    )
+  ) +
+  theme_pub() #+
+  # labs(title = "")
+
+ggarrange(volcanoplot_PWT_B_LC_MBL, volcanoplot_PWT_B_HC_MBL, volcanoplot_PWT_B_CLL, nrow=1)
+ggarrange(volcanoplot_PWT_LC_MBL_HC_MBL, volcanoplot_PWT_LC_MBL_CLL, volcanoplot_PWT_HC_MBL_CLL, nrow=1)
+
+ggarrange(volcanoplot_PWT_B_LC_MBL, volcanoplot_PWT_B_HC_MBL, volcanoplot_PWT_B_CLL, nrow=1) %>% 
+  ggsave(file=file.path(plotting_dir_Blike, "Peaks_volcanoplots.png"), units = "in", width=12 , height =4 )
+```
+
+```{r }
+ggsave(
+  plot = volcanoplot_PWT_B_LC_MBL,
+  filename = file.path(plotting_dir_Blike, "Upregulation_LC_MBL_Volcanoplot.pdf"),
+  width = 5,
+  height = 5,
+  unit = "in"
+)
+
+ggsave(
+  plot = volcanoplot_PWT_B_HC_MBL,
+  filename = file.path(plotting_dir_Blike, "Upregulation_HC_MBL_Volcanoplot.pdf"),
+  width = 5,
+  height = 5,
+  unit = "in"
+)
+
+ggsave(
+  plot = volcanoplot_PWT_B_CLL,
+  filename = file.path(plotting_dir_Blike, "Upregulation_CLL_Volcanoplot.pdf"),
+  width = 5,
+  height = 5,
+  unit = "in"
+)
+
+saveRDS(volcanoplot_PWT_B_LC_MBL, file.path(RDS_dir_Blike, "volcanoplot_PWT_B_LC_MBL.RDS"))
+saveRDS(volcanoplot_PWT_B_HC_MBL, file.path(plotting_dir_Blike, "volcanoplot_PWT_B_HC_MBL.RDS"))
+saveRDS(volcanoplot_PWT_B_CLL, file.path(plotting_dir_Blike, "volcanoplot_PWT_B_CLL.RDS"))
+```
+
+```{r}
+saveArchRProject(
+  ArchRProj = CLLProj_Blike,
+  outputDirectory = ArchR_dir_Blike,
+  load = FALSE,
+  overwrite = TRUE
+)
+```
+
+### Add TF Mofif Annotations
+
+```{r}
+CLLProj_Blike <- addMotifAnnotations(
+  ArchRProj = CLLProj_Blike,
+  motifSet = "cisbp",
+  annoName = "Motif"
+)
+```
+
+
+```{r calculate_motif_enrichment}
+calculate_motif_enrichment <- function(seMarker_object){
+  
+  motifsUp <- peakAnnoEnrichment(
+      seMarker = seMarker_object,
+      ArchRProj = CLLProj_Blike,
+      peakAnnotation = "Motif",
+      cutOff = "FDR <= 0.05 & Log2FC >= 1" # these are the criteria for the peaks which should be compared, not the TFs
+    ) 
+  
+  motifsDo <- peakAnnoEnrichment(
+      seMarker = seMarker_object,
+      ArchRProj = CLLProj_Blike,
+      peakAnnotation = "Motif",
+      cutOff = "FDR <= 0.05 & Log2FC <= -1" # these are the criteria for the peaks which should be compared, not the TFs
+    ) 
+  
+  return(list(motifsUp, motifsDo) %>% 
+           set_names("MotifsUp", "MotifsDo"))
+}
+```
+
+
+```{r}
+all_motif_enrichments <- list(markerTest_B_LC_MBL,
+     markerTest_B_HC_MBL,
+     markerTest_B_CLL,
+     markerTest_LC_MBL_HC_MBL,
+     markerTest_HC_MBL_CLL,
+     markerTest_LC_MBL_CLL) %>% 
+  set_names(c("B_LC-MBL", "B_HC-MBL", "B_CLL", "LC-MBL_HC-MBL", "HC-MBL_CLL", "LC-MBL_CLL")) %>% 
+  map(~calculate_motif_enrichment(.))
+```
+
+```{r}
+visualise_motif_enrichment_rank <- function(up_down_list, comparison) {
+  df_up <- data.frame(TF = rownames(up_down_list$MotifsUp), mlog10Padj = assay(up_down_list$MotifsUp)[, 1])
+  df_up <- df_up[order(df_up$mlog10Padj, decreasing = TRUE), ]
+  df_up$rank <- seq_len(nrow(df_up))
+
+  ggUp <- df_up %>%
+    dplyr::mutate(TF_label = if_else(rank %in% 1:5, TF, NA)) %>%
+    ggplot(aes(rank, mlog10Padj, color = mlog10Padj, label = TF_label)) +
+    geom_point(size = 0.5) +
+    geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+    ggrepel::geom_label_repel(
+      label.size = NA,
+      size = 1,
+      # nudge_x = 2,
+      color = "black",
+      max.overlaps = 10
+    )  +
+    labs(x = "Rank", y = "", title = "Upregulated motifs") +
+    scale_y_continuous(limits=c(0, 160))+
+    scale_color_gradientn(colors = c("lightgrey", get_palette(palette ="YlOrRd", k = 9 )), 
+                          breaks=c(0, seq(-log10(0.05), 160, length.out=9)),
+                          labels = round(c(0, seq(-log10(0.05), 160, length.out = 9)), 2),
+                          limits = c(0, 160))+
+    theme_pub() +
+    theme(legend.position = "none",
+          axis.line.y=element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.y=element_blank())
+
+
+  df_do <- data.frame(TF = rownames(up_down_list$MotifsDo), mlog10Padj = assay(up_down_list$MotifsDo)[, 1])
+  df_do <- df_do[order(df_do$mlog10Padj, decreasing = TRUE), ]
+  df_do$rank <- seq_len(nrow(df_do))
+
+  ggDo <- df_do %>%
+    dplyr::mutate(TF_label = if_else(rank %in% 1:5, TF, NA)) %>%
+    ggplot(aes(rank, mlog10Padj, color = mlog10Padj, label = TF_label)) +
+    geom_point(size = 0.5) +
+    geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+    geom_label_repel(
+      label.size = NA,
+      size = 1,
+      # nudge_x = 2,
+      max.overlaps = 10,
+      color = "black"
+    )  +
+    labs(x = "Rank", y = "-log10(FDR)", title = "Downregulated motifs") +
+    scale_y_continuous(limits=c(0, 160))+
+    scale_color_gradientn(colors = c("lightgrey", get_palette(palette ="YlOrRd", k = 9 )), 
+                          breaks=c(0, seq(-log10(0.05), 160, length.out=9)),
+                          labels = round(c(0, seq(-log10(0.05), 160, length.out = 9)),0),
+                          limits = c(0, 160))+
+    theme_pub() +
+    theme(legend.position = "none")
+  
+  up_do_plot <- ggarrange(ggDo, ggUp,  nrow=1, ncol=2, common.legend = TRUE, legend="none") #%>% annotate_figure(top = text_grob(comparison, size=12))
+  return(up_do_plot)
+}
+```
+
+```{r visualise_motif_enrichment_volcano}
+# visualise_motif_enrichment_volcano <- function(up_down_list, comparison) {
+#   volcano_data <-tibble("TF" = up_down_list@NAMES) %>%
+#       bind_cols(assay(up_down_list, "mlog10Padj"), assay(up_down_list, "Enrichment")) %>%
+#       `colnames<-`(c("TF", "mlog10Padj", "Enrichment"))
+#   
+#   bgd <- str_split_i(comparison, "_", 1)
+#   fgd <- str_split_i(comparison, "_", 2)
+# 
+#   colouring_values <- c("down"=case_when(bgd == "B" ~ "darkred",
+#                                          bgd =="LC-MBL" ~ "#fcbda4",
+#                                          bgd =="HC-MBL" ~ "#FC8D62",
+#                                          bgd =="CLL" ~ "#66C2A5"),
+#                         "up" = case_when(fgd == "B" ~ "darkred",
+#                                          fgd =="LC-MBL" ~ "#fcbda4",
+#                                          fgd =="HC-MBL" ~ "#FC8D62",
+#                                          fgd =="CLL" ~ "#66C2A5"),
+#                         "not significant" = "#D3D3D3")
+#   
+#   colouring_labels <- c("down"=bgd, "up"=fgd, "not significant"="not significant")
+# 
+#   volcanoplot <- volcano_data %>%
+#     mutate(
+#       significance = case_when(mlog10Padj >= 1.30103 & log2(Enrichment) >= 0.5 ~ "up",
+#         mlog10Padj >= 1.30103 & log2(Enrichment) <= -0.5 ~ "down",
+#         .default = "not significant"
+#       ),
+#       significance = factor(significance, levels = c("down", "up", "not significant")),
+#       label = if_else(significance != "not significant", str_split_i(TF, "_", i = 1), NA)
+#     ) %>%
+#     ggplot(aes(x = log2(Enrichment), y = mlog10Padj, colour = significance, label = label)) +
+#     geom_vline(xintercept = c(-0.5, 0.5), color = "grey", linetype = "dashed") +
+#     geom_hline(yintercept = c(1.30103), color = "grey", linetype = "dashed") +
+#     geom_point() +
+#     ggrepel::geom_label_repel(
+#       size = 2.5,
+#       label.size = NA,
+#       label.padding = 0.1,
+#       segment.size = 0.25,
+#       segment.colour = "grey",
+#       min.segment.length = 0.1,
+#       max.overlaps = 100,
+#       colour = "black"
+#     ) +
+#     scale_x_continuous("Log2(Enrichment)", limits = c(-3.5, 3.5)
+#                        ) +
+#     scale_y_continuous("-log10(FDR)",
+#       limits = c(0, 160),
+#       oob = scales::squish_infinite,
+#       expand = expansion(mult = c(0, NA))
+#     ) +
+#     scale_colour_manual(name="TF enrichment in ",
+#                         values=colouring_values,
+#                         labels=colouring_labels) +
+#     theme_pub() +
+#     theme(legend.position = "bottom")
+#   return(volcanoplot)
+# }
+```
+
+```{r, fig.width=16, fig.height=3}
+ranks <- all_motif_enrichments %>%
+  imap(~ visualise_motif_enrichment_rank(.x, .y))
+
+ggarrange(plotlist = ranks[1:3], nrow = 1, ncol = 3, common.legend = TRUE)
+saveRDS(ranks[1:3], file=file.path(RDS_dir_Blike, "rank_plots_LC_HC_CLL.rds"))
+
+ggarrange(plotlist = ranks[4:6], nrow = 1, ncol = 3)
+```
+
+```{r}
+get_significant_changes <- function(se_list, up_or_down){
+   heatmap_data<- tibble("TF" = se_list[[up_or_down]]@NAMES) %>%
+      bind_cols(assay(se_list[[up_or_down]], "mlog10Padj"), assay(se_list[[up_or_down]], "Enrichment")) %>%
+      `colnames<-`(c("TF", "mlog10Padj", "Enrichment"))
+  
+  unique_signif_TFs <- heatmap_data %>% 
+    dplyr::filter(mlog10Padj >= 1.30103,
+                  Enrichment >= 1.5) %>% 
+    pull(TF) %>% unique()
+  return(unique_signif_TFs)
+}
+
+all_TS_oi <- list()
+all_TS_oi[["MotifsUp"]] <- all_motif_enrichments[1:3] %>% 
+  map(~get_significant_changes(., "MotifsUp")) %>% 
+  unlist() %>% 
+  unique()
+
+all_TS_oi[["MotifsDo"]]  <- all_motif_enrichments[1:3] %>% 
+  map(~get_significant_changes(., "MotifsDo")) %>% 
+  unlist() %>% 
+  unique()
+```
+
+
+```{r}
+concatenate_rank_data <- function(list_se_list, up_or_down) {
+
+  heatmap_data <- list_se_list %>% 
+    imap(~tibble("TF" = .x[[1]]@NAMES) %>%
+      bind_cols(assay(.x[[up_or_down]], "mlog10Padj"), assay(.x[[up_or_down]], "Enrichment")) %>%
+      `colnames<-`(c("TF", "mlog10Padj", "Enrichment")) %>% 
+        dplyr::filter(TF %in% all_TS_oi[[up_or_down]])) %>% 
+    bind_rows(.id = "comparison")
+
+  return(heatmap_data)
+}
+```
+
+
+```{r}
+enrichment_data_up <-all_motif_enrichments[1:3] %>% concatenate_rank_data(., "MotifsUp")
+enrichment_data_down <-all_motif_enrichments[1:3] %>% concatenate_rank_data(., "MotifsDo")
+
+enrichment_data_scores_up <- enrichment_data_up %>% 
+  dplyr::select(-mlog10Padj) %>%
+  dplyr::mutate(TF=str_split_i(TF, "_", 1),
+                Enrichment=if_else(Enrichment =="NaN", NA, Enrichment),
+                comparison=case_when(comparison=="B_LC-MBL" ~ "LC-MBL",
+                                     comparison=="B_HC-MBL" ~ "HC-MBL",
+                                     comparison=="B_CLL" ~ "CLL", .default = comparison))%>%
+  dplyr::rename("B cells vs."=comparison) %>%
+  tidyr::pivot_wider(id_cols=TF, names_from =`B cells vs.`, values_from = Enrichment) %>%
+  tibble::column_to_rownames(var = "TF") %>% 
+  as.matrix
+
+enrichment_data_scores_down<- enrichment_data_down %>% 
+  dplyr::select(-mlog10Padj) %>%
+  dplyr::mutate(TF=str_split_i(TF, "_", 1),
+                Enrichment=if_else(Enrichment =="NaN", NA, Enrichment),
+                comparison=case_when(comparison=="B_LC-MBL" ~ "LC-MBL",
+                                     comparison=="B_HC-MBL" ~ "HC-MBL",
+                                     comparison=="B_CLL" ~ "CLL", .default = comparison))%>%
+  dplyr::rename("B cells vs."=comparison) %>%
+  tidyr::pivot_wider(id_cols=TF, names_from =`B cells vs.`, values_from = Enrichment) %>%
+  tibble::column_to_rownames(var = "TF") %>% 
+  as.matrix
+
+```
+
+
+```{r concatenate_volcano_data}
+# concatenate_volcano_data <- function(se_list) {
+#   volcano_data <- se_list %>% 
+#     imap(~tibble("TF" = .x@NAMES) %>%
+#       bind_cols(assay(.x, "mlog10Padj"), assay(.x, "Enrichment")) %>%
+#       `colnames<-`(c("TF", "mlog10Padj", "Enrichment")) %>% 
+#        dplyr::mutate(comparison=.y)) %>% 
+#     bind_rows()
+#   
+#   # which TF motifs to change significantly over time
+#   TFs_oi <- volcano_data %>% 
+#     dplyr::filter(mlog10Padj >=1.30103 & log2(Enrichment) >=0.5) %>% 
+#     pull(TF) %>% 
+#     unique()
+#   
+#   return(list(volcano_data, TFs_oi))
+# }
+#   
+# enrichment_data <-concatenate_volcano_data(all_motif_enrichments)
+# 
+# enrichment_data_scores <- enrichment_data[[1]] %>%
+#   dplyr::filter(TF %in% enrichment_data[[2]]) %>% 
+#   dplyr::select(-mlog10Padj) %>% 
+#   dplyr::mutate(TF=str_split_i(TF, "_", 1),
+#                 Enrichment=if_else(Enrichment =="NaN", NA, Enrichment),
+#                 comparison=case_when(comparison=="B_LC-MBL" ~ "LC-MBL",
+#                                      comparison=="B_HC-MBL" ~ "HC-MBL",
+#                                      comparison=="B_CLL" ~ "CLL", .default = comparison)) %>% 
+#   dplyr::rename("B cells vs."=comparison) %>% 
+#   tidyr::pivot_wider(id_cols=TF, names_from =`B cells vs.`, values_from = Enrichment) %>% 
+#   tibble::column_to_rownames(var = "TF") %>% 
+#   as.matrix()
+```
+
+
+```{r, fig.height=10, fig.width=10}
+comparison2colour <- c("LC-MBL"="#fcbda4", "HC-MBL"="#FC8D62", "CLL"="#66C2A5")
+anno_df <- tibble("Background vs."=c("LC-MBL", "HC-MBL", "CLL"))
+colours=list("Background vs."=comparison2colour)
+      
+column_ha <-HeatmapAnnotation(
+  df = anno_df,
+  col = colours,
+  show_legend = FALSE,
+  annotation_name_side = "left",
+  annotation_name_gp = gpar(fontsize = 8)
+)
+
+hm_up <- Heatmap(
+  matrix = enrichment_data_scores_up,
+  col = colorRampPalette(brewer.pal(n = 9, name = "YlOrRd"))(100),
+  top_annotation = column_ha,
+  use_raster = TRUE,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  raster_by_magick = TRUE,
+  show_column_names = TRUE,
+  show_heatmap_legend = TRUE,
+  na_col = "white",
+  row_title_side = "left",
+  row_names_side = "left",
+  column_names_side = "top",
+  row_names_gp = gpar(fontsize = 8),
+  row_title_gp = gpar(fontsize = 8),
+  heatmap_legend_param = list(
+    title = "Enrichment",
+    direction = "horizontal",
+    legend_direction = "horizontal",
+    legend_gp = gpar(
+      fontsize = 8,
+      fontface = "plain"
+    )
+  )
+)
+
+hm_down <- Heatmap(
+  matrix = enrichment_data_scores_down,
+  col = colorRampPalette(brewer.pal(n = 9, name = "YlGnBu"))(100),
+  top_annotation = column_ha,
+  use_raster = TRUE,
+  cluster_rows = TRUE,
+  cluster_columns = FALSE,
+  raster_by_magick = TRUE,
+  show_column_names = TRUE,
+  show_heatmap_legend = TRUE,
+  na_col = "white",
+  row_title_side = "left",
+  row_names_side = "left",
+  column_names_side = "top",
+  row_names_gp = gpar(fontsize = 8),
+  row_title_gp = gpar(fontsize = 8),
+  heatmap_legend_param = list(
+    title = "Depletion",
+    direction = "horizontal",
+    legend_direction = "horizontal",legend.position="bottom",
+    legend_gp = gpar(
+      fontsize = 8,
+      fontface = "plain"
+    )
+  )
+)
+draw(hm_up, heatmap_legend_side = "bottom")
+
+hm_up_grob<- grid::grid.grabExpr(draw(hm_up, heatmap_legend_side = "bottom"))
+hm_down_grob <- grid::grid.grabExpr(draw(hm_down, heatmap_legend_side = "bottom"))
+
+saveRDS(hm_up_grob, file=file.path(RDS_dir_Blike, "TF_enrichment_LC_MBL_CLL_marker_heatmap.RDS"))
+saveRDS(hm_up_grob, file=file.path(RDS_dir_Blike, "TF_depletion_LC_MBL_CLL_marker_heatmap.RDS"))
+
+cowplot::plot_grid(hm_up_grob, hm_down_grob, nrow=1, ncol=2)
+```
+
+
+```{r}
+# background peaks added
+CLLProj_Blike <- addBgdPeaks(CLLProj_Blike, method = "chromVAR")
+```
+
+```{r}
+# motif deviation matrix added
+CLLProj_Blike <- addDeviationsMatrix(
+  ArchRProj = CLLProj_Blike,
+  bgdPeaks = getBgdPeaks(CLLProj_Blike,
+    method = "chromVAR"
+  ),
+  peakAnnotation = "Motif",
+  threads = 1
+)
+```
+
+```{r}
+plotVarDev <- getVarDeviations(CLLProj_Blike, 
+                               name = "MotifMatrix", 
+                               plot = TRUE)
+```
+
+### Get Matrix from project
+
+```{r}
+MotifMatrix_tmp_Blike <- getMatrixFromProject(
+  ArchRProj = CLLProj_Blike,
+  useMatrix = "MotifMatrix",
+  useSeqnames = NULL,
+  verbose = TRUE,
+  binarize = FALSE,
+  threads = 1
+)
+
+zscore_matrix_Blike <- as.matrix(assays(MotifMatrix_tmp_Blike)$z) %>%
+  as.data.frame()
+
+deviations_matrix_Blike <- as.matrix(assays(MotifMatrix_tmp_Blike)$deviations) %>%
+  as.data.frame()
+
+VarDeviation_Blike <- getVarDeviations(CLLProj_Blike,
+  name = "MotifMatrix",
+  plot = FALSE
+) %>%
+  as.data.frame()
+
+Top_TF_target_Blike <- head(VarDeviation_Blike$name, n = 100)
+
+zscore_part_Blike <- deviations_matrix_Blike[Top_TF_target_Blike, ]
+```
+
+```{r}
+condition_Blike <- tibble(
+  "label_cellbarcode" = CLLProj_Blike$cellNames,
+  "B_like_annotation" = CLLProj_Blike$B_like_annotation
+)
+
+B_cells_Blike <- dplyr::filter(condition_Blike, B_like_annotation == "B") %>%
+  pull(label_cellbarcode)
+
+LC_MBL_cells_Blike <- dplyr::filter(condition_Blike, B_like_annotation == "LC_MBL_B_Cells") %>%
+  pull(label_cellbarcode)
+
+HC_MBL_cells_Blike <- dplyr::filter(condition_Blike, B_like_annotation == "HC_MBL_B_Cells") %>%
+  pull(label_cellbarcode)
+
+CLL_cells_Blike <- dplyr::filter(condition_Blike, B_like_annotation == "CLL_B_Cells") %>%
+  pull(label_cellbarcode)
+
+# # calculate data for volcano plot
+input_zscore_matrix_Blike <- zscore_matrix_Blike
+
+# If no NA values are found in zcore matrix calculate statistics
+condition_list <- list(
+  "B_vs_LC_MBL" = list(LC_MBL_cells_Blike, B_cells_Blike),
+  "B_vs_HC_MBL" = list(HC_MBL_cells_Blike, B_cells_Blike),
+  "B_vs_CLL" = list(CLL_cells_Blike, B_cells_Blike),
+  "LC_MBL_vs_HC_MBL" = list(HC_MBL_cells_Blike, LC_MBL_cells_Blike),
+  "HC_MBL_vs_CLL" = list(CLL_cells_Blike, HC_MBL_cells_Blike),
+  "LC_MBL_vs_CLL" = list(CLL_cells_Blike, LC_MBL_cells_Blike)
+)
+
+# volcano.data_B_LC_MBL <- data.frame()
+# volcano.data_B_CLL <- data.frame()
+volcano.data.all.comparisons <- list(
+  "B_vs_LC_MBL" = data.frame(),
+  "B_vs_HC_MBL" = data.frame(),
+  "B_vs_CLL" = data.frame(),
+  "LC_MBL_vs_HC_MBL" = data.frame(),
+  "HC_MBL_vs_CLL" = data.frame(),
+  "LC_MBL_vs_CLL" = data.frame()
+)
+
+j <- 0
+for (j in 1:length(condition_list)) {
+  print(paste0("Current comparison: ", names(condition_list[j])))
+  i <- 0
+  for (TF in rownames(input_zscore_matrix_Blike)) {
+    i <- i + 1
+    print(i)
+    print(TF)
+    if (length(which(is.na(input_zscore_matrix_Blike[TF, ]))) == 0) {
+      p.value <- wilcox.test(as.numeric(input_zscore_matrix_Blike[TF, condition_list[[j]][[1]]]), as.numeric(input_zscore_matrix_Blike[TF, condition_list[[j]][[2]]]))$p.value
+      diff.accessibility <- median(as.numeric(input_zscore_matrix_Blike[TF, condition_list[[j]][[1]]])) - median(as.numeric(input_zscore_matrix_Blike[TF, condition_list[[j]][[2]]]))
+      volcano.data.all.comparisons[[j]] <- rbind(volcano.data.all.comparisons[[j]], data.frame(TF = TF, p.value = p.value, diff.accessibility = diff.accessibility))
+    }
+  }
+  volcano.data.all.comparisons[[j]]$p.adj <- p.adjust(volcano.data.all.comparisons[[j]]$p.value)
+  volcano.data.all.comparisons[[j]]$p.adj[which(volcano.data.all.comparisons[[j]]$p.adj == 0)] <- min(volcano.data.all.comparisons[[j]]$p.adj[which(volcano.data.all.comparisons[[j]]$p.adj != 0)])
+  volcano.data.all.comparisons[[j]]$p.adj <- as.numeric(volcano.data.all.comparisons[[j]]$p.adj)
+  volcano.data.all.comparisons[[j]]$diff.accessibility <- as.numeric(volcano.data.all.comparisons[[j]]$diff.accessibility)
+  volcano.data.all.comparisons[[j]]$significant <- ifelse(abs(volcano.data.all.comparisons[[j]]$diff.accessibility) > 1.5 & volcano.data.all.comparisons[[j]]$p.adj <= 0.05,
+    "significant",
+    "not significant"
+  )
+  volcano.data.all.comparisons[[j]] <- volcano.data.all.comparisons[[j]] %>%
+    dplyr::mutate(
+      "significant" = case_when(
+        p.adj >= 0.05 ~ "not significant",
+        abs(diff.accessibility) < 1.5 ~ "not significant",
+        diff.accessibility > 1.5 & p.adj < 0.05 ~ "upregulated",
+        diff.accessibility < -1.5 & p.adj < 0.05 ~ "downregulated"
+      ),
+      "label" = if_else(significant != "not significant", stringr::str_split_fixed(TF, pattern = "_", n = 2)[, 1], NA)
+    )
+}
+saveRDS(volcano.data.all.comparisons, file = file.path(RDS_dir_Blike, "volcano.data.all.comparisons.RDS"))
+```
+
+### Plot Differential TF enrichment
+
+```{r}
+volcano.plot_B_LC_MBL <- volcano.data.all.comparisons$B_vs_LC_MBL %>%
+  ggplot(aes(x = diff.accessibility, y = -log10(p.adj), colour = significant, label = label)) +
+  geom_vline(xintercept = c(-1.5, 1.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(0.05), color = "grey", linetype = "dashed") +
+  geom_point(size = 1) +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40,
+    colour = "black"
+  ) +
+  scale_x_continuous(
+    name = "Difference median z-score",
+    breaks = seq(-3, 3, 1),
+    limits = c(-3, 3)
+  ) +
+  scale_y_continuous(
+    name = "-log10(FDR)",
+    limits = c(0, 300),
+    expand = expansion(mult = c(0, 0.1)),
+    oob = squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Differential TF motif enrichment",
+    values = c("upregulated" = "#fcbda4", "downregulated" = "darkred", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "LC-MBL Cells", "downregulated" = "Physiologic B Cells")
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+volcano.plot_B_HC_MBL <- volcano.data.all.comparisons$B_vs_HC_MBL %>%
+  ggplot(aes(x = diff.accessibility, y = -log10(p.adj), colour = significant, label = label)) +
+  geom_vline(xintercept = c(-1.5, 1.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(0.05), color = "grey", linetype = "dashed") +
+  geom_point(size = 1) +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40,
+    colour = "black"
+  ) +
+  scale_x_continuous(
+    name = "Difference median z-score",
+    breaks = seq(-6, 6, 2),
+    limits = c(-6.5, 6.5)
+  ) +
+  scale_y_continuous(
+    name = "-log10(FDR)",
+    limits = c(0, 300),
+    expand = expansion(mult = c(0, 0.1)),
+    oob = squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Differential TF motif enrichment",
+    values = c("upregulated" = "#FC8D62", "downregulated" = "darkred", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "HC-MBL Cells", "downregulated" = "Physiologic B Cells")
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+volcano.plot_B_CLL <- volcano.data.all.comparisons$B_vs_CLL %>%
+  ggplot(aes(x = diff.accessibility, y = -log10(p.adj), colour = significant, label = label)) +
+  geom_vline(xintercept = c(-1.5, 1.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(0.05), color = "grey", linetype = "dashed") +
+  geom_point(size = 1) +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40,
+    colour = "black"
+  ) +
+  scale_x_continuous(
+    name = "Difference median z-score",
+    breaks = seq(-8, 8, 4),
+    limits = c(-8, 8)
+  ) +
+  scale_y_continuous(
+    name = "-log10(FDR)",
+    limits = c(0, 300),
+    expand = expansion(mult = c(0, 0.1)),
+    oob = squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Differential TF motif enrichment",
+    values = c("upregulated" = "#66C2A5", "downregulated" = "darkred", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "CLL Cells", "downregulated" = "Physiologic B Cells")
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+volcano.plot_LC_MBL_HC_MBL <- volcano.data.all.comparisons$LC_MBL_vs_HC_MBL %>%
+  ggplot(aes(x = diff.accessibility, y = -log10(p.adj), colour = significant, label = label)) +
+  geom_vline(xintercept = c(-1.5, 1.5), color = "grey", linetype = "dashed") +
+  # geom_hline(yintercept = c(0.05), color = "grey", linetype = "dashed") +
+  geom_point(size = 1) +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40,
+    force = 20,
+    colour = "black"
+  ) +
+  scale_x_continuous(
+    name = "Difference median z-score",
+    breaks = seq(-6, 6, 2),
+    limits = c(-6, 6)
+  ) +
+  scale_y_continuous(
+    name = "-log10(FDR)",
+    limits = c(0, 300),
+    expand = expansion(mult = c(0, 0.3)),
+    oob = squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "TF motif enrichment",
+    values = c("upregulated" = "#FC8D62", "downregulated" = "#fcbda4", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "HC-MBL cells", "downregulated" = "LC-MBL cells")
+  ) +
+  labs(title="LC-MBL vs. CLL")+
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+volcano.plot_HC_MBL_CLL <- volcano.data.all.comparisons$HC_MBL_vs_CLL %>%
+  ggplot(aes(x = diff.accessibility, y = -log10(p.adj), colour = significant, label = label)) +
+  geom_vline(xintercept = c(-1.5, 1.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(0.05), color = "grey", linetype = "dashed") +
+  geom_point(size = 1) +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40,
+    colour = "black"
+  ) +
+  scale_x_continuous(
+    name = "Difference median z-score",
+    breaks = seq(-6, 6, 2),
+    limits = c(-6, 6)
+  ) +
+  scale_y_continuous(
+    name = "-log10(FDR)",
+    limits = c(0, 300),
+    expand = expansion(mult = c(0, 0.1)),
+    oob = squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Differential TF motif enrichment",
+    values = c("upregulated" = "#66C2A5", "downregulated" = "#FC8D62", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "CLL Cells", "downregulated" = "HC-MBL")
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+volcano.plot_LC_MBL_CLL <- volcano.data.all.comparisons$LC_MBL_vs_CLL %>%
+  ggplot(aes(x = diff.accessibility, y = -log10(p.adj), colour = significant, label = label)) +
+  geom_vline(xintercept = c(-1.5, 1.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(0.05), color = "grey", linetype = "dashed") +
+  geom_point(size = 1) +
+  geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40,
+    colour = "black"
+  ) +
+  scale_x_continuous(
+    name = "Difference median z-score",
+    breaks = seq(-6, 6, 2),
+    limits = c(-7, 7)
+  ) +
+  scale_y_continuous(
+    name = "-log10(FDR)",
+    limits = c(0, 300),
+    expand = expansion(mult = c(0, 0.1)),
+    oob = squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Differential TF motif enrichment",
+    values = c("upregulated" = "#66C2A5", "downregulated" = "#fcbda4", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "CLL Cells", "downregulated" = "LC-MBL")
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+ggarrange(volcano.plot_B_LC_MBL, volcano.plot_LC_MBL_HC_MBL, volcano.plot_HC_MBL_CLL,
+  volcano.plot_B_HC_MBL, volcano.plot_B_CLL, volcano.plot_LC_MBL_CLL,
+  nrow = 2, ncol = 3
+)
+
+saveRDS(volcano.plot_B_LC_MBL, file.path(RDS_dir_Blike, "volcanoplot_TF_enrichment_pb_B_LC_MBL.RDS"))
+saveRDS(volcano.plot_B_HC_MBL, file.path(RDS_dir_Blike, "volcanoplot_TF_enrichment_pb_B_HC_MBL.RDS"))
+saveRDS(volcano.plot_B_CLL, file.path(RDS_dir_Blike, "volcanoplot_TF_enrichment_pb_B_CLL.RDS"))
+
+saveRDS(volcano.plot_LC_MBL_HC_MBL, file.path(RDS_dir_Blike, "volcanoplot_TF_enrichment_pb_LC_MBL_HC_MBL.RDS"))
+saveRDS(volcano.plot_HC_MBL_CLL, file.path(RDS_dir_Blike, "volcanoplot_TF_enrichment_pb_HC_MBL_CLL.RDS"))
+saveRDS(volcano.plot_LC_MBL_CLL, file.path(RDS_dir_Blike, "volcanoplot_TF_enrichment_pb_LC_MBL_CLL.RDS"))
+
+ggsave(plot = volcano.plot_LC_MBL_HC_MBL+theme(legend.position="none"), 
+       filename = file.path(plotting_dir_Blike, "volcanoplot_TF_enrichment_pb_LC_HC_MBL.png"),
+       width = 2.8, height = 2)
+```
+
+### Pull Deviation-scores for LC-MBL vs CLL differentially enrichted TF motifs
+
+```{r}
+comp_genes <- volcano.data.all.comparisons %>%
+  bind_rows() %>%
+  dplyr::filter(!is.na(label)) %>%
+  pull(var = TF) %>%
+  str_split(string = , pattern = "_") %>%
+  map_chr(~ .[[1]]) %>%
+  unique() %>%
+  sort()
+```
+
+```{r, fig.width=20, fig.height=9}
+zscore_matrix_hm_input <- zscore_matrix_Blike[, colnames(zscore_matrix_Blike) %>% keep(~ !str_starts(., "CLL6.") &
+  !str_starts(., "CLL2.") &
+  !str_starts(., "CLL5."))]
+
+rownames(zscore_matrix_hm_input) <- rownames(zscore_matrix_hm_input) %>%
+  str_split(string = , pattern = "_") %>%
+  map_chr(~ .[[1]])
+
+barcodes_ordered <- colnames(zscore_matrix_hm_input) %>%
+  as_tibble() %>%
+  dplyr::rename("label_cellbarcode" = value) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+  dplyr::left_join(tibble(
+    "label_cellbarcode" = CLLProj_Blike$cellNames,
+    "B_like_annotation" = CLLProj_Blike@cellColData$B_like_annotation
+  )) %>%
+  dplyr::mutate(
+    B_like_annotation = case_when(B_like_annotation == "B" ~ "Physiologic B Cells",
+      B_like_annotation == "LC_MBL_B_Cells" ~ "LC-MBL Cells",
+      B_like_annotation == "HC_MBL_B_Cells" ~ "HC-MBL Cells",
+      B_like_annotation == "CLL_B_Cells" ~ "CLL Cells",
+      .default = B_like_annotation
+    ),
+    B_like_annotation = factor(B_like_annotation, levels = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells")),
+    B_like_annotation_label = paste0(B_like_annotation, "_", label),
+    B_like_annotation_label = factor(B_like_annotation_label,
+      levels = c(
+        paste0("Physiologic B Cells_", c("CLL8.1", "CLL7.2", "MBL9", "MBL13", "CLL10.2", "MBL14", "CLL4.1", "CLL3.1", "CLL10.1", "CLL1.2", "CLL6.2", "CLL5.1", "MBL3","MBL6", "CLL8.2", "CLL9.2", "CLL9.1", "MBL7", "CLL3.2", "CLL2.1", "MBL10","CLL6.1", "MBL12", "MBL11", "MBL1", "CLL5.2", "MBL2", "CLL7.1",   "MBL8", "CLL2.2", "CLL1.1", "MBL4", "MBL15")),
+        paste0("LC-MBL Cells_", c("MBL15", "MBL13", "MBL14", "MBL11", "MBL12", "MBL10")),
+        paste0("HC-MBL Cells_", c("CLL8.1", "CLL9.1", "MBL9", "CLL10.1", "CLL1.1", "CLL2.1", "CLL5.1", "MBL8", "CLL4.1", "MBL7", "MBL3", "MBL1", "MBL2", "CLL7.1", "MBL6", "CLL3.1")),
+        paste0("CLL Cells_", c("CLL10.2", "CLL9.2", "CLL5.2", "CLL2.2", "CLL1.2", "CLL7.2", "CLL4.2", "CLL3.2", "MBL4", "CLL8.2", "CLL6.2"))
+      )
+    )
+  ) %>%
+  arrange(B_like_annotation_label)
+
+
+# map cell type annotation to this cell barcode
+# map colour to barcode
+barcodes <- colnames(zscore_matrix_hm_input) %>%
+  as_tibble() %>%
+  dplyr::rename("label_cellbarcode" = value) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+  dplyr::left_join(tibble(
+    "label_cellbarcode" = CLLProj_Blike$cellNames,
+    "B_like_annotation" = CLLProj_Blike@cellColData$B_like_annotation
+  )) %>%
+  dplyr::mutate(
+    B_like_annotation = case_when(B_like_annotation == "B" ~ "Physiologic B Cells",
+      B_like_annotation == "LC_MBL_B_Cells" ~ "LC-MBL Cells",
+      B_like_annotation == "HC_MBL_B_Cells" ~ "HC-MBL Cells",
+      B_like_annotation == "CLL_B_Cells" ~ "CLL Cells",
+      .default = B_like_annotation
+    ),
+    B_like_annotation = factor(B_like_annotation, levels = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells")),
+    label = factor(label, levels = c("MBL13", "MBL11", "MBL12", "MBL15", "MBL14", "MBL10", "CLL6.2", "CLL1.2", "CLL7.2", "CLL2.2", "CLL5.2", "CLL8.2", "CLL4.2", "CLL10.2", "CLL9.2", "CLL3.2", "MBL4"))
+  ) %>%
+  arrange(B_like_annotation, label) %>%
+  left_join(tibble(
+    "B_like_annotation" = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"),
+    "Colour" = c("darkred", "#fcbda4", "#FC8D62", "#66C2A5")
+  ))
+
+barcodes2annotation <- barcodes %>%
+  dplyr::select(label_cellbarcode, B_like_annotation) %>%
+  dplyr::mutate(B_like_annotation = factor(B_like_annotation, levels = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"))) %>%
+  deframe()
+
+barcodes2plottingid <- barcodes %>%
+  left_join(tibble(
+    "label_cellbarcode" = colnames(zscore_matrix_hm_input),
+    "plotting_id" = label2plotting_id[colnames(zscore_matrix_hm_input) %>%
+      as_tibble() %>%
+      dplyr::rename("label_cellbarcode" = value) %>%
+      tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+      pull(label)]
+  )) %>%
+  dplyr::select(label_cellbarcode, plotting_id) %>%
+  dplyr::mutate(plotting_id = factor(plotting_id, levels = paste0("P", 1:24))) %>%
+  deframe()
+
+colours <- list(
+  "Cell type" = barcodes %>%
+    dplyr::select(B_like_annotation, Colour) %>%
+    unique() %>%
+    deframe(),
+  "Patient" = plottingid2colours
+)
+
+anno_df <- tibble(
+  "Cell type" = barcodes2annotation[colnames(zscore_matrix_hm_input)],
+  "Patient" = barcodes2plottingid[colnames(zscore_matrix_hm_input)]
+)
+
+column_ha <- HeatmapAnnotation(
+  df = anno_df,
+  col = colours,
+  show_legend = FALSE,
+  annotation_name_side = "left",
+  annotation_name_gp = gpar(fontsize = 8), 
+  border = TRUE
+)
+
+hm_LC_CLL <- Heatmap(as.matrix(zscore_matrix_hm_input[comp_genes, ]),
+  column_order = barcodes_ordered %>% pull(label_cellbarcode),
+  # row_order = c("CEBPZ", "PBX3", "NFATC2", "NFATC3", "NFYA", "NFYB", "NFYC", "EBF1", "BACH2", "NFE2", "MAFF", "MAFK", "FOS", "FOSB", "FOSL1", "FOSL2", "JDP2", "BATF", "JUN", "JUNB", "JUND", "BACH1", "NFE2L2", "NFKB1", "NFKB2", "REL", "RELA", "SMARCC1"),
+  top_annotation = column_ha,
+  col = colorRamp2(breaks = c(-quantile(as.matrix(zscore_matrix_hm_input[comp_genes, ]), 0.93), 0, quantile(as.matrix(zscore_matrix_hm_input[comp_genes, ]), 0.93)), c("#0c544c", "white", "#783f0b")),
+  na_col = "black",
+  use_raster = TRUE,
+  cluster_rows = TRUE,
+  raster_by_magick = TRUE,
+  cluster_columns = FALSE,
+  show_column_names = FALSE,
+  show_row_names = TRUE,
+  show_row_dend = TRUE,
+  show_column_dend = FALSE,
+  show_heatmap_legend = TRUE,
+  row_title_side = "left",
+  row_names_side = "left",
+  row_names_gp = gpar(fontsize = 8),
+  row_title = "TF motif",
+  row_title_gp = gpar(fontsize = 8),
+  border_gp = gpar(col = "black", lty = 1),
+  heatmap_legend_param = list(
+    title = "Z-score",
+    direction = "horizontal",
+    legend_direction = "horizontal",
+    legend_gp = gpar(
+      fontsize = 8,
+      fontface = "plain"
+    )
+  )
+)
+
+draw(hm_LC_CLL, heatmap_legend_side = "bottom", annotation_legend_side = "bottom")
+
+hm_LC_CLL_grob <- grid::grid.grabExpr(draw(hm_LC_CLL, heatmap_legend_side = "bottom"))
+plot_grid(hm_LC_CLL_grob, nroow=1, ncol=1)
+saveRDS(hm_LC_CLL_grob, file = file.path(RDS_dir_Blike, "TF_enrichment_B_LC_MBL_CLL_marker_heatmap.RDS"))
+```
+
+## Downsampled heatmap
+
+```{r}
+# remove low quality and multiome samples from  zscore matrix
+zscore_matrix_hm_input <- zscore_matrix_Blike[, colnames(zscore_matrix_Blike) %>% 
+                                                keep(~ !str_starts(., "CLL6.") & !str_starts(., "CLL2.") & !str_starts(., "CLL5."))]
+
+rownames(zscore_matrix_hm_input) <- rownames(zscore_matrix_hm_input) %>%
+  str_split(string = , pattern = "_") %>%
+  map_chr(~ .[[1]])
+```
+
+```{r}
+# find out how many cells there are per celltype
+#4683 cells are physiologic B cells
+barcodes_ordered <- colnames(zscore_matrix_hm_input) %>%
+  as_tibble() %>%
+  dplyr::rename("label_cellbarcode" = value) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+  dplyr::left_join(tibble(
+    "label_cellbarcode" = CLLProj_Blike$cellNames,
+    "B_like_annotation" = CLLProj_Blike@cellColData$B_like_annotation
+  )) %>%
+  dplyr::mutate(
+    B_like_annotation = case_when(B_like_annotation == "B" ~ "Physiologic B Cells",
+      B_like_annotation == "LC_MBL_B_Cells" ~ "LC-MBL Cells",
+      B_like_annotation == "HC_MBL_B_Cells" ~ "HC-MBL Cells",
+      B_like_annotation == "CLL_B_Cells" ~ "CLL Cells",
+      .default = B_like_annotation
+    ),
+    B_like_annotation = factor(B_like_annotation, levels = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells")),
+    B_like_annotation_label = paste0(B_like_annotation, "_", label),
+    B_like_annotation_label = factor(B_like_annotation_label,
+      levels = c(
+        paste0("Physiologic B Cells_", c("CLL8.1", "CLL7.2", "MBL9", "MBL13", "CLL10.2", "MBL14", "CLL4.1", "CLL3.1", "CLL10.1", "CLL1.2", "CLL6.2", "CLL5.1", "MBL3","MBL6", "CLL8.2", "CLL9.2", "CLL9.1", "MBL7", "CLL3.2", "CLL2.1", "MBL10","CLL6.1", "MBL12", "MBL11", "MBL1", "CLL5.2", "MBL2", "CLL7.1",   "MBL8", "CLL2.2", "CLL1.1", "MBL4", "MBL15")),
+        paste0("LC-MBL Cells_", c("MBL15", "MBL13", "MBL14", "MBL11", "MBL12", "MBL10")),
+        paste0("HC-MBL Cells_", c("CLL8.1", "CLL9.1", "MBL9", "CLL10.1", "CLL1.1", "CLL2.1", "CLL5.1", "MBL8", "CLL4.1", "MBL7", "MBL3", "MBL1", "MBL2", "CLL7.1", "MBL6", "CLL3.1")),
+        paste0("CLL Cells_", c("CLL10.2", "CLL9.2", "CLL5.2", "CLL2.2", "CLL1.2", "CLL7.2", "CLL4.2", "CLL3.2", "MBL4", "CLL8.2", "CLL6.2"))
+      )
+    )
+  ) %>%
+  arrange(B_like_annotation_label)
+```
+
+```{r downsample_barcodes}
+# downsample cell barcodes to equal number per celltype 
+downsample_cells <- function(df, max_cells) {
+  set.seed(123)  # Set seed for reproducibility
+  num_patients <- n_distinct(df$label)
+  cells_per_patient <- max_cells %/% num_patients  # integer division to get the cells per patient
+  remaining_cells <- max_cells %% num_patients  # remaining cells after even distribution
+
+  # Sample cells per patient with even distribution
+  downsampled <- df %>%
+    group_by(label) %>%
+    sample_n(size = min(cells_per_patient, n()), replace = FALSE) %>%
+    ungroup()
+
+  # If there are remaining cells, sample them from the already downsampled data
+  if (remaining_cells > 0) {
+    remaining <- df %>%
+      anti_join(downsampled, by = "label_cellbarcode") %>%
+      sample_n(size = min(remaining_cells, n()), replace = FALSE)
+
+    downsampled <- bind_rows(downsampled, remaining)
+  }
+
+  return(downsampled)
+}
+
+
+# downsampling number for healthy B is so high, that really all cells are considered and no downsampling is performed in this case 
+celltype_barcodes <- map2(c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"), c(200000, 4683,4683,4683),
+      ~ barcodes_ordered %>% 
+        dplyr::filter(B_like_annotation == .x) %>% 
+        downsample_cells(max_cells = .y)) %>% 
+  set_names(c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"))
+```
+
+```{r cluster_patients}
+# per patient calculate mean value per TF and run hierarchical clustering 
+clustering_input <- celltype_barcodes %>%
+  map(~ zscore_matrix_hm_input[comp_genes, .$label_cellbarcode] %>%
+    as_tibble(rownames = NA) %>%
+    rownames_to_column("TF") %>%
+    pivot_longer(cols = -TF, names_to = "label_cellbarcode", values_to = "z_score") %>%
+    tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#") %>%
+    group_by(TF, label) %>%
+    summarise("mean_z_score" = mean(`z_score`)) %>%
+    ungroup() %>%
+    pivot_wider(id_cols = label, names_from = TF, values_from = mean_z_score) %>%
+    column_to_rownames(var = "label")) %>% 
+  set_names(names(celltype_barcodes))
+
+set.seed(20)
+distance_mat <- clustering_input %>% 
+  map(~dist(., method="euclidean"))
+clusters <- distance_mat %>% 
+  map(~hclust(., method = "average"))
+
+patients_ordered <- clustering_input %>% 
+  map2(clusters, ~rownames(.x)[.y %>% as.dendrogram() %>% 
+                                 order.dendrogram()])
+```
+
+```{r column2_annotations}
+celltype_barcodes_ordered <- celltype_barcodes %>% 
+  map2(patients_ordered, ~dplyr::mutate(.x, label=factor(label, levels=.y)) %>% 
+  arrange(label))
+
+barcodes2annotation <- celltype_barcodes %>% 
+  map(~dplyr::select(., label_cellbarcode, B_like_annotation) %>%
+  dplyr::mutate(B_like_annotation = factor(B_like_annotation, levels = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"))) %>%
+  deframe())
+
+barcodes2label <- celltype_barcodes %>% 
+  map2(patients_ordered, ~left_join(.x, tibble(
+    "label_cellbarcode" = colnames(zscore_matrix_hm_input[, .x$label_cellbarcode]),
+    "label" = colnames(zscore_matrix_hm_input[, .x$label_cellbarcode]) %>%
+      as_tibble() %>%
+      dplyr::rename("label_cellbarcode" = value) %>%
+      tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+      pull(label)
+  )) %>%
+  dplyr::select(label_cellbarcode, label) %>%
+  dplyr::mutate(label = factor(label, levels = .y)) %>%
+  deframe()
+)
+
+barcodes2IGHV <- celltype_barcodes %>% 
+  map2(patients_ordered, ~left_join(.x, metadata %>%
+                                      dplyr::filter(data_type=="ATAC") %>% 
+                                      dplyr::select("label", "IGHV")) %>%
+  dplyr::mutate(label = factor(label, levels = .y),
+                IGHV= if_else(is.na(IGHV), "NA", IGHV)) %>% 
+  dplyr::select(label_cellbarcode, IGHV) %>% 
+    deframe()
+  )
+
+barcode2processing_date <- celltype_barcodes %>% 
+  map2(patients_ordered, ~left_join(.x, metadata %>%
+                                      dplyr::filter(data_type=="ATAC") %>% 
+                                      dplyr::select("label", "processing_date")) %>%
+  dplyr::mutate(label = factor(label, levels = .y),
+                processing_date=as.character(processing_date)) %>% 
+  dplyr::select(label_cellbarcode, processing_date) %>% 
+    deframe()
+  )
+
+barcode2technology <- celltype_barcodes %>% 
+  map2(patients_ordered, ~left_join(.x, metadata %>%
+                                      dplyr::filter(data_type=="ATAC") %>% 
+                                      dplyr::select("label", "technology")) %>%
+  dplyr::mutate(label = factor(label, levels = .y)) %>% 
+  dplyr::select(label_cellbarcode, technology) %>% 
+    deframe()
+  )
+
+barcode2sequencing_date <- celltype_barcodes %>% 
+  map2(patients_ordered, ~left_join(.x, metadata %>%
+                                      dplyr::filter(data_type=="ATAC") %>% 
+                                      dplyr::select("label", "sequencing_date")) %>%
+  dplyr::mutate(label = factor(label, levels = .y),
+                sequencing_date=as.character(sequencing_date)) %>% 
+  dplyr::select(label_cellbarcode, sequencing_date) %>% 
+    deframe()
+  ) 
+
+barcode2sex <- celltype_barcodes %>% 
+  map2(patients_ordered, ~left_join(.x, metadata %>%
+                                      dplyr::filter(data_type=="ATAC") %>% 
+                                      dplyr::select("label", "sex")) %>%
+  dplyr::mutate(label = factor(label, levels = .y)) %>% 
+  dplyr::select(label_cellbarcode, sex) %>% 
+    deframe()
+  ) 
+
+"barcodes2sequencing_date_?" <- celltype_barcodes %>% 
+  map2(patients_ordered, ~left_join(.x, metadata %>%
+                                      dplyr::filter(data_type=="ATAC") %>% 
+                                      dplyr::select("label", "sequencing_date_?")) %>%
+  dplyr::mutate(label = factor(label, levels = .y),
+                sequencing_date=as.character(`sequencing_date_?`)) %>% 
+  dplyr::select(label_cellbarcode, `sequencing_date_?`) %>% 
+    deframe()
+  ) 
+
+
+label2colours <- c(my_paired_colours_named, my_unpaired_colours_named)
+
+colours <- list(
+  "Cell type" = c("Physiologic B Cells" ="darkred", "LC-MBL Cells"="#fcbda4", "HC-MBL Cells"="#FC8D62", "CLL Cells"="#66C2A5"),
+  "Patient" = label2colours,
+  "IGHV" = c("mutated" = "steelblue", "unmutated"="orange", "NA"="lightgrey"),
+  "processing_date"=c("2022-01-10"="#1B9E77" , "2022-10-20"="#D95F02",  
+                      "2022-11-04"="#7570B3",  "2023-03-24"="#66A61E" , 
+                      "2024-03-05"="#A6761D"),
+  "technology"=c("v2 scATAC-seq"="#666666", "multiome kit"="#E7298A"),
+  "sequencing_date"=c("2022-02-26"="#E6AB02" ,  "2022-11-18"="#7FC97F", "2023-05-02"="#FFFF99", "2024-03-18"="#386CB0"),
+  "sequencing_date_?"=c("2022-01-14"="midnightblue", "2022-10-20"="steelblue4", "2022-10-26"="magenta4", "2022-10-27"="purple4", "2024-03-18"="#386CB0", "2023-05-02"="violet", "2022-11-18"="plum4"),
+  "sex"=c("male"="lightblue", "female"="lightpink"))
+
+anno_df <- list(
+  barcodes2annotation,
+  barcodes2label,
+  barcodes2IGHV,
+  barcode2processing_date,
+  barcode2technology,
+  barcode2sequencing_date,
+  barcode2sequencing_date,
+  barcode2sex,
+  celltype_barcodes
+) %>%
+  pmap(~ tibble(
+    "Cell type" = ..1[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "Patient" = ..2[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "IGHV" = ..3[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "processing_date"=..4[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "technology"=..5[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "sequencing_date"=..6[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "sequencing_date_?"=..7[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "sex"=..8[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+  ))
+
+
+column_ha <- anno_df %>% 
+  map(~ HeatmapAnnotation(
+  df = .,
+  col = colours,
+  show_legend = FALSE,
+  annotation_name_side = "left", 
+  border = TRUE,
+  annotation_name_gp = gpar(fontsize = 8)
+)) 
+```
+
+```{r}
+hm <- list(celltype_barcodes, 
+           column_ha,
+           celltype_barcodes_ordered %>% map(~pull(., label_cellbarcode))) %>% 
+  pmap(~Heatmap(as.matrix(zscore_matrix_hm_input[comp_genes, ..1$label_cellbarcode]),
+                  col = colorRamp2(breaks = c(-quantile(as.matrix(zscore_matrix_hm_input[comp_genes, ]), 0.93), 0, quantile(as.matrix(zscore_matrix_hm_input[comp_genes, ]), 0.93)), c("#0c544c", "white", "#783f0b")),
+              top_annotation = ..2,
+              column_order = ..3,
+              # previous row order:
+              # row_order = c("CEBPZ", "PBX3", "NFATC2", "NFATC3", "NFYA", "NFYB", "NFYC", "EBF1", "BACH2",
+              #               "NFE2", "MAFF", "MAFK", "FOS", "FOSB", "FOSL1", "FOSL2", "JDP2", "BATF", "JUN",
+              #               "JUNB", "JUND", "BACH1", "NFE2L2", "NFKB1", "NFKB2", "REL", "RELA", "SMARCC1"),
+              use_raster = TRUE,
+              cluster_rows = TRUE,
+              cluster_columns = FALSE,
+              raster_by_magick = TRUE,
+              show_column_names = FALSE, 
+              show_heatmap_legend = FALSE,
+              na_col = "black",
+              row_title_side = "left",
+              row_names_side = "left",
+              row_names_gp = gpar(fontsize = 8),
+              row_title_gp = gpar(fontsize = 8),                                 ,
+              border_gp = gpar(col = "black", lty = 1),
+              heatmap_legend_param = list(
+                title = "Z-score",
+                direction = "horizontal",
+                legend_direction = "vertical",
+                legend_gp = gpar(
+                  fontsize = 8,
+                  fontface = "plain"))))
+
+```
+
+```{r, fig.width=20, fig.height=9}
+hm$`Physiologic B Cells` + hm$`LC-MBL Cells` + hm$`HC-MBL Cells` + hm$`CLL Cells`
+hm_LC_CLL_grob_downsampled <- grid::grid.grabExpr(draw(hm$`Physiologic B Cells` + hm$`LC-MBL Cells` + hm$`HC-MBL Cells` + hm$`CLL Cells`))
+saveRDS(hm, file = file.path(RDS_dir_Blike, "TF_enrichment_B_LC_MBL_CLL_marker_heatmap_downsampled_batch_effect.RDS"))
+```
+
+#### Without column subsetting
+```{r}
+celltype_barcodes_unlist <- celltype_barcodes %>% 
+  bind_rows()
+
+barcodes2annotation_unlist <- celltype_barcodes_unlist %>% 
+  dplyr::select(label_cellbarcode, B_like_annotation) %>%
+  dplyr::mutate(B_like_annotation = factor(B_like_annotation, levels = c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"))) %>%
+  deframe()
+
+barcodes2label_unlist <- celltype_barcodes_unlist %>% 
+  left_join(tibble(
+    "label_cellbarcode" = colnames(zscore_matrix_hm_input[, .$label_cellbarcode]),
+    "label" = colnames(zscore_matrix_hm_input[, .$label_cellbarcode]) %>%
+      as_tibble() %>%
+      dplyr::rename("label_cellbarcode" = value) %>%
+      tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+      pull(label)
+  )) %>%
+  dplyr::select(label_cellbarcode, label) %>%
+  deframe()
+
+
+barcodes2IGHV_unlist <- celltype_barcodes_unlist %>%
+  left_join(metadata %>%
+    dplyr::filter(data_type == "ATAC") %>%
+    dplyr::select("label", "IGHV")) %>%
+  dplyr::mutate(IGHV = if_else(is.na(IGHV), "NA", IGHV)) %>%
+  dplyr::select(label_cellbarcode, IGHV) %>%
+  deframe()
+
+barcode2processing_date_unlist <- celltype_barcodes_unlist %>%
+  left_join(metadata %>%
+    dplyr::filter(data_type == "ATAC") %>%
+    dplyr::select("label", "processing_date")) %>%
+  dplyr::mutate(
+    processing_date = as.character(processing_date)
+  ) %>%
+  dplyr::select(label_cellbarcode, processing_date) %>%
+  deframe()
+
+
+barcode2technology_unlist <- celltype_barcodes_unlist %>%
+  left_join(metadata %>%
+    dplyr::filter(data_type == "ATAC") %>%
+    dplyr::select("label", "technology")) %>%
+  dplyr::select(label_cellbarcode, technology) %>%
+  deframe()
+
+barcode2sequencing_date_unlist <- celltype_barcodes_unlist %>%
+  left_join(metadata %>%
+    dplyr::filter(data_type == "ATAC") %>%
+    dplyr::select("label", "sequencing_date")) %>%
+  dplyr::mutate(
+    sequencing_date = as.character(sequencing_date)
+  ) %>%
+  dplyr::select(label_cellbarcode, sequencing_date) %>%
+  deframe()
+  
+
+barcode2sex_unlist <- celltype_barcodes_unlist %>% 
+  left_join( metadata %>%
+                                      dplyr::filter(data_type=="ATAC") %>% 
+                                      dplyr::select("label", "sex")) %>%
+  dplyr::select(label_cellbarcode, sex) %>% 
+    deframe()
+ 
+
+"barcodes2sequencing_date_?_unlist" <- celltype_barcodes_unlist %>% 
+  left_join( metadata %>%
+                                      dplyr::filter(data_type=="ATAC") %>% 
+                                      dplyr::select("label", "sequencing_date_?")) %>%
+  dplyr::mutate(
+                sequencing_date=as.character(`sequencing_date_?`)) %>% 
+  dplyr::select(label_cellbarcode, `sequencing_date_?`) %>% 
+    deframe()
+  
+
+
+label2colours <- c(my_paired_colours_named, my_unpaired_colours_named)
+
+colours <- list(
+  "Cell type" = c("Physiologic B Cells" ="darkred", "LC-MBL Cells"="#fcbda4", "HC-MBL Cells"="#FC8D62", "CLL Cells"="#66C2A5"),
+  "Patient" = label2colours,
+  "IGHV" = c("mutated" = "steelblue", "unmutated"="orange", "NA"="lightgrey"),
+  "processing_date"=c("2022-01-10"="#1B9E77" , "2022-10-20"="#D95F02",  
+                      "2022-11-04"="#7570B3",  "2023-03-24"="#66A61E" , 
+                      "2024-03-05"="#A6761D"),
+  "technology"=c("v2 scATAC-seq"="#666666", "multiome kit"="#E7298A"),
+  "sequencing_date"=c("2022-02-26"="#E6AB02" ,  "2022-11-18"="#7FC97F", "2023-05-02"="#FFFF99", "2024-03-18"="#386CB0"),
+  "sequencing_date_?"=c("2022-01-14"="midnightblue", "2022-10-20"="steelblue4", "2022-10-26"="magenta4", "2022-10-27"="purple4", "2024-03-18"="#386CB0", "2023-05-02"="violet", "2022-11-18"="plum4"),
+  "sex"=c("male"="lightblue", "female"="lightpink"))
+
+anno_df_unlist <- list(
+  list(barcodes2annotation_unlist),
+  list(barcodes2label_unlist),
+  list(barcodes2IGHV_unlist),
+  list(barcode2processing_date_unlist),
+  list(barcode2technology_unlist),
+  list(barcode2sequencing_date_unlist),
+  list(barcode2sequencing_date_unlist),
+  list(barcode2sex_unlist),
+  list(celltype_barcodes_unlist)
+) %>%
+  pmap(~ tibble(
+    "Cell type" = ..1[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "Patient" = ..2[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "IGHV" = ..3[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "processing_date"=..4[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "technology"=..5[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "sequencing_date"=..6[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "sequencing_date_?"=..7[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+    "sex"=..8[colnames(zscore_matrix_hm_input[, ..9$label_cellbarcode])],
+  ))
+
+
+column_ha_unlist <- anno_df_unlist %>% 
+  map(~ HeatmapAnnotation(
+  df = .,
+  col = colours,
+  show_legend = FALSE,
+  annotation_name_side = "left",
+  border = TRUE,
+  annotation_name_gp = gpar(fontsize = 8)
+)) 
+```
+
+
+```{r, fig.width=5, fig.height=9}
+hm_unsort <- list(list(celltype_barcodes_unlist), 
+           column_ha_unlist) %>% 
+  pmap(~Heatmap(as.matrix(zscore_matrix_hm_input[comp_genes, ..1$label_cellbarcode]),
+                  col = colorRamp2(breaks = c(-quantile(as.matrix(zscore_matrix_hm_input[comp_genes, ]), 0.93), 0, quantile(as.matrix(zscore_matrix_hm_input[comp_genes, ]), 0.93)), c("#0c544c", "white", "#783f0b")),
+              top_annotation = ..2,
+              use_raster = TRUE,
+              cluster_rows = TRUE,
+              cluster_columns = TRUE,
+              raster_by_magick = TRUE,
+              show_column_names = FALSE, 
+              show_heatmap_legend = FALSE,
+              na_col = "black",
+              row_title_side = "left",
+              row_names_side = "left",
+              row_names_gp = gpar(fontsize = 8),
+              row_title_gp = gpar(fontsize = 8),
+                                 border_gp = gpar(col = "black", lty = 1),
+
+              heatmap_legend_param = list(
+                title = "Z-score",
+                direction = "horizontal",
+                legend_direction = "vertical",
+                legend_gp = gpar(
+                  fontsize = 8,
+                  fontface = "plain"))))
+```
+
+```{r, fig.width=10, fig.height=5}
+hm_unsort_grob <- grid::grid.grabExpr(draw(hm_unsort[[1]]))
+plot_grid(hm_unsort_grob, nrow=1, ncol=1)
+saveRDS(hm_unsort, file = file.path(RDS_dir_Blike, "TF_enrichment_B_LC_MBL_CLL_marker_heatmap_downsampled_batch_effect_unsorted.RDS"))
+```
+
+-->A huge batch effect based on sequencing date was observed, peaks will be normalised for the bias
+
+## Downsampled heatmap of bias corrected TF motifs
+Switched here to batches script to do combat across batches
+```{r}
+# per patient calculate mean value per TF and run hierarchical clustering 
+clustering_input <- celltype_barcodes %>%
+  map(~ zscore_matrix_hm_input[all_TS, .$label_cellbarcode] %>%
+    as_tibble(rownames = NA) %>%
+    rownames_to_column("TF") %>%
+    pivot_longer(cols = -TF, names_to = "label_cellbarcode", values_to = "z_score") %>%
+    tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#") %>%
+    group_by(TF, label) %>%
+    summarise("mean_z_score" = mean(`z_score`)) %>%
+    ungroup() %>%
+    pivot_wider(id_cols = label, names_from = TF, values_from = mean_z_score) %>%
+    column_to_rownames(var = "label")) %>% 
+  set_names(names(celltype_barcodes))
+
+set.seed(20)
+distance_mat <- clustering_input %>% 
+  map(~dist(., method="euclidean"))
+clusters <- distance_mat %>% 
+  map(~hclust(., method = "average"))
+
+patients_ordered <- clustering_input %>% 
+  map2(clusters, ~rownames(.x)[.y %>% as.dendrogram() %>% 
+                                 order.dendrogram()])
+```
+
+```{r, plot_heatmap}
+hm <- list(celltype_barcodes, 
+           column_ha,
+           celltype_barcodes_ordered %>% 
+             map(~pull(., label_cellbarcode))) %>% 
+  pmap(~Heatmap(as.matrix(zscore_matrix_hm_input[all_TS, ..1$label_cellbarcode]),
+                  col = colorRamp2(breaks = c(-quantile(as.matrix(zscore_matrix_hm_input[all_TS, ]), 0.93), 0, quantile(as.matrix(zscore_matrix_hm_input[all_TS, ]), 0.93)), c("#0c544c", "white", "#783f0b")),
+              top_annotation = ..2,
+              column_order = ..3,
+              use_raster = TRUE,
+              cluster_rows = TRUE,
+              cluster_columns = FALSE,
+              raster_by_magick = TRUE,
+              show_column_names = FALSE, 
+              show_heatmap_legend = FALSE,
+              na_col = "black",
+              row_title_side = "left",
+              row_names_side = "left",
+              row_names_gp = gpar(fontsize = 8),
+              row_title_gp = gpar(fontsize = 8), 
+              heatmap_legend_param = list(
+                title = "Deviation",
+                direction = "horizontal",
+                legend_direction = "vertical",
+                legend_gp = gpar(
+                  fontsize = 8,
+                  fontface = "plain"))))
+
+```
+
+```{r, fig.width=20, fig.height=9}
+hm$`Physiologic B Cells` + hm$`LC-MBL Cells` + hm$`HC-MBL Cells` + hm$`CLL Cells`
+hm_LC_CLL_grob_downsampled <- grid::grid.grabExpr(draw(hm$`Physiologic B Cells` + hm$`LC-MBL Cells` + hm$`HC-MBL Cells` + hm$`CLL Cells`))
+cowplot::plot_grid(hm_LC_CLL_grob_downsampled)
+saveRDS(hm_LC_CLL_grob_downsampled, file = file.path(RDS_dir_Blike, "TF_enrichment_B_LC_MBL_CLL_marker_heatmap_downsampled_batch_corrected.RDS"))
+```

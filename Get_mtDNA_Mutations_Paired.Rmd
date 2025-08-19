@@ -1,0 +1,1028 @@
+---
+title: "Mitochondrial mutations"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+# Goal
+The aim of this script is to extract mitochondrial mutations for all paired samples and characterize clonotypes and their dynamics within the cohort. 
+
+# Load libraries
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(Signac)
+library(readxl)
+library(ArchR)
+library(ggfortify)
+library(tidyverse)
+library(ggpubr)
+library(RColorBrewer)
+library(ggrepel)
+library(Seurat)
+library(cluster)
+```
+
+# Set paths
+```{r define_directories }
+source("config_paths.R")
+
+data_dir <- file.path(project_dir, "data")
+library_path <- file.path(data_dir, "ATAC")
+result_dir <- file.path(project_dir, "results")
+ArchR_dir_Annotation <- file.path(project_dir_ext, "ArchR_Projects_4_Annotation")
+ArchR_dir <- paste0("ArchR_Subset", 1:4) %>% as.list()
+result_dir_subsets <- file.path(ArchR_dir_Annotation, ArchR_dir) %>% setNames(paste0("Subset", 1:4))
+RDS_dir_subsets <- file.path(result_dir_subsets, "RDS_objects") %>% setNames(paste0("Subset", 1:4))
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r Load_metadata }
+metadata <- read_tsv(file = file.path(data_dir, "20240530_Tidy_MBL_CLL_metadata_atac.tsv"))
+```
+
+```{r Load_ArchR_Project }
+CLLProj <- result_dir_subsets %>% 
+  map(~loadArchRProject(path = paste0(.x, "/"))) %>% 
+  purrr::set_names(paste0("Subset", 1:4))
+```
+
+```{r Get_mgatk_paths}
+sample_subset <- list("Subset1" = c("CLL1.1","CLL1.2", "CLL2.1","CLL2.2","CLL3.1", "CLL3.2","MBL1","MBL2","MBL3"),
+                      "Subset2" = c("CLL4.1","CLL4.2","CLL5.1","CLL5.2","CLL6.1","CLL6.2","MBL4","MBL6","MBL7"),
+  "Subset3" = c("CLL7.1","CLL7.2","CLL8.1","CLL8.2","CLL9.1","CLL9.2","CLL10.1","CLL10.2","MBL9","MBL8"),
+  "Subset4" = c("MBL7dup","MBL10","MBL11","MBL12","MBL13","MBL14","MBL15"))
+
+library_names <- sample_subset %>% 
+  map(~metadata %>%
+  dplyr::filter(label %in% .x) %>%
+  pull(pool))
+
+mgatk_file_paths <- library_names %>% 
+  map(~file.path(library_path, paste0(.x, ".mgatk")) %>%
+  as.list() %>%
+  unlist())
+```
+
+```{r}
+pool2label <- metadata %>%
+  select(pool, label) %>%
+  deframe()
+```
+
+```{r Load_individual_mgatk_files}
+#Individual mgatk files per sample
+# mito.data.idv <- list()
+# 
+# for (i in 1:length(mgatk_file_paths)){
+#   mito.data.idv[[names(mgatk_file_paths[i])]] <- mgatk_file_paths[[i]] %>%
+#                         map(~ ReadMGATK(.x)) %>%
+#                         set_names(pool2label[unlist(library_names[[i]])])
+# }
+# 
+# mito_data_idv %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "mito.data.idv.RDS")))
+```
+
+```{r}
+# New filtering function filtering out cells with low quality and also accounting for mtseq depth of min 10!
+# filter_qc_from_mitodata <- function(mgatk_idv_list, archrproj) {
+#   mito_subset <-list()
+#   
+#   #Get cell barcodes from singlets identified from ATACdata
+#   label_cellbarcode_df <- archrproj@cellColData@rownames %>%
+#     str_split_fixed("#", n = 2) %>%
+#     `colnames<-`(c("label", "cellbarcode")) %>%
+#     as_tibble()
+#   
+#   #Filter cells 
+#   for (patient in unique(label_cellbarcode_df$label)) {
+#     barcodes <- label_cellbarcode_df %>%
+#       filter(label == patient) %>%
+#       pull(cellbarcode)
+#     
+#     # Adapt here for mtseq depth
+#     keep_col_doublets <- mgatk_idv_list[[patient]]$counts@Dimnames[[2]] %in% barcodes
+#     keep_col_depth <-  mgatk_idv_list[[patient]]$depth %>% 
+#       dplyr::filter(mito.depth >=10) %>% 
+#       rownames()
+#     keep_col <- intersect(mgatk_idv_list[[patient]]$counts@Dimnames[[2]][keep_col_doublets], keep_col_depth)
+# 
+#     mgatk_idv_list[[patient]]$counts <- mgatk_idv_list[[patient]]$counts[, keep_col]
+# 
+#     mgatk_idv_list[[patient]]$depth <- mgatk_idv_list[[patient]]$depth[keep_col, , drop = FALSE]
+#     }
+# 
+#   return(mgatk_idv_list)
+# }
+# 
+# mito.data.idv <- map2(.x = mito.data.idv,
+#                       .y = CLLProj, 
+#                       .f = ~filter_qc_from_mitodata(.x, .y))
+# 
+# mito_data_idv %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "mito.data.idv.RDS")))
+
+mito_data_idv <- RDS_dir_subsets %>% 
+  map(~readRDS(file.path(.x, "mito_data_idv.RDS")))
+```
+
+```{r Load_paired_mgatk_files}
+# Paired mgatk files per patient
+sample_subset_paired <- sample_subset %>% 
+  map(~dplyr::filter(metadata, label %in% .x & str_starts(label, "CLL")) %>%
+  pull(patient_id) %>%
+  unique())
+
+sample_subset_sample <- sample_subset_paired %>% 
+  map(~dplyr::filter(metadata, patient_id %in% .x & str_starts(label, "CLL")) %>%
+  pull(label))
+
+# mito.data <- list()
+# 
+# for ( i in 1:3){ 
+#   for (j in sample_subset_paired[[i]]) {
+#     subset_names <- str_subset(names(mito.data.idv), j)
+#     subset_names_index <- match(subset_names, names(mito.data.idv))
+#   
+#     df_1 <- mito.data.idv[[subset_names_index[[1]]]]$counts
+#     df_2 <- mito.data.idv[[subset_names_index[[2]]]]$counts
+#   
+#     colnames(df_1) <- paste(subset_names[1], colnames(df_1), sep = "#")
+#     colnames(df_2) <- paste(subset_names[2], colnames(df_2), sep = "#")
+#   
+#     subset_df <- cbind(df_1, df_2)
+#     rm(df_1, df_2)
+#     mito.data[[i]] <- append(mito.data[[i]], subset_df)
+#   }
+#   
+# names(mito.data[[i]]) <- sample_subset_paired[[i]]
+# }
+# 
+# mito_data %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "mito.data.RDS")))
+
+mito_data <- RDS_dir_subsets %>% 
+  map(~readRDS(file.path(.x, "mito.data.RDS")))
+```
+
+# Analysis
+
+```{r Get_mt_variants}
+# Get variants cumulative per patient over both samples
+# variant.df <- list()
+# for (i in 1:3){
+# variant.df[[names(sample_subset_paired[i])]] <- mito.data[[names(sample_subset_paired[i])]] %>%
+#   map(~ IdentifyVariants(., refallele = mito.data.idv[[names(sample_subset_paired[i])]][[1]]$refallele)) %>%
+#   imap(~ .x %>%
+#     dplyr::mutate(sample_id = .y, .before = "nucleotide"))
+# }
+# 
+# for (i in 1:3){
+#   variant.df [[names(sample_subset_paired[i])]] %>%
+#   imap(~ write_tsv(.x,
+#     quote = "none",
+#     file = file.path(result_dir_subsets, "MitochondrialVariants", paste0("Variants_", .y, ".csv"))
+#   ))
+# }
+# 
+# variant.df %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "variant.df.RDS")))
+
+variant.df <- RDS_dir_subsets[1:3] %>% 
+  map(~readRDS(file.path(.x, "variant.df.RDS"))) %>% 
+  purrr::set_names(names(sample_subset_paired)[1:3])
+```
+
+```{r Plot_mt_variants}
+all.variant.df.plots <- list()
+  
+for (i in 1:3){
+  variant.df[[i]] %>%
+ map(VariantPlot)%>%
+  iwalk(~ ggsave(
+    filename = file.path(result_dir_subsets[[i]], "MitochondrialVariants", paste0("Plot_Variance_Mean_Ratio_", .y, ".png")),
+    plot = .x,
+    width = 5,
+    height = 3
+  ))
+}
+```
+
+## Maternal mitochondrial variants
+```{r Filter_maternal_mt_variants}
+# mat.variants <- list()
+# 
+# for (i in 1:3){
+# mat.variants[[names(sample_subset_paired[i])]] <- variant.df[[i]] %>% 
+#   map(~ subset(.,
+#   subset = n_cells_conf_detected >= 5 & strand_correlation >= 0.65 & vmr < 0.01
+# ))
+# }
+# 
+# mat.variants %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "mat.variants.RDS")))
+
+mat.variants <- RDS_dir_subsets[1:3] %>% 
+  map(~readRDS(file.path(.x, "mat.variants.RDS")))
+```
+
+### VAFs
+```{r VAFs_mat_mt_variants}
+# Get maternal VAFs
+# VAFs.mat <- list()
+# 
+# for (i in 1:3){
+# VAFs.mat[[names(sample_subset_paired[i])]] <- mito.data %>%
+#   map2(mat.variants, ~ AlleleFreq(.,
+#     variants = .y$variant,
+#     assay = NULL
+#   ))
+# }
+# 
+# VAFs.mat %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "VAFs.mat.RDS")))
+
+VAFs.mat <-file.path(RDS_dir_subsets[1:3], "VAFs.mat.RDS") %>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+```
+
+### UMAP VAF Plot
+```{r Extract_umap_embedding, fig.height=50, fig.width=10}
+umap_embedding <- CLLProj %>% 
+                        map(~.x@embeddings$UMAP$df %>%
+  rownames_to_column("id") %>%
+  separate(id, c("label", "cell_barcode"), sep = "#") %>%
+  separate(label, c("patient_id", "sample"), sep = "\\.", remove = FALSE))
+``` 
+
+```{r}
+# Inner join is used to consider only cells which have been used in the umap (here doublets are removed!)
+# umap_embedding_mito_mat <- list()
+# for (i in 1:3){
+# umap_embedding_mito_mat[[names(sample_subset_paired[i])]] <- map_dfr(VAFs.mat[[i]], ~ as.matrix(.) %>%
+#   as_tibble(rownames = "variant_id") %>%
+#   pivot_longer(-variant_id,
+#     names_to = "cell_barcode",
+#     values_to = "VAF"
+#   ), .id = "patient_id") %>%
+#   separate(cell_barcode, c("label", "cell_barcode"), sep = "#") %>%
+#   inner_join(umap_embedding[[names(sample_subset_paired[i])]], by = join_by(patient_id, label, cell_barcode)) %>%
+#   dplyr::rename(
+#     UMAP1 = "IterativeLSI#UMAP_Dimension_1",
+#     UMAP2 = "IterativeLSI#UMAP_Dimension_2"
+#   )
+# }
+# 
+# umap_embedding_mito_mat %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "umap_embedding_mito_mat.RDS")))
+
+umap_embedding_mito_mat <- file.path(RDS_dir_subsets[1:3], "umap_embedding_mito_mat.RDS")%>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+```
+
+
+```{r Plot_UMAP_mat_mt_variants_VAFs, fig.height=60, fig.width=5}
+# Careful! group_by internally orders column before split which causes different order in split list
+umap_embedding_mito_mat_plot <- list()
+
+for (i in 1:3){
+umap_embedding_mito_mat_plot[[names(sample_subset_paired[i])]] <- umap_embedding_mito_mat[[i]] %>%
+  split(.$patient_id) %>% 
+  imap(~
+      dplyr::arrange(., label, variant_id, -VAF) %>% 
+      dplyr::mutate(VAF=if_else(VAF==0, NA, VAF)) %>% 
+      ggplot(aes(x = UMAP1, y = UMAP2, color = VAF)) +
+      geom_point(size = 1, alpha = 0.2, stroke = NA) +
+      coord_equal() +
+      scale_colour_gradient(
+        name = "Heteroplasmy",
+        low = "yellow",
+        high = "darkred",
+        na.value = "lightgrey",
+        trans = "log10",
+        limits = c(1e-02, 1e+00),
+        oob=scales::oob_squish,
+        breaks=10^seq(from=-2, to=0, by=1),
+        labels=c("≤0.01", "0.1",  "1")) +
+      theme_pub() +
+      labs(title = .y) +
+      theme(
+        strip.background = element_rect(
+          fill = "white",
+          colour = NA),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.ticks = element_blank()
+      ) +
+      facet_grid(variant_id~label)) %>%
+  iwalk(~ ggsave(
+    filename = file.path(result_dir_subsets[[i]], "Plots/UMAPs_maternal_mito_VAFs", paste0("Plot-UMAP-maternal-mitochondrial-VAF_", .y, ".png")),
+    plot = .x,
+    width = 5,
+    height = 49
+  ))
+  
+}
+
+umap_embedding_mito_mat_plot
+```
+
+## Clonal mitochondrial variants
+```{r Filter_clonal_mt_variants}
+# # Get clonal variants
+# cln.variants <- list()
+# for (i in 1:3){
+# cln.variants[[names(sample_subset_paired[i])]] <- variant.df[[i]] %>%
+#   map(~ subset(., subset = n_cells_conf_detected >= 5 & strand_correlation >= 0.65 & vmr > 0.01))
+# }
+# 
+# # Export_cln_mito_variants
+# for (i in 1:3){
+#   cln.variants [[names(sample_subset_paired[i])]] %>%
+#   imap(~ write_tsv(.x,
+#     quote = "none",
+#     file = file.path(result_dir_subsets, "MitochondrialVariants", paste0("Clonal_Variants_", .y, ".csv"))
+#   ))
+# }
+# 
+# cln.variants %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "cln.variants.RDS")))
+
+cln.variants <- file.path(RDS_dir_subsets[1:3], "cln.variants.RDS")%>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+```
+
+
+### VAFs
+```{r VAFs_clonal_mt_variants}
+# Get clonal VAFs
+# VAFs.cln <- list()
+# 
+# for (i in 1:3){
+# VAFs.cln[[names(sample_subset_paired[i])]] <- mito.data %>%
+#   map2(cln.variants, ~ AlleleFreq(.,
+#     variants = .y$variant,
+#     assay = NULL
+#   ))
+# }
+# 
+# VAFs.cln %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "VAFs.cln.RDS")))
+# 
+# VAFs.cln <-file.path(RDS_dir_subsets[1:3], "VAFs.cln.RDS") %>% 
+#   map(~readRDS(.x)) %>% 
+#   purrr::set_names(names(sample_subset_paired[1:3]))
+# 
+# # export in sparse format
+# for (i in 1:3){
+#   VAFs.cln [[names(sample_subset_paired[i])]] %>%
+#   imap(~ write_tsv(.x,
+#     quote = "none",
+#     file = file.path(result_dir_subsets, "MitochondrialVariants", paste0("VAFs_Variants_sparse_", .y, "mtx"))
+#   ))
+# }
+# 
+
+VAFs.cln <-file.path(RDS_dir_subsets[1:3], "VAFs.cln.RDS") %>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+```
+
+### UMAP VAF Plot
+```{r, fig.width=10, fig.height=100}
+# Inner join is used to consider only cells which have been used in the umap (here doublets are removed!)
+# umap_embedding_mito_cln <- list()
+# for (i in 1:3){
+# umap_embedding_mito_cln[[names(sample_subset_paired[i])]] <- map_dfr(VAFs.cln[[i]], ~ as.matrix(.) %>%
+#   as_tibble(rownames = "variant_id") %>%
+#   pivot_longer(-variant_id,
+#     names_to = "cell_barcode",
+#     values_to = "VAF"
+#   ), .id = "patient_id") %>%
+#   separate(cell_barcode, c("label", "cell_barcode"), sep = "#") %>%
+#   inner_join(umap_embedding[[names(sample_subset_paired[i])]], by = join_by(patient_id, label, cell_barcode)) %>%
+#   dplyr::rename(
+#     UMAP1 = "IterativeLSI#UMAP_Dimension_1",
+#     UMAP2 = "IterativeLSI#UMAP_Dimension_2"
+#   )
+# }
+# 
+# umap_embedding_mito_cln %>%  
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "umap_embedding_mito_cln.RDS")))
+
+umap_embedding_mito_cln <-file.path(RDS_dir_subsets[1:3], "umap_embedding_mito_cln.RDS") %>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+
+# export with umap coordinates
+
+# for (i in 1:3){
+#   umap_embedding_mito_cln[[i]] %>% 
+#   split(.$patient_id) %>%
+#   imap(~ write_tsv(.x,
+#     file = file.path(result_dir_subsets[[i]], "MitochondrialVariants", paste0("VAFs_Variants_UMAP_", .y, ".tsv"))))
+# }
+```
+
+```{r, fig.width=10, fig.height=100}
+umap_embedding_mito_cln_plot <- list()
+  
+for (i in 1:3){
+  umap_embedding_mito_cln_plot[[names(sample_subset_paired[i])]] <- umap_embedding_mito_cln[[i]] %>%
+  split(.$patient_id) %>%
+  imap(~
+      dplyr::arrange(.x, label, variant_id, VAF) %>% 
+      dplyr::mutate(VAF=if_else(VAF==0, NA, VAF)) %>%
+      ggplot(aes(x = UMAP1, y = UMAP2, color = VAF)) +
+      geom_point(size = 1, alpha = 0.2, stroke = NA) +
+      coord_equal() +
+      scale_colour_gradient(
+        name = "Heteroplasmy",
+        low = "yellow",
+        high = "darkred",
+        na.value = "lightgrey",
+        trans = "log10",
+        limits = c(1e-02, 1e+00),
+        oob=scales::oob_squish,
+        breaks=10^seq(from=-2, to=0, by=1),
+        labels=c("≤0.01", "0.1",  "1")) +
+      theme_pub() +
+      labs(title = .y) +
+      theme(
+        strip.background = element_rect(
+          fill = "white",
+          colour = NA),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.ticks = element_blank()
+      ) +
+      facet_grid(variant_id~label)) %>%
+  iwalk(~ ggsave(
+    filename = paste0(result_dir_subsets[[i]], "Plots/UMAPs_clonal_mito_VAFs/Plot-UMAP-clonal-mitochondrial-VAF_", .y, ".png"),
+    plot = .x,
+    width = 5,
+    height = 49
+  ))
+}
+umap_embedding_mito_cln_plot
+```
+
+### Heatmap VAFs
+```{r}
+# Prepare heatmap VAF input data as matrix with only VAFs unequal 0
+# VAF_mat <- list()
+# 
+# for (i in 1:3){
+# VAF_mat[[names(sample_subset_paired[i])]] <- umap_embedding_mito_cln[[i]] %>%
+#   dplyr::filter(!(variant_id == "310T>C")) %>%
+#   split(.$patient_id) %>%
+#   map(~
+#     tidyr::unite(., "label_cell_barcode", label:cell_barcode, sep = "#", remove = FALSE) %>%
+#       dplyr::select(label_cell_barcode, VAF, variant_id) %>%
+#       tidyr::pivot_wider(values_from = VAF, names_from = label_cell_barcode) %>%
+#       column_to_rownames("variant_id") %>%
+#       drop_na() %>%
+#       dplyr::select(-where(~ all(. == 0))) %>%
+#       as.matrix())
+# }
+# 
+# VAF_mat %>% 
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "VAF_mat.RDS")))
+
+
+VAF_mat <-file.path(RDS_dir_subsets[1:3], "VAF_mat.RDS") %>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+```
+
+```{r }
+YlOrRd <- c("snow2", brewer.pal(n = 9, name = "YlOrRd"))
+
+# Prepare annotation labels
+column_annotation <- list()
+col_annot <- list()
+for (i in 1:3){
+column_annotation[[names(sample_subset_paired[i])]] <- CLLProj[[i]]@cellColData %>%
+  as.data.frame() %>%
+  dplyr::select(Clusters_0.6_IterativeLSI) %>%
+  dplyr::mutate(Label = rownames(.) %>% str_split_fixed("#", 2) %>% .[, 1]) %>%
+  tidyr::separate(Label, c("patient_id", "sample"), remove = FALSE) %>%
+  split(.$patient_id) %>%
+  map(~ dplyr::select(., -c("sample", "patient_id")))
+
+# Select only paired samples
+column_annotation[[names(sample_subset_paired[i])]] <- column_annotation[[names(sample_subset_paired[i])]][grepl("^CLL", names(column_annotation[[names(sample_subset_paired[i])]]))]
+
+# Prepare annotation colours
+col_annot[[names(sample_subset_paired[i])]] <- column_annotation[[names(sample_subset_paired[i])]][[1]]
+}
+
+# Make function for heatmap
+build_heatmap <- function(VAFs, patient_name, col_annot, subset) {
+  # Prepare annotation colours
+  colours_annotation <- imap(col_annot, unique) %>%
+    map(~ set_names(brewer.pal(length(.), "Set3")[1:length(.)], .))
+
+  hm <- pheatmap::pheatmap(
+    mat = VAFs,
+    color = colorRampPalette(YlOrRd)(10),
+    annotation_col = col_annot,
+    annotation_colors = colours_annotation,
+    cluster_cols = TRUE,
+    cluster_rows = TRUE,
+    show_colnames = FALSE,
+    legend_breaks = c(0, 0.5, 1),
+    main = paste0("Mitochondrial Clonotypes Individual ", patient_name),
+    legend_labels = c("0", "0.5", "1"),
+    legend = TRUE
+  )
+
+  ggsave(
+    device = "jpg",
+    filename = file.path(subset, "Plots/VAF_heatmaps_Seurat_Clusters", paste0("VAF_heatmap_seurat_clusters_", patient_name, ".png")),
+    plot = hm,
+    width = 10,
+    height = 7
+  )
+  return(hm)
+}
+
+# Plot heatmap
+patient_heatmap <- list()
+for (i in 1:3){
+ patient_heatmap[[names(sample_subset_paired[i])]]<- list(VAF_mat[[i]], 
+                                                          sort(sample_subset_paired[[i]]), 
+                                                          column_annotation[[i]],
+                                                          subset=result_dir_subsets[names(sample_subset_paired[i])]) %>%
+  pmap(build_heatmap)
+}
+```
+
+### Test PCA
+```{r}
+umap_embedding_mito_cln %>%
+  bind_rows() %>% 
+  dplyr::select(patient_id, label, cell_barcode, VAF, variant_id) %>%
+  split(.$patient_id) %>%
+  map(~ tidyr::unite(., "label_cell_barcode", label:cell_barcode, sep = "#") %>%
+    dplyr::select(-patient_id) %>%
+    tidyr::pivot_wider(names_from = variant_id, values_from = VAF) %>%
+    na.omit() %>%
+    tibble::column_to_rownames("label_cell_barcode") %>%
+    as.matrix() %>% 
+    prcomp(scale = TRUE) %>%
+    autoplot())
+```
+
+
+### Signac FindClonotype Function
+Different plot types compare the VAF between MBL and CLL sample of a patient
+```{r }
+# Cluster together per patient and filter for non-zero VAF cells
+# mito_VAFs <- list()
+# clonotypes <- list()
+# 
+# for (i in 1:3){
+# mito_VAFs[[names(sample_subset_paired[i])]] <- VAFs.cln[[i]] %>% 
+#   map(~ as.matrix(.x) %>%
+#   as_tibble(rownames = "variant_id") %>%
+#   dplyr::filter(variant_id != "310T>C") %>%
+#   column_to_rownames(var = "variant_id") %>%
+#   .[, as.logical(colSums(. != 0))] %>%
+#   as.matrix() %>%
+#   as("sparseMatrix") %>%
+#   CreateSeuratObject(assay = "alleles"))
+# 
+# clonotypes[[names(sample_subset_paired[i])]] <- mito_VAFs[[names(sample_subset_paired[i])]] %>% 
+#   map(~ FindClonotypes(.))
+# 
+# }
+# 
+# clonotypes %>%
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "clonotypes.RDS")))
+# 
+# find_clonotype_clusters <- list()
+# for (i in 1:3){
+# find_clonotype_clusters[[names(sample_subset_paired[i])]] <- clonotypes[[i]] %>%
+#   map(~ .@active.ident %>%
+#     data.frame() %>%
+#     rownames_to_column("label_cellbarcode") %>%
+#     dplyr::rename(Cluster = ".")) %>%
+#   imap(~write_tsv(.x, file = file.path(result_dir, "MitochondrialVariants", paste0("FindClonotypesClusters_", .y, ".tsv"))))
+# }
+
+clonotypes <- file.path(RDS_dir_subsets[1:3], "clonotypes.RDS") %>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+```
+
+```{r}
+# # Subset MBL and CLL as seperate Seurat objects
+# MBL.clonotypes.logical <- list()
+# MBL.clonotypes <- list()
+# CLL.clonotypes.logical <- list()
+# CLL.clonotypes <- list()
+# 
+# for (i in 1:3){
+# MBL.clonotypes.logical[[names(sample_subset_paired[i])]] <- clonotypes[[i]] %>% 
+#   map(~ Cells(.) %>% 
+#         str_detect("CLL\\d+\\.1"))
+# 
+# MBL.clonotypes[[names(sample_subset_paired[i])]] <- clonotypes[[i]] %>% 
+#   map2(MBL.clonotypes.logical[[names(sample_subset_paired[i])]], ~ .x[, .y])
+# 
+# 
+# CLL.clonotypes.logical[[names(sample_subset_paired[i])]] <- clonotypes[[i]] %>% 
+#   map(~ Cells(.) %>% str_detect("CLL\\d+\\.2"))
+# 
+# CLL.clonotypes[[names(sample_subset_paired[i])]] <- clonotypes[[i]] %>% 
+#   map2(CLL.clonotypes.logical[[names(sample_subset_paired[i])]], ~ .x[, .y])
+# }
+# 
+# MBL.clonotypes %>% 
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "MBL.clonotypes.RDS")))
+# 
+# CLL.clonotypes %>% 
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "CLL.clonotypes.RDS")))
+
+MBL.clonotypes <- file.path(RDS_dir_subsets[1:3], "MBL.clonotypes.RDS") %>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+
+CLL.clonotypes <- file.path(RDS_dir_subsets[1:3], "CLL.clonotypes.RDS") %>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+
+```
+
+```{r fig.width=26.66, fig.height=9}
+# Plot seperately per disease for ALL cells (unfiltered for MBL, CLL or healthy B cells)
+MBL.clonotypes.plot <- list()
+CLL.clonotoypes.plot <- list()
+
+for (i in 1:3){
+MBL.clonotypes.plot[[names(sample_subset_paired[i])]] <- MBL.clonotypes[[i]] %>%
+  imap(~ DoHeatmap(.x,
+    features = VariableFeatures(.),
+    slot = "data",
+    group.colors = get_palette(palette = "Set3", k = length(unique(.@meta.data[["seurat_clusters"]])))
+  ) +
+    scale_fill_distiller(
+      palette = "YlOrRd",
+      direction = 1,
+      trans = "log",
+      breaks = 10^c(-12:0),
+      name = "VAF",
+      na.value = "#082567"
+    ) +
+    labs(title = .y) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = rel(2), face = "bold"),
+      axis.text = element_text(face = "bold")
+    ) +
+    guides(colour = "none")) %>%
+  iwalk(~ ggsave(
+    filename = file.path(result_dir_subsets[[names(sample_subset_paired[i])]], "Plots/VAF_Heatmap_Find_Clonotype/", paste0("VAF_Heatmap_Find_Clonotype_MBL_", .y, ".jpg")),
+    plot = .x,
+    width = 15,
+    height = 10
+  ))
+
+CLL.clonotoypes.plot[[names(sample_subset_paired[i])]] <- CLL.clonotypes[[i]] %>%
+  imap(~ DoHeatmap(.x,
+    features = VariableFeatures(.),
+    slot = "data",
+    group.colors = get_palette(palette = "Set3", k = length(unique(.@meta.data[["seurat_clusters"]])))
+  ) +
+    scale_fill_distiller(
+      palette = "YlOrRd",
+      direction = 1,
+      trans = "log",
+      breaks = 10^c(-12:0),
+      name = "VAF",
+      na.value = "#082567"
+    ) +
+    labs(title = .y) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = rel(2), face = "bold"),
+      axis.text = element_text(face = "bold")
+    ) +
+    guides(colour = "none")) %>%
+  iwalk(~ ggsave(
+    filename = file.path(result_dir_subsets[[names(sample_subset_paired[i])]], "Plots/VAF_Heatmap_Find_Clonotype/", paste0("VAF_Heatmap_Find_Clonotype_CLL_", .y, ".jpg")),
+    plot = .x,
+    width = 15,
+    height = 10
+  ))
+}
+
+ggarrange(plotlist=c(MBL.clonotypes.plot, CLL.clonotoypes.plot), ncol=4, nrow=2)
+```
+
+#### Quantify clusters
+```{r}
+# Count how many cells are within each cluster per disease condition
+#For MBL or CLL cells
+# my_annotation <- list()
+# my_annotation_df <- list()
+# find_clonotype_clusters <- list()
+# clonotype_cell_counts_MBL_CLL <- list()
+# clonotype_cell_counts_B <- list()
+# 
+# for (i in 1:3){
+# my_annotation[[names(sample_subset_paired[i])]] <- tibble("label_cellbarcode" = CLLProj[[i]]@cellColData@rownames, "My_annotation" = CLLProj[[i]]@cellColData$My_Annotation) %>%
+#   with(setNames(My_annotation, label_cellbarcode))
+# 
+# my_annotation_df[[names(sample_subset_paired[i])]] <- enframe(my_annotation[[i]], name = "label_cellbarcode", value = "My_annotation")
+# 
+# find_clonotype_clusters[[names(sample_subset_paired[i])]] <- find_clonotype_clusters[[i]] %>% 
+#   map(~left_join(., my_annotation_df[[i]]))
+# 
+# clonotype_cell_counts_MBL_CLL[[names(sample_subset_paired[i])]] <- find_clonotype_clusters[[i]] %>% 
+#   map(~ tidyr::separate(., "label_cellbarcode", c("label", "cell_barcode"), sep = "#", remove = FALSE) %>%
+#   dplyr::filter(`My_annotation` %in% c("MBL_B_Cells", "CLL_B_Cells")) %>%
+#   split(.$label) %>%
+#   imap(~ group_by(.x, Cluster) %>%
+#     dplyr::summarise("cell counts" = n()) %>%
+#     dplyr::mutate(
+#       "Clonotype frequency [% cells]" = round(`cell counts` / sum(`cell counts`) * 100, digits = 3),
+#       "label" = .y
+#     ) %>%
+#     dplyr::relocate(label, .before = (Cluster))) %>%
+#   bind_rows())
+# 
+# #For healthy B cells
+# clonotype_cell_counts_B[[names(sample_subset_paired[i])]] <- find_clonotype_clusters[[i]] %>% 
+#   map(~ tidyr::separate(., "label_cellbarcode", c("label", "cell_barcode"), sep = "#", remove = FALSE) %>%
+#   dplyr::filter(`My_annotation` %in% c("B")) %>%
+#   split(.$label) %>%
+#   map2(names(.), ~ group_by(.x, Cluster) %>%
+#     dplyr::summarise("cell counts" = n()) %>%
+#     dplyr::mutate(
+#       "Clonotype frequency [% cells]" = round(`cell counts` / sum(`cell counts`) * 100, 3),
+#       "label" = .y
+#     ) %>%
+#     dplyr::relocate(label, .before = (Cluster))) %>%
+#   bind_rows())
+# }
+# 
+# clonotype_cell_counts_MBL_CLL %>% 
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "clonotype_cell_counts_MBL_CLL.RDS")))
+# 
+# clonotype_cell_counts_B %>% 
+#   imap(~saveRDS(.x, file = file.path(RDS_dir_subsets[[.y]], "clonotype_cell_counts_B.RDS")))
+
+clonotype_cell_counts_MBL_CLL <- file.path(RDS_dir_subsets[1:3], "clonotype_cell_counts_MBL_CLL.RDS") %>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+
+clonotype_cell_counts_MBL_CLL <- file.path(RDS_dir_subsets[1:3], "clonotype_cell_counts_MBL_CLL.RDS") %>% 
+  map(~readRDS(.x)) %>% 
+  purrr::set_names(names(sample_subset_paired[1:3]))
+```
+
+```{r, fig.width=8, fig.height=4}
+quantify_cluster_plot <- function(cluster_counts, sample_name) {
+  colourCountCluster <- length(unique(cluster_counts$Cluster))
+  getPalette <- colorRampPalette(brewer.pal(colourCountCluster, "Set3"))
+
+  pm <- ggplot(cluster_counts, aes(x = label, y = `Clonotype frequency [% cells]`, group = Cluster, colour = `Cluster`)) +
+    geom_point() +
+    geom_path() +
+    theme_bw() +
+    scale_colour_manual(values = getPalette(colourCountCluster + 1)) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(),
+      axis.title.y = element_text(face = "bold"),
+      axis.title.x = element_blank(),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      legend.text = element_text(size = 8),
+      legend.position = "right",
+      legend.direction = "vertical"
+    ) +
+    scale_x_discrete(labels = c("MBL", "CLL")) +
+    labs(title = sample_name) +
+    guides(colour = guide_legend(override.aes = list(size = 4)))
+
+  return(pm)
+}
+
+clonotype_quantification_plots <- list()
+
+for (i in 1:3){
+clonotype_quantification_plots[[names(sample_subset_paired[i])]] <- clonotype_cell_counts_MBL_CLL[[i]] %>% 
+  imap(~ quantify_cluster_plot(.x, .y))
+}
+
+clonotype_quantification_plots %>% 
+  imap(~ggarrange(plotlist = .x, nrow = 1) %>% 
+  ggsave(filename = file.path(result_dir_subsets[[names(clonotype_quantification_plots[[i]])]], "/Plots/Clonotype_quantification_plots.jpg"), width = 18, height = 6))
+```
+
+```{r}
+quantify_cluster_histogram <- function(cluster_counts, sample_name) {
+  pm <- ggplot(cluster_counts, aes(x = Cluster, y = `Clonotype frequency [% cells]`, fill = `label`, group = `label`)) +
+    geom_bar(stat = "identity", position = "dodge2") +
+    theme_bw() +
+    scale_fill_manual(values = my_MBL_CLL_colours, labels = c("MBL", "CLL"), name = "Disease") +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(),
+      axis.title.y = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, face = "bold"),
+      axis.text.y = element_text(face = "bold"),
+      axis.title.x = element_text(face = "bold"),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      legend.text = element_text(size = 8)
+    ) +
+    labs(title = sample_name)
+
+  return(pm)
+}
+
+clonotype_quantification_histograms <- list()
+for (i in 1:3){
+clonotype_quantification_histograms[[names(sample_subset_paired[i])]] <- clonotype_cell_counts_MBL_CLL[[i]] %>% 
+  imap(~ quantify_cluster_histogram(.x, .y))
+
+ggarrange(plotlist =clonotype_quantification_histograms[[names(sample_subset_paired[i])]], nrow=1, common.legend = TRUE, legend="right") %>% 
+  ggsave(filename = paste0(result_dir_subsets[[names((sample_subset_paired[i]))]], "/Plots/Clonotype_quantification_histograms.jpg"), 
+         width = 16, 
+         height=4)
+}
+```
+
+### Plots per mutation 
+#### Jitter violin plots
+```{r, fig.width=10, fig.height=8}
+# Log jitter violin plot
+VAF_min_non0 <- list()
+jitterviolin_log_mutations <- list()
+
+for (i in 1:3){
+VAF_min_non0[[names(sample_subset_paired[i])]] <- as.vector(umap_embedding_mito_cln[[i]]$VAF) %>%
+  unique() %>%
+  sort() %>%
+  .[[2]]
+
+jitterviolin_log_mutations[[names(sample_subset_paired[i])]] <- umap_embedding_mito_cln[[i]] %>%
+  dplyr::mutate(VAF = case_when(VAF == 0 ~ VAF + VAF_min_non0, .default = VAF)) %>%
+  split(.$patient_id)%>%
+  map(~
+    tidyr::unite(., "label_cell_barcode", label:cell_barcode, sep = "#", remove = FALSE) %>%
+      dplyr::select(label_cell_barcode, `VAF`, variant_id) %>%
+      tidyr::pivot_wider(values_from = `VAF`, names_from = label_cell_barcode) %>%
+      dplyr::select(-where(~ all(. == 0))) %>%
+      tidyr::pivot_longer(-variant_id, names_to = "label_cell_barcode", values_to = "VAF") %>%
+      tidyr::separate(label_cell_barcode, c("label", "cell_barcode"), sep = "#", remove = FALSE) %>%
+      ggplot(., aes(x = label, y = `VAF`, colour = label)) +
+      facet_wrap(~variant_id) +
+      geom_jitter(size = 0.1, position = position_jitterdodge()) +
+      geom_violin(scale = "width", show.legend = FALSE, color = "lightgrey", fill = NA) +
+      scale_y_log10(limits = c(1e-04, 1e+01)) +
+      stat_compare_means(
+        method = "wilcox.test",
+        paired = FALSE,
+        hide.ns = TRUE,
+        aes(label = ..p.signif..),
+        label.x = 1.5,
+        label.y = 0,
+        show.legend = FALSE
+      ) +
+      theme_pub() +
+      scale_colour_manual(values = my_MBL_CLL_colours, labels = c("MBL", "CLL"), name = "Disease") +
+      theme(
+        strip.text = element_text(face = "bold", size = rel(1.2)),
+        strip.background = element_rect(fill = "white", colour = NA),
+        plot.title = element_text(hjust = 0.5, size = rel(2), face = "bold"),
+        panel.border = element_blank(),
+        axis.line.x = element_line(linetype = "solid", colour = "black"),
+        axis.line.y = element_line(linetype = "solid", colour = "black"),
+        axis.text.x = element_text(face = "bold"),
+        axis.text.y = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"),
+        axis.title.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank()
+      ) +
+      guides(colour = guide_legend(override.aes = list(size = 4)))) %>%
+  iwalk(~ ggsave(
+    filename = file.path(result_dir_subsets[[names((sample_subset_paired[i]))]], paste0("Plots/Log_Jitterviolinplots", paste0("Log_Jitterviolinplot_", .y, ".jpg"))),
+    plot = .x,
+    width = 15,
+    height = 15
+  ))
+
+}
+```
+
+#### Volcano plots
+```{r Volcano_plots, fig.height=5, fig.width=10}
+# Calculate p-values for clonal mitochondrial variants per sample using unpaired wilcoxon rank sum test (no p-value correction so far!)
+p_values <- list()
+mean_per_sample <- list()
+stats_volcano <- list()
+volcano_input <- list()
+volcano_plot <- list()
+
+for (i in 1:3){
+p_values[[names(sample_subset_paired[i])]] <- umap_embedding_mito_cln[[i]] %>%
+  dplyr::filter(variant_id != "310T>C") %>%
+  split(.$patient_id)%>%
+  map(~ tidyr::pivot_wider(., names_from = `label`, values_from = `VAF`) %>%
+    dplyr::rename(
+      MBL = ends_with(".1"),
+      CLL = ends_with(".2")
+    ) %>%
+    dplyr::group_by(variant_id) %>%
+    replace_na(list(MBL = 0, CLL = 0)) %>%
+    do(p_value = wilcox.test(.$MBL, .$CLL, paired = FALSE, data = .)$p.value) %>%
+    dplyr::mutate(p_value = unlist(p_value)))
+
+# Calculate means per sample and mutation
+mean_per_sample[[names(sample_subset_paired[i])]] <- umap_embedding_mito_cln[[i]] %>%
+  dplyr::filter(variant_id != "310T>C") %>%
+  split(.$patient_id)%>%
+  map(~ tidyr::pivot_wider(., names_from = `label`, values_from = `VAF`) %>%
+    dplyr::rename(
+      MBL = ends_with(".1"),
+      CLL = ends_with(".2")
+    ) %>%
+    dplyr::group_by(variant_id) %>%
+    replace_na(list(MBL = 0, CLL = 0)) %>%
+    dplyr::summarise_at(vars(MBL, CLL), list(`Mean heteroplasmy per sample [%]` = mean)) %>%
+    dplyr::mutate(difference_CLL_MBL = `CLL_Mean heteroplasmy per sample [%]` - `MBL_Mean heteroplasmy per sample [%]`) %>%
+    dplyr::arrange(-difference_CLL_MBL))
+
+# Summarize stats and calculate logs
+stats_volcano[[names(sample_subset_paired[i])]] <- mean_per_sample[[i]] %>%
+  map2(p_values[[names(sample_subset_paired[i])]], ~ dplyr::left_join(.x, .y) %>%
+    dplyr::mutate(
+      fold_change = `CLL_Mean heteroplasmy per sample [%]` / `MBL_Mean heteroplasmy per sample [%]`,
+      log2_fold_change = log2(`CLL_Mean heteroplasmy per sample [%]` / `MBL_Mean heteroplasmy per sample [%]`),
+      "-log10_p_value" = -log10(p_value),
+      p_value_significant = case_when(p_value < 0.05 ~ TRUE, .default = FALSE)
+    )) %>%
+  set_names(sort(sample_subset_paired))
+
+saveRDS(stats_volcano[[names(sample_subset_paired[i])]], file = file.path(RDS_dir_subsets[[names((sample_subset_paired[i]))]], "stats_volcano.RDS"))
+
+# Plot only variants which have non-zero heteroplasmy in MBL state
+volcano_input[[names(sample_subset_paired[i])]] <- stats_volcano[[i]] %>%
+  map(~ filter(.x, log2_fold_change != Inf))
+
+volcano_plot[[names(sample_subset_paired[i])]] <- volcano_input[[i]] %>%
+  imap(~ ggplot(.x, aes(x = log2_fold_change, y = `-log10_p_value`, color = p_value_significant)) +
+      geom_point(size = 3) +
+      geom_text_repel(aes(label = variant_id),
+        data = subset(.x, p_value_significant == "TRUE"),
+        show.legend = FALSE
+      ) +
+      lims(x = c(-(max(abs(.x$log2_fold_change)) + 1), max(abs(.x$log2_fold_change)) + 1)) +
+      theme_bw() +
+      labs(
+        title = .y,
+        colour = "Significance",
+        x = "log2(CLL/MBL)",
+        y = "-log10(p-value)"
+      ) +
+      scale_colour_manual(values = c("TRUE" = "darkred", "FALSE" = "lightgrey"), labels = c( "TRUE" = "< 0.05", "FALSE"="\u2265 0.05")) +
+      theme(
+        plot.title = element_text(hjust = 0.5, size = rel(2), face = "bold"),
+        panel.border = element_blank(),
+        axis.line.x = element_line(linetype = "solid", colour = "black"),
+        axis.line.y = element_line(linetype = "solid", colour = "black"),
+        axis.title = element_text(face = "bold"),
+        axis.text = element_text(face = "bold")
+      )
+  ) %>%
+  iwalk(~ ggsave(
+    filename = file.path(result_dir_subsets[[names((sample_subset_paired[i]))]], "/Plots/Log_Volcanoplots/Log_Volcanoplot_", .y, ".jpg"),
+    plot = .x,
+  ))
+}
+```

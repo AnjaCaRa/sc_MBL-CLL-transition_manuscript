@@ -1,0 +1,97 @@
+---
+title: "SNV HC-MBLs"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '6'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL
+The aim of this script is to look into SNV defined populations and compare with other lineage markers.
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(Seurat)
+library(ggpubr)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+# Set paths
+```{r Set_Subset_dirs}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "SNV_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+RDS_dir <- file.path(analysis_dir, "RDS_Objects")
+```
+
+# Load data
+```{r}
+metadata_all <- read_tsv(file = file.path(data_dir, "20250508_Tidy_MBL_CLL_metadata.tsv"))
+
+metadata <- metadata_all %>% dplyr::filter(data_type == "GOT",
+                                           patient_id %in% c("MBL2", "MBL4"))
+  
+  
+gotcha_data <- file.path(result_dir, "GoTChA", paste0(metadata$pool, "_mutations_called.csv")) %>% 
+  map(~read_csv(., ) %>% 
+        dplyr::select(-`...1`) %>% 
+        dplyr::rename(label_cellbarcode=bc,
+                      label=Sample,
+                      patient_id=Sample,
+                      mut_status_ts5=mutated) %>% 
+        dplyr::mutate(SNV=case_when(patient_id == "MBL2"~ "SF3B1", 
+                                    patient_id =="MBL4"~ "NOTCH1", 
+                                     .default = NA),
+                      TOTcount=WTcount+MUTcount )) %>% 
+  purrr::set_names(metadata$label)
+```
+
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+# Analysis
+
+## Read distributions
+
+```{r fig.width=10, fig.height=5}
+WTcount_dist <- gotcha_data %>% map(~ggplot(., aes(x=WTcount))+
+                                      geom_histogram()+
+                                        scale_x_log10()+
+                                        theme_pub())
+MUTcount_dist <- gotcha_data %>% map(~ggplot(., aes(x=MUTcount))+
+                                      geom_histogram()+
+                                      scale_x_log10()+
+                                        theme_pub())
+total_count_dist <- gotcha_data %>% map(~ggplot(., aes(x=TOTcount))+
+                                      geom_histogram()+
+                                        scale_x_log10()+
+                                        theme_pub())
+
+ggarrange(plotlist = c(WTcount_dist, MUTcount_dist, total_count_dist), ncol = 2, nrow = 3, labels = c("MBL2", "MBL4"))
+```
+--> min 10 reads total depth cutoff for mutation
+
+```{r}
+gotcha_data <- gotcha_data %>% 
+  map(~dplyr::mutate(., mut_status_ts10=case_when(condition=(TOTcount >=10 & (MUTcount > WTcount)) ~ "mutated",
+                                                   condition=(TOTcount >=10 & (MUTcount <= WTcount)) ~ "non.mutated",
+                                                              .default=NA)))
+
+gotcha_data %>% 
+  imap(~write_csv(.x, paste0(tsv_dir, "/", .y, "_gotcha_data.tsv")))
+```
+

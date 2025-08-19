@@ -1,0 +1,71 @@
+---
+title: "White blood cell counts.Rmd"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+#GOAL
+The aim of this script is to visualize the coarse of WBCCs in selected patients.
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(readxl)
+```
+
+# Set paths
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "Clinical_data_analysis")
+RDS_dir <- file.path(analysis_dir, "RDS_Objects")
+```
+
+## Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r}
+WBCC_data <- list("CLL7"=read_xlsx(path = file.path(data_dir, "20250808_WBC_counts.xlsx"), sheet = "CLL7 548214 (p16)") %>% dplyr::slice(5:21),
+                  "CLL4"=read_xlsx(path= file.path(data_dir, "20250808_WBC_counts.xlsx"), sheet = "CLL4 621754 (p20)") %>% dplyr::slice(2:13),
+                  "CLL9"=read_xlsx(path= file.path(data_dir, "20250808_WBC_counts.xlsx"), sheet = "CLL9 810885 (p22)") %>% dplyr::slice(3:8)) %>% 
+  purrr::map(~mutate(.x, days_since_MBL = as.numeric(difftime(Date, first(Date), units = "days"))))
+```
+
+# Visualise
+## Line plots
+```{r}
+WBCC_MBL_CLL_plot <- WBCC_data %>% 
+  map( ~mutate(.x, Years = time_length(difftime(Date, min(Date), units = "days"), "years")) %>% 
+  ggplot(aes(x=Years, y=WBC, label=Label, colour=Years))+
+
+  geom_line(linewidth = 1) +
+  geom_label(aes(label = Label), colour = "black", label.size = NA, , na.rm = TRUE, vjust = -0.7) + 
+  scale_x_continuous(expand=expansion(c(0,0.05)))+
+  scale_y_continuous(limits=c(0, NA), expand=expansion(c(0, 0.1)))+
+  scale_colour_gradient(low = "#FC8D62", high="#66C2A5") +
+  labs(y="WBC/nl", x="Time since sampling [years]")+
+  theme_pub()+
+  theme(legend.position = "none"))
+
+saveRDS(WBCC_MBL_CLL_plot$CLL7, file=file.path(RDS_dir, "WBCC_CLL7_plot.RDS"))
+saveRDS(WBCC_MBL_CLL_plot$CLL4, file=file.path(RDS_dir, "WBCC_CLL4_plot.RDS"))
+saveRDS(WBCC_MBL_CLL_plot$CLL9, file=file.path(RDS_dir, "WBCC_CLL9_plot.RDS"))
+```
+
+
+
+

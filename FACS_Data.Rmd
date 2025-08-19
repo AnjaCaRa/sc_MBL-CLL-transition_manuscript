@@ -1,0 +1,121 @@
+---
+title: "Analyse FACs data"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL
+The aim of this script is to check for malignant populations in LC, HC-MBL and CLL in FACs data.
+
+# Load libraries
+```{r Load_libraries}
+library(readxl)
+library(ggsignif)
+library(tidyverse)
+library(ggpubr)
+library(cowplot)
+```
+
+# Set paths
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "FACs_data_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r}
+facs_data <- read_xlsx(path = file.path(data_dir, "20241124_MBL_CLL_clonal_B_cells.xlsx")) %>%
+  dplyr::mutate(
+    Status = case_when(Status == "LCMBL" ~ "LC-MBL",
+      Status == "MBL" ~ "HC-MBL",
+      .default = Status
+    ),
+    Status = factor(Status, levels = c("LC-MBL", "HC-MBL", "CLL")),
+    "19+5-"=`19+5+ + 19+5-`- `19+5+`,
+    "19+5-_perc"= `19+5-`/`19+5+ + 19+5-`*100) %>% 
+  dplyr::rename("19+5+_perc"=`%`)
+
+write_tsv(facs_data, file = file.path(tsv_dir, "facs_data.tsv"))
+```
+
+# Analysis
+
+## Statistics
+```{r}
+LC_MBL_patient_count <- facs_data %>% dplyr::filter(Status=="LC-MBL") %>% pull(Status) %>% length
+
+CD19posCD5pos_range <- facs_data %>% dplyr::filter(Status=="LC-MBL") %>% 
+  dplyr::select(`19+5+_perc`) %>% 
+  dplyr::summarize(min_CD19posCD5pos_perc=min(`19+5+_perc`),
+                   max_CD19posCD5pos_perc=max(`19+5+_perc`))
+
+dominant_clone_ts50perc <- facs_data %>% 
+  dplyr::filter(Status=="LC-MBL") %>% 
+  dplyr::select(CLL,`19+5+_perc`) %>% 
+  dplyr::mutate(ts_50perc=if_else(`19+5+_perc`>50, TRUE, FALSE)) %>% 
+  group_by(ts_50perc) %>% 
+  dplyr::summarize(ts_50perc_counts=n())
+
+LC_MBL_patient_count
+CD19posCD5pos_range
+dominant_clone_ts50perc
+```
+
+```{r fig.width=9, fig.height=3}
+clonal_B_box <- facs_data %>%
+  ggplot(aes(x = Status, y = `19+5+_perc`)) +
+  geom_boxplot(colour = "black", aes(fill = Status), outliers = FALSE) +
+  geom_jitter(width = 0.2, colour = "black", aes(fill = Status), pch = 21) +
+  geom_signif(comparisons = list(c('HC-MBL', 'CLL'), c('LC-MBL', 'HC-MBL')), step_increase = 0.1, textsize = 2) + 
+  scale_y_continuous("CD19+CD5+ cells [%]", expand = expansion(mult=c(0, 0.1))) +
+  scale_fill_manual(values = my_MBL_CLL_colours_named) +
+  scale_colour_manual(values = my_MBL_CLL_colours_named) +
+  theme_pub() +
+  theme(axis.text.x=element_text(angle=45, hjust=1,vjust=0.9),
+    legend.position = "none",
+    axis.title.x = element_blank()
+  )
+
+clonal_B_alc_scatter <- facs_data %>%
+  ggplot(aes(x = ALC, y = `19+5+_perc`, fill = Status)) +
+  geom_point(color = "black", pch = 21) +
+  scale_x_continuous("ALC [cells/nl]") +
+  scale_y_continuous("CD19+CD5+ B cells [%]") +
+  scale_fill_manual(values = my_MBL_CLL_colours_named) +
+  theme_pub() +
+  theme(
+        legend.position = "none")
+
+clonal_B_all_scatter <- facs_data %>%
+  ggplot(aes(x = `19+5+ + 19+5-`, y = `19+5+_perc`, fill = Status)) +
+  geom_point(color = "black", pch = 21) +
+  scale_x_continuous("B cells [cells/nl]") +
+  scale_y_continuous("CD19+CD5+ B cells [%]") +
+  scale_fill_manual(values = my_MBL_CLL_colours_named) +
+  theme_pub() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=0.9),
+        legend.position = "none")
+
+ggarrange(clonal_B_box, clonal_B_alc_scatter, clonal_B_all_scatter, nrow=1, ncol=3, align = "h", common.legend = TRUE, legend = "bottom")
+
+ggarrange(clonal_B_box, clonal_B_alc_scatter, clonal_B_all_scatter, nrow=1, ncol=3, align = "h", common.legend = TRUE, legend = "bottom") %>% 
+  ggsave(plot = .,filename =  file.path(plotting_dir, "Clonal_B_cell_figure.png"), width = 6, height = 2.5, bg = "white")
+```

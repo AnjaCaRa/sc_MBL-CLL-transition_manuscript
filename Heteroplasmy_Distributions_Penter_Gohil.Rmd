@@ -1,0 +1,394 @@
+---
+title: "Heteroplasmy distribution"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+# GOAL
+The aim of this script is to investigate what the distribution of heteroplasmy looks like for each mutation in each patient sample in the Penter and Gohil et al cohort.
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(RColorBrewer)
+library(ggpubr)
+library(vctrs)
+library(ggrepel)
+library(cowplot)
+source("~/Documents/projects/MBL_CLL/scripts/publication_theme.R")
+```
+
+# Set paths
+```{r}
+source(config_paths.R)
+result_dir_summaries <- file.path(project_dir_Penter_Gohil, "Summary_Plots")
+result_dir <- file.path(project_dir_Penter_Gohil, "results")
+data_dir <- file.path(project_dir_Penter_Gohil, "data")
+```
+
+# Load data
+
+```{r Celltype annotation}
+all_barcodes_Blike <- read_csv(file.path(data_dir, "20200511_fcr_barcodes_b_cells.txt"))
+highquality_per_sample <- list("WW1"=read_csv(file.path(data_dir, "021020_1_barcodes.csv"), col_names = "barcode") %>% dplyr::mutate(barcode=paste0("1_", barcode)) ,
+                               "WW2"=read_csv(file.path(data_dir, "021020_2_barcodes.csv"), col_names = "barcode") %>% dplyr::mutate(barcode=paste0("2_", barcode)) ,
+                              "preFCR"=read_csv(file.path(data_dir, "021020_3_barcodes.csv"), col_names="barcode") %>% dplyr::mutate(barcode=paste0("3_", barcode)),
+                              "remission"=read_csv(file.path(data_dir, "021020_4_barcodes.csv"), col_names = "barcode") %>% dplyr::mutate(barcode=paste0("4_", barcode)),
+                              "relapse"=read_csv(file.path(data_dir, "021020_5_barcodes.csv"), col_names = "barcode") %>% dplyr::mutate(barcode=paste0("5_", barcode)))
+CLL_cells <- highquality_per_sample %>% 
+  map(~dplyr::filter(., barcode %in% all_barcodes_Blike$barcode)) %>% 
+  bind_rows()
+```
+
+```{r}
+heteroplasmy_sparse <- c(
+  readRDS(file.path(project_dir_Penter_Gohil, "results/RDS_objects/VAFs.cln.RDS"))
+)
+
+metadata <- read_tsv(file = paste0(project_dir_Penter_Gohil, "/data/20240209_Tidy_Penter_Gohil_metadata.tsv")) %>% 
+  dplyr::mutate(stage=case_when(patient_id == "CLL101" & short_description == "FCR patient with longterm follow-up JG0079: watch and wait" ~ "WW1",
+                               patient_id == "CLL101" & short_description == "FCR patient with longterm follow-up JG0079: watch and wait 2" ~ "WW2",
+                                patient_id == "CLL101" & short_description == "FCR patient with longterm follow-up JG0079: pre FCR" ~ "preFCR",
+                                patient_id == "CLL101" & short_description == "FCR patient with longterm follow-up JG0079: remission"~ "remission",
+                                patient_id == "CLL101" & short_description == "FCR patient with longterm follow-up JG0079: relapse"~"relapse",
+                                .default = NA
+                                )) %>% 
+  dplyr::relocate("stage", .after = "selection")
+```
+
+# Transform data
+```{r}
+heteroplasmy <- heteroplasmy_sparse %>%
+  map(~ as.matrix(.) %>%
+    t() %>%
+    as_tibble(rownames = "label_cellbarcode") %>%
+    dplyr::select(-any_of("310T>C")))
+
+heteroplasmy_long <- heteroplasmy %>%
+  map(~ tidyr::pivot_longer(., -c(label_cellbarcode), names_to = "Variant", values_to = "Heteroplasmy") %>%
+    tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>% 
+      dplyr::mutate(PenterGohillabel_cellbarcode= case_when(label =="CLL101.2" ~ paste0("1_", cellbarcode),
+                                                            label =="CLL101.3" ~ paste0("2_", cellbarcode),
+                                                            label =="CLL101.4" ~ paste0("3_", cellbarcode),
+                                                            label =="CLL101.5" ~ paste0("4_", cellbarcode),
+                                                            label =="CLL101.6" ~ paste0("5_", cellbarcode))) %>% 
+      dplyr::filter(PenterGohillabel_cellbarcode %in% CLL_cells$barcode))
+```
+
+# Evaluate heteroplasmy distributions
+
+```{r, fig.width=15, fig.height=50}
+variant_colours <- colorRampPalette(brewer.pal(12, "Set3"))(124)
+colours_CLL_progression <- c("CLL101.2"="rosybrown1", "CLL101.3"="rosybrown3", "CLL101.4"="indianred4", "CLL101.5"="paleturquoise3", "CLL101.6"="indianred",
+                             "WW1"="rosybrown1", "WW2"="rosybrown3", "preFCR"="indianred4", "remission"="paleturquoise3", "relapse"="indianred")
+
+```
+
+```{r, fig.width=8, fig.height=40}
+heteroplasmy_long %>% bind_rows() %>% 
+  pull(Heteroplasmy)%>% 
+  unique() %>% 
+  sort()  %>% 
+  .[.>0] 
+
+zero_replacement <- 0.0001
+```
+
+```{r, fig.width=15, fig.height=15}
+paired_het_plots <- list()
+for (label in names(heteroplasmy_long[1])) {
+  print(label)
+
+  plot_length <- heteroplasmy_long[[label]]$Variant %>%
+    unique() %>%
+    length()
+
+  distribution_paired <- heteroplasmy_long[[label]] %>%
+    dplyr::mutate(Heteroplasmy = if_else(Heteroplasmy == 0, true=zero_replacement,
+      false=Heteroplasmy)) %>%
+    ggplot(aes(x = Heteroplasmy, colour = label)) +
+    geom_freqpoly(linewidth = 1, binwidth = 0.1) +
+    labs(y = "counts") +
+    theme_bw() +
+    scale_x_log10() +
+    scale_y_log10() +
+    scale_colour_manual(name="Condition", 
+                        values = colours_CLL_progression, 
+                        labels=c("WW1", "WW2", "preFCR", "remission", "relapse")) +
+    theme_pub()+
+    theme(legend.position = "bottom",
+          legend.direction = "horizontal") +
+    facet_wrap(~Variant, scales = "free")
+
+  paired_het_plots[[label]] <- distribution_paired
+
+  ggsave(
+    plot = distribution_paired,
+    path = file.path(result_dir_summaries, "Heteroplasmy_distributions"),
+    filename = paste0("Heteroplasmy_distributions_", label, ".png"),
+    width = 8*6,
+    height = 2.42 * plot_length/6,
+    limitsize = FALSE,
+    units = "cm"
+  )
+}
+paired_het_plots
+```
+
+
+## QQ plots
+
+```{r QQ_plot_function}
+# split data into 100 percentiles
+gg_qq_empirical <- function(a, b, quantiles = seq(0, 1, 0.01)) {
+  df <- tibble(
+    quantile = seq(0, 100, 1),
+    early = quantile(b, quantiles),
+    late = quantile(a, quantiles)
+  )
+  
+  ggplot(data=df,
+         mapping = aes(
+    x = early,
+    y = late, colour=quantile)) +
+    geom_abline(aes(slope = 1, intercept = 0), linetype = 2) +
+    geom_point() +
+    scale_colour_gradientn(
+      colours = c("#D9D9D9", "#B3B3B3", "#808080", "#666666", "#404040"),
+      breaks = seq(0, 100, 25),
+      labels = seq(0, 100, 25),
+      limits = c(0, 100)
+    ) +
+    scale_x_log10(labels=10^seq(-3,2, 1),
+                  limits=c(0.0001, 1),
+                  breaks=10^seq(-5,0,1),
+                  expand=expansion(mult=c(0.05,0.05)))+
+    scale_y_log10(labels=10^seq(-3,2, 1),
+                  limits=c(0.0001, 1),
+                  breaks=10^seq(-5,0,1),
+                  expand=expansion(mult=c(0.05,0.05)))+
+    theme_pub()+
+    theme(plot.title = element_blank(),
+        legend.position = c(0.9, 0.35),
+        aspect.ratio = 1
+      ) +
+      guides(color = guide_colorbar(barheight = 3, barwidth = 0.5)) +
+      labs(colour = "Percentile")
+}
+```
+
+```{r het_filter_function}
+filter_heteroplasmy <- function(het_df, disease_condition, variant_id, lower_het_threshold) {
+  if (missing(lower_het_threshold)) {
+    dplyr::mutate(het_df, label = case_when(str_detect(label, "CLL101.2") ~ "WW1",
+                                            str_detect(label, "CLL101.3") ~ "WW2",
+                                            str_detect(label, "CLL101.4") ~ "preFCR",
+                                            str_detect(label, "CLL101.5") ~ "remission",
+                                            str_detect(label, "CLL101.6") ~ "relapse",
+      .default = label
+    )) %>%
+      dplyr::filter(label == disease_condition & Variant == variant_id) %>%
+      dplyr::pull(Heteroplasmy)
+  } else {
+    dplyr::mutate(het_df, label = case_when(str_detect(label, "CLL101.2") ~ "WW1",
+                                            str_detect(label, "CLL101.3") ~ "WW2",
+                                            str_detect(label, "CLL101.4") ~ "preFCR",
+                                            str_detect(label, "CLL101.5") ~ "remission",
+                                            str_detect(label, "CLL101.6") ~ "relapse",
+      .default = label)) %>%
+      dplyr::filter(label == disease_condition & Variant == variant_id & Heteroplasmy > lower_het_threshold) %>%
+      dplyr::pull(Heteroplasmy)
+  }
+}
+```
+
+```{r QQ_plots_significant, fig.width=12}
+all_patient_var_plots <- list()
+all_patient_statistics <- list()
+for (patient in names(heteroplasmy_long)) {
+  print(patient)
+  all_variants <- unique(heteroplasmy_long[[patient]]$Variant)
+  all_var_plots <- list()
+  all_var_statistics <- tibble(
+    patient_id = as.character(),
+    Variant = as.character(),
+    mean_VAF_MBL = as.numeric(),
+    total_cell_counts_MBL = as.numeric(),
+    mean_VAF_CLL = as.numeric(),
+    total_cell_counts_CLL = as.numeric(),
+    p_value = as.numeric(),
+    mean_VAF_MBL_non_zero = as.numeric(),
+    cell_counts_MBL_non_zero = as.numeric(),
+    mean_VAF_CLL_non_zero = as.numeric(),
+    cell_counts_CLL_non_zero = as.numeric()
+  )
+  for (var in all_variants) {
+    print(var)
+    MBL_heteroplasmy <- filter_heteroplasmy(het_df = heteroplasmy_long[[patient]], disease_condition = "WW1", variant_id = var)
+    mean_MBL_heteroplasmy <- mean(MBL_heteroplasmy)
+    n_MBL_heteroplasmy <- length(MBL_heteroplasmy)
+
+    CLL_heteroplasmy <- filter_heteroplasmy(het_df = heteroplasmy_long[[patient]], disease_condition = "preFCR", variant_id = var)
+    mean_CLL_heteroplasmy <- mean(CLL_heteroplasmy)
+    n_CLL_heteroplasmy <- length(CLL_heteroplasmy)
+
+    MBL_heteroplasmy_capped <- filter_heteroplasmy(het_df = heteroplasmy_long[[patient]], disease_condition = "WW1",variant_id = var, lower_het_threshold = 0)
+    mean_MBL_heteroplasmy_capped <- mean(MBL_heteroplasmy_capped)
+    n_MBL_heteroplasmy_capped <- length(MBL_heteroplasmy_capped)
+
+    CLL_heteroplasmy_capped <- filter_heteroplasmy(het_df = heteroplasmy_long[[patient]], disease_condition = "preFCR",variant_id = var, lower_het_threshold = 0)
+    mean_CLL_heteroplasmy_capped <- mean(CLL_heteroplasmy_capped)
+    n_CLL_heteroplasmy_capped <- length(CLL_heteroplasmy_capped)
+    
+    #perform kolmogorov smirnov test on full data distribution including all zeros
+    ks_result_full_distribution <- ks.test(MBL_heteroplasmy, CLL_heteroplasmy)
+
+    new_statistics <- tibble(
+      patient_id = as.character(patient),
+      Variant = as.character(var),
+      mean_VAF_MBL = as.numeric(mean_MBL_heteroplasmy),
+      total_cell_counts_MBL = as.numeric(n_MBL_heteroplasmy),
+      mean_VAF_CLL = as.numeric(mean_CLL_heteroplasmy),
+      total_cell_counts_CLL = as.numeric(n_CLL_heteroplasmy),
+      p_value = as.numeric(ks_result_full_distribution$p.value),
+      ks_statistic = as.numeric(ks_result_full_distribution$statistic),
+      mean_VAF_MBL_non_zero = as.numeric(mean_MBL_heteroplasmy_capped),
+      cell_counts_MBL_non_zero = as.numeric(n_MBL_heteroplasmy_capped),
+      mean_VAF_CLL_non_zero = as.numeric(mean_CLL_heteroplasmy_capped),
+      cell_counts_CLL_non_zero = as.numeric(n_CLL_heteroplasmy_capped)
+    )
+
+    all_var_statistics <- all_var_statistics %>%
+      rbind(new_statistics)
+
+    if ((n_MBL_heteroplasmy > 100 | n_CLL_heteroplasmy > 100) & ks_result_full_distribution$p.value <= 0.05) {
+      qq <- gg_qq_empirical(CLL_heteroplasmy, MBL_heteroplasmy) +
+        labs(
+          y = "Pre therapy heteroplasmy [%]",
+          x = "Diagnosis heteroplasmy [%]",
+          title = paste0( patient, "\n", var))
+      all_var_plots[[var]] <- qq
+    }
+  }
+  all_patient_statistics[[patient]] <- all_var_statistics%>% 
+    dplyr::mutate("p_adjust" = p.adjust(p_value, method = "BH", n = length(.$p_value)))
+
+  significant_vars <- all_var_statistics %>% 
+    dplyr::mutate("p_adjust" = p.adjust(p_value, method = "BH", n = length(.$p_value))) %>% 
+    dplyr::filter(p_adjust <=0.05) %>% pull(Variant)
+  
+  all_patient_var_plots[[patient]] <- all_var_plots[significant_vars]
+}
+
+saveRDS(all_patient_statistics, file = file.path(project_dir_Penter_Gohil, "RDS_objects/heteroplasmy_distribution_statistics.RDS"))
+```
+
+```{r save_QQplots, fig.width=6}
+all_patient_var_plots <- all_patient_var_plots %>%
+  list_drop_empty()
+
+all_patient_var_plots %>%
+  map2(names(.), safely(~ ggarrange(
+    plotlist = .x,
+    ncol = 2,
+    nrow = ceiling(length(.x) / 2)
+  ))) %>%
+  purrr::transpose() %>%
+  .$result %>%
+  map2(names(.), safely(~ ggsave(.x,
+    path = file.path(result_dir_summaries, "QQ_Plots"),
+    filename = paste0("QQ_plots_", .y, ".png"),
+    width = 5,
+    limitsize = FALSE,
+    height = ceiling(length(all_patient_var_plots[[.y]]) / 2) * 2.5
+  )))
+
+all_patient_var_plots$CLL101 %>% 
+  map(~.+
+        coord_equal()+
+        theme(aspect.ratio = 1))
+
+saveRDS(all_patient_var_plots$CLL101$`9144C>A`, file.path(project_dir_Penter_Gohil, "RDS_Objects/all_patient_var_plots$CLL101$9144C>A.RDS"))
+```
+
+```{r fig.width=10, fig.height=5}
+preFCR_heteroplasmy <- filter_heteroplasmy(het_df = heteroplasmy_long$CLL101, disease_condition = "preFCR", variant_id = "7053G>A")
+mean_preFCR_heteroplasmy <- mean(preFCR_heteroplasmy)
+n_preFCR_heteroplasmy <- length(preFCR_heteroplasmy)
+
+relapse_heteroplasmy <- filter_heteroplasmy(het_df = heteroplasmy_long$CLL101, disease_condition = "relapse", variant_id = "7053G>A")
+mean_CLL_heteroplasmy <- mean(relapse_heteroplasmy)
+n_CLL_heteroplasmy <- length(relapse_heteroplasmy)
+
+`ks_result_full_distribution_7053G>A` <- ks.test(preFCR_heteroplasmy, relapse_heteroplasmy)
+`ks_result_full_distribution_7053G>A`
+
+`qq_7053G>A`<- gg_qq_empirical(relapse_heteroplasmy, preFCR_heteroplasmy) +
+        labs(
+          y = "Relapse heteroplasmy  [%]",
+          x = "Pre therapy heteroplasmy  [%]",
+          title = "CLL101 7053G>A")
+
+`density_distributions_variant_7053G>A` <-
+    heteroplasmy_long$CLL101 %>%
+    dplyr::filter(Variant == "7053G>A") %>%
+    dplyr::mutate(Heteroplasmy = if_else(condition=Heteroplasmy == 0, true=zero_replacement, false=Heteroplasmy)) %>%
+    dplyr::mutate(label = factor(label, levels = c("CLL101.2","CLL101.3", "CLL101.4","CLL101.5","CLL101.6"))) %>%
+    dplyr::filter(label %in% c("CLL101.4", "CLL101.6")) %>%
+    ggplot(aes(x = Heteroplasmy*100, 
+               colour = label)) +
+    geom_density(bw=0.08, linewidth = 1)+
+    labs(y = "Density", x="Heteroplasmy [%]", title = paste0("7053G>A")) +
+    scale_x_log10(limits=c(NA, 100),expand = expansion(mult = c(0.1, 0.1)), labels = scales::comma) +
+    scale_y_log10(limits=c(1e-5, 50), expand = expansion(mult = c(0, 0.01)))+
+    theme_pub() +
+    theme(legend.position = "bottom")+
+    scale_colour_manual(name="Condition", values= c("CLL101.4"="#8b3a3a80", "CLL101.6"="#cd5c5c80"), labels=c("CLL101.4"="preFCR",  "CLL101.6"="relapse"), breaks=c("CLL101.4","CLL101.6"))+
+    guides(colour = guide_legend(ncol = 9))
+`density_distributions_variant_7053G>A`
+
+ggarrange(`density_distributions_variant_7053G>A`, `qq_7053G>A`, nrow=1, ncol=2)
+
+saveRDS(object =`density_distributions_variant_7053G>A`, file.path(project_dir_Penter_Gohil, "RDS_Objects/density_distributions_CLL101_7053G>A.RDS") )
+```
+
+## Normalised frequency of heteroplasmy
+
+```{r, fig.width=20, fig.height=10}
+density_distributions <- list()
+for (row in 1:nrow(variants_signif)) {
+  label <- variants_signif[row, ]$patient_id
+  var <- variants_signif[row, ]$Variant
+
+  density_distributions_variant <-
+    heteroplasmy_long[[label]] %>%
+    dplyr::filter(Variant == var) %>%
+    dplyr::mutate(Heteroplasmy = if_else(condition=Heteroplasmy == 0, true=zero_replacement, false=Heteroplasmy)) %>%
+    dplyr::mutate(label = factor(label, levels = c("CLL101.2","CLL101.3", "CLL101.4","CLL101.5","CLL101.6"))) %>%
+    dplyr::filter(label %in% c("CLL101.2", "CLL101.4")) %>%
+    ggplot(aes(x = Heteroplasmy*100, 
+               colour = label)) +
+    geom_density(bw=0.08, linewidth = 1)+
+    labs(y = "Density", x="Heteroplasmy [%]", title = paste0(label, " ", var)) +
+    scale_x_log10(limits=c(NA, 100),expand = expansion(mult = c(0.1, 0.1)), labels = scales::comma) +
+    scale_y_log10(limits=c(1e-5, 50), expand = expansion(mult = c(0, 0.01)))+
+    theme_pub() +
+    theme(legend.position = "bottom")+
+    scale_colour_manual(name="Condition", values= c("CLL101.2"="#ffc1c180", "CLL101.4"="#8b3a3a80"), labels=c("CLL101.2"="WW1",  "CLL101.4"="preFCR"), breaks=c("CLL101.2","CLL101.4"))+
+    guides(colour = guide_legend(ncol = 9))
+    density_distributions[[paste0(label, "_", var)]] <- density_distributions_variant
+}
+
+ggarrange(plotlist = density_distributions, ncol=4, nrow=2, common.legend = TRUE, legend="bottom")
+saveRDS(density_distributions$`CLL101_9144C>A`, file.path(project_dir_Penter_Gohil, "RDS_objects/density_distributions_CLL101_9144C>A.RDS"))
+```
+

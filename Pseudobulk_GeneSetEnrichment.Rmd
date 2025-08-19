@@ -1,0 +1,153 @@
+---
+title: "Pseudobulk_GeneSetEnrichment_MBL_CLL"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL: The aim of this script is find gene set enrichments within the different pseudobulk comparisons from which I identified the DEGs.
+
+# Load libraries
+
+```{r Load_libraries}
+library(readxl)
+library(clusterProfiler)
+library("org.Hs.eg.db")
+library(tidyverse)
+library(ggpubr)
+library(ggrepel)
+library(RColorBrewer)
+library(rGREAT)
+```
+
+# Set Paths
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "DESeq2_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r}
+res_tbl <- readRDS(file = file.path(RDS_dir, "res_tbl.RDS"))
+disgenet_MBL_results <- readRDS(file = file.path(RDS_dir, "disgenet_MBL_results.RDS"))
+disgenet_CLL_results <- readRDS(file = file.path(RDS_dir, "disgenet_CLL_results.RDS"))
+c2 <- read_tsv(file.path(c2_data_dir, "c2.all.v2024.1.Hs.symbols.gmt.txt"), col_names = FALSE) %>%
+  dplyr::filter(str_starts(
+    X1,
+    "REACTOME_SIGNALING_BY_THE_B_CELL_RECEPTOR_BCR|REACTOME_CD22_MEDIATED_BCR_REGULATION|REACTOME_FCERI_MEDIATED_CA_2_MOBILIZATION|REACTOME_FCERI_MEDIATED_MAPK_ACTIVATION|REACTOME_FCERI_MEDIATED_NF_KB_ACTIVATION|REACTOME_ANTIGEN_ACTIVATES_B_CELL_RECEPTOR_BCR_LEADING_TO_GENERATION_OF_SECOND_MESSENGERS"
+  )) %>%
+  tidyr::pivot_longer(cols = X3:X30, names_to = NULL, values_to = "gene") %>%
+  dplyr::rename("gene_set" = X1, "URL" = X2) %>%
+  dplyr::select(gene_set, gene) %>%
+  separate_rows(gene, sep = "\t")
+B_markers <- c("MS4A1", "EBF1", "PAX5", "MME", "CD19")
+CLL_markers <- c("CD19", "CD5", "FCER2", "CD79b")
+```
+
+```{r}
+genes2label <- c(disgenet_CLL_results@qresult[["gene_symbol"]], disgenet_MBL_results@qresult[["gene_symbol"]])
+
+
+res_table_thres <- res_tbl %>%
+  map(~ mutate(., threshold = if_else(-log10(padj) >= 10 & abs(log2FoldChange) >= 1, TRUE, NA)) %>%
+    arrange(desc(threshold), padj) %>%
+    mutate(
+      label = if_else(threshold == TRUE & row_number() <= 20 & !grepl("^IG", gene), gene, NA),
+      disgenet = if_else(gene %in% genes2label & threshold == TRUE, gene, NA)
+    ) %>%
+    arrange(desc(disgenet)) %>%
+    arrange(desc(threshold), padj) %>%
+    mutate(
+      top10_threshold = if_else(threshold == TRUE & row_number() <= 10,
+        gene, NA
+      ),
+      reactome = if_else(gene %in% c2$gene & threshold == TRUE, gene, NA),
+      disgenet_reactome = if_else((!is.na(disgenet) | !is.na(reactome)) & !grepl("^IG", gene), gene, NA)
+    ) %>%
+    arrange(desc(reactome), desc(disgenet)) %>%
+    mutate(
+      marker_gene = if_else(gene %in% c(B_markers, CLL_markers) & threshold == TRUE, gene, NA),
+      disgenet_reactome_marker_gene = if_else((!is.na(disgenet) | !is.na(reactome) | !is.na(marker_gene)) & !grepl("^IG", gene), gene, NA)
+    ) %>%
+    arrange(desc(reactome), desc(disgenet), desc(marker_gene)))
+```
+
+# GSEA analysis
+```{r fig.height=25, fig.width=20}
+gmtfile <- c("c1.all.v2024.1.Hs.symbols.gmt.txt", # positional gene set
+             "c2.all.v2024.1.Hs.symbols.gmt.txt", # curated gene set
+             #"c3.all.v2024.1.Hs.symbols.gmt.txt", # regulatory target gene sets
+             #"c4.all.v2024.1.Hs.symbols.gmt.txt", # computational gene sets
+             "c5.all.v2024.1.Hs.symbols.gmt.txt", # ontology gene sets
+             "c6.all.v2024.1.Hs.symbols.gmt.txt", # oncogenic signature gene sets
+             #"c7.all.v2024.1.Hs.symbols.gmt.txt", # imumunologic signature gene sets
+             #"c8.all.v2024.1.Hs.symbols.gmt.txt", # cell type signature gene set
+             "h.all.v2024.1.Hs.symbols.gmt.txt") %>%  # hallmarks) %>% 
+  map(~system.file("extdata", .x, package="clusterProfiler")) %>% purrr::set_names(c("c1", "c2", "c5", "c6",  "h"))
+      
+c <- map(gmtfile, ~read.gmt(.x)) %>% purrr::set_names(c("c1", "c2", "c5", "c6", "h"))
+
+egmt <- res_table_thres %>% 
+  map(~tibble::rowid_to_column(., "ID") %>% 
+                                  arrange(-log2FoldChange) %>% 
+        dplyr::select(gene, log2FoldChange) %>% 
+        deframe)
+
+combinations <- purrr::cross(list(c=c, egmt=egmt)) %>% 
+  purrr::set_names(expand.grid(c = names(c), egmt = names(egmt)) %>% 
+                     dplyr::mutate(name=paste(egmt, c, sep="_")) %>% 
+                     pull(name))
+
+result <- combinations %>%
+  map(~GSEA(geneList = .x[[2]], TERM2GENE = .x[[1]], verbose = FALSE))
+
+result <- result %>% 
+  purrr::set_names(names(combinations))
+
+dotplots <- list(result[c(1,2,3)] %>% 
+                   imap(~dotplot(.x, title=str_split_i(.y, pattern = "_",i = 6))),
+                 result[c(6,7,8,9,10)] %>% 
+                   imap(~dotplot(.x, title=str_split_i(.y, pattern = "_",i = 6))),
+                 result[c(11,12,13,14,15)] %>% 
+                   imap(~dotplot(.x, title=str_split_i(.y, pattern = "_",i = 6))), 
+                 result[c(17)] %>% 
+                   imap(~dotplot(.x, title=str_split_i(.y, pattern = "_",i = 6))))
+
+names(dotplots) <- names(egmt)
+
+gsea_figures <- dotplots %>% 
+  map(~ggarrange(plotlist=., nrow=2, ncol=3))
+
+gsea_figures %>% 
+  imap(~ggsave(.x, file=file.path(plotting_dir, paste0("GSEA_", .y, ".png")), width=20, height=15))
+
+list(dotplots$`B_LC_vs_LC-MBL B Cell_LC`$`B_LC_vs_LC-MBL B Cell_LC_c2`$data,
+dotplots$`B_HCCLL_vs_HC-MBL B Cell_HC`$`B_HCCLL_vs_HC-MBL B Cell_HC_c2`$data,
+dotplots$`B_HCCLL_vs_CLL B Cell_CLL`$`B_HCCLL_vs_CLL B Cell_CLL_c2`$data,
+dotplots$`HC-MBL B Cell_HC_vs_CLL B Cell_CLL`$`HC-MBL B Cell_HC_vs_CLL B Cell_CLL_c2`$data) %>% set_names(c("Reactome_B_LC_vs_LC-MBL B Cell_LC",
+                                                                                                       "Reactome_B_HCCLL_vs_HC-MBL B Cell_HC",
+                                                                                                       "Reactome_B_HCCLL_vs_CLL B Cell_CLL",
+                                                                                                       "Reactome_HC-MBL B Cell_HC_vs_CLL B Cell_CLL")) %>% 
+  purrr::imap(~write_tsv(.x, file = file.path(tsv_dir, paste0(.y, ".tsv"))))
+```
+
+
+

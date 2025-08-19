@@ -1,0 +1,1289 @@
+---
+title: "Compare_BCR_mtDNA_clones"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+# Goal
+The aim of this script is to extract mitochondrial mutations for all samples from scRNA data and compare them to BCR clones of the same samples
+
+# Load libraries
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(Signac)
+library(tidyverse)
+library(ggpubr)
+library(RColorBrewer)
+library(SummarizedExperiment)
+library(ggalluvial)
+library(ggrepel)
+library(Seurat)
+library(circlize)
+library(ComplexHeatmap)
+library(Matrix)
+```
+
+# Set paths
+```{r define_directories }
+source("config_paths.R")
+
+data_dir <- file.path(project_dir, "data")
+library_path <- file.path(data_dir, "GEX")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "mtDNA_BCR_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+
+ArchR_dir_Annotation <- file.path(project_dir_ext, "ArchR_Projects_4_Annotation")
+GEX_analysis_RDS_dir <- file.path(result_dir, "GEX_analysis/RDS_objects")
+VDJ_analysis_RDS_dir <- file.path(result_dir, "VDJ_analysis/RDS_Objects")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "/scripts/publication_theme.R"))
+```
+
+```{r}
+metadata_all <- read_tsv(file = file.path(data_dir, "20240723_Tidy_MBL_CLL_metadata.tsv")) 
+gex_scaled_all <- readRDS(file.path(GEX_analysis_RDS_dir, "gex_scaled_all.RDS"))
+new_BCR_paired <- readRDS(file.path(VDJ_analysis_RDS_dir, "new_BCR_paired.RDS"))
+```
+
+```{r}
+BCR_clonotype_annotation <- new_BCR_paired %>%
+  bind_rows() %>%
+  dplyr::select(label_cellbarcode, new_common_ct_id) %>%
+  dplyr::rename("BCR_clonotype" = new_common_ct_id) %>%
+  dplyr::mutate(BCR_clonotype = as.factor(str_remove(BCR_clonotype, "_clonotype"))) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#") %>%
+  tidyr::unite("label_cellbarcode", label:cellbarcode, sep = "_") %>%
+  with(setNames(BCR_clonotype, label_cellbarcode))
+
+gex_scaled_all <- AddMetaData(gex_scaled_all, 
+                              metadata = BCR_clonotype_annotation, 
+                              col.name = "BCR_clonotype")
+```
+
+```{r}
+matched_samples <- metadata_all %>%
+  dplyr::filter(data_type %in% c("GEX", "BCR")) %>%
+  dplyr::select(label, patient_id, plotting_id, MBL_subtype, data_type) %>%
+  tidyr::pivot_wider(id_cols = c(label, patient_id, plotting_id, MBL_subtype), names_from = data_type, values_from = data_type) %>%
+  dplyr::filter(!(is.na(GEX) | is.na(BCR))) %>%
+  pull(label)
+
+mtDNA_samples <- metadata_all %>%
+  dplyr::filter(
+    data_type == "GEX",
+    label %in% matched_samples
+  ) %>%
+  dplyr::select(pool, label) %>%
+  deframe()
+
+BCR_samples <- metadata_all %>%
+  dplyr::filter(
+    data_type == "BCR",
+    label %in% matched_samples
+  ) %>%
+  dplyr::select(pool, label) %>%
+  deframe()
+
+metadata_matched_samples <- metadata_all %>%
+  dplyr::filter(pool %in% c(names(mtDNA_samples), names(BCR_samples)))
+
+# mgatk on GEX data
+mgatk_file_paths <- file.path(library_path, paste0(names(mtDNA_samples), ".mgatk"))
+```
+
+```{r}
+# previously called clonal variants on ATAC data
+ATAC_MBL_cln_variants <- c(readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/cln.variants.MBL.RDS")),
+                         readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/RDS_objects/cln.variants.MBL.RDS")),
+                         readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/RDS_objects/cln.variants.MBL.RDS")),
+                         readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset4/RDS_objects/cln.variants.MBL.RDS")))
+
+ATAC_cln_variants <- c(readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/cln.variants.RDS")),
+                         readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/RDS_objects/cln.variants.RDS")),
+                         readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/RDS_objects/cln.variants.RDS")))
+```
+
+```{r}
+# VAFs of previously called clonal variants on ATAC data
+ATAC_VAFs_cln_MBL <- readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset4/RDS_objects/VAFs.cln.MBL.RDS"))
+```
+
+```{r}
+# previously called clonotypes on ATAC data
+ATAC_MBL_clonotypes <- c(readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/clonotypes_MBL.RDS")),
+                         readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/RDS_objects/clonotypes_MBL.RDS")),
+                         readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/RDS_objects/clonotypes_MBL.RDS")),
+                         readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset4/RDS_objects/clonotypes_MBL.RDS")))
+
+ATAC_clonotypes <- c(readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/clonotypes.RDS")),
+                     readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/RDS_objects/clonotypes.RDS")),
+                         readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/RDS_objects/clonotypes.RDS")))
+```
+
+```{r}
+pool2label <- metadata_matched_samples %>%
+  select(pool, label) %>%
+  deframe()
+
+# Individual mgatk files per sample
+mito.data.idv <- mgatk_file_paths %>%
+  map(~ ReadMGATK(.)) %>%
+  set_names(mtDNA_samples)
+
+saveRDS(mito.data.idv, file = file.path(RDS_dir, "mito.data.idv.RDS"))
+```
+
+```{r}
+# New filtering function also accounting for mtseq depth of min 10!
+ filter_depth_from_mitodata <- function(mgatk_idv_list, archrproj) {
+   # Filter cells
+   for (patient in unique(mtDNA_samples)) {
+     keep_col_depth <- mgatk_idv_list[[patient]]$depth %>%
+       dplyr::filter(mito.depth >= 10) %>%
+       rownames()
+
+     mgatk_idv_list[[patient]]$counts <- mgatk_idv_list[[patient]]$counts[, keep_col_depth]
+
+     mgatk_idv_list[[patient]]$depth <- mgatk_idv_list[[patient]]$depth[keep_col_depth, , drop = FALSE]
+   }
+
+   return(mgatk_idv_list)
+ }
+
+ mito.data.idv <- filter_depth_from_mitodata(mito.data.idv, CLLProj)
+ saveRDS(mito.data.idv, file = file.path(RDS_dir, "mito.data.idv.RDS"))
+```
+
+```{r}
+# Paired mgatk files per patient
+mito.data <- list()
+
+sample_subset <- metadata_matched_samples %>%
+  dplyr::filter(
+    label %in% mtDNA_samples,
+    str_starts(label, "CLL"),
+    data_type == "GEX"
+  ) %>%
+  pull(patient_id) %>%
+  unique()
+
+sample_subset_sample <- metadata_matched_samples %>%
+  dplyr::filter(
+    patient_id %in% sample_subset,
+    str_starts(label, "CLL"),
+    data_type == "GEX"
+  ) %>%
+  pull(label)
+
+mito.data <- list()
+for (i in sample_subset) {
+  subset_names <- str_subset(names(mito.data.idv), i)
+  subset_names_index <- match(subset_names, names(mito.data.idv))
+
+  df_1 <- mito.data.idv[[subset_names_index[[1]]]]$counts
+  df_2 <- mito.data.idv[[subset_names_index[[2]]]]$counts
+
+  colnames(df_1) <- paste(subset_names[1], colnames(df_1), sep = "#")
+  colnames(df_2) <- paste(subset_names[2], colnames(df_2), sep = "#")
+
+  subset_df <- cbind(df_1, df_2)
+  rm(df_1, df_2)
+  mito.data <- append(mito.data, subset_df)
+}
+names(mito.data) <- sample_subset
+
+saveRDS(mito.data, file = file.path(RDS_dir, "mito.data.RDS"))
+mito.data <- readRDS(file = file.path(RDS_dir, "mito.data.RDS"))
+```
+
+```{r}
+# Individual mgatk per patient
+sample_subset_MBL <- metadata_matched_samples %>%
+  dplyr::filter(
+    label %in% mtDNA_samples,
+    str_starts(label, "MBL"),
+    data_type == "GEX"
+  ) %>%
+  pull(patient_id) %>%
+  unique()
+
+mito.data.MBL <- list()
+for (i in sample_subset_MBL) {
+  subset_names <- str_subset(names(mito.data.idv), i)
+  subset_names_index <- match(subset_names, names(mito.data.idv))
+
+  df_1 <- mito.data.idv[[subset_names_index[[1]]]]$counts
+  colnames(df_1) <- paste(subset_names[1], colnames(df_1), sep = "#")
+  mito.data.MBL <- append(mito.data.MBL, df_1)
+}
+names(mito.data.MBL) <- sample_subset_MBL
+saveRDS(mito.data.MBL, file = file.path(RDS_dir, "mito.data.MBL.RDS"))
+mito.data.MBL <- readRDS(file = file.path(RDS_dir, "mito.data.MBL.RDS"))
+```
+
+# Analysis
+## Variants identification
+```{r Get_mt_variants}
+# Get variants cumulative per patient over both samples
+variant.df <- mito.data %>%
+  map(~ IdentifyVariants(., refallele = mito.data.idv[[1]]$refallele)) %>%
+  imap( ~ .x %>%
+    dplyr::mutate(sample_id = .y, .before = "nucleotide"))
+
+# Export_mt_variants
+variant.df %>%
+  imap(~ write_tsv(.x,
+    quote = "none",
+    file = file.path(analysis_dir, paste0("MitochondrialVariants/Variants_", .y, ".csv"))
+  ))
+
+saveRDS(variant.df, file = file.path(RDS_dir, "variant.df.RDS"))
+variant.df <- readRDS(file = file.path(RDS_dir, "variant.df.RDS"))
+
+variant.df.MBL <- mito.data.MBL %>%
+  map(~ IdentifyVariants(., refallele = mito.data.idv[[1]]$refallele)) %>%
+  imap(, ~ .x %>%
+    dplyr::mutate(sample_id = .y, .before = "nucleotide"))
+
+variant.df.MBL %>%
+  imap(~ write_tsv(.x,
+    quote = "none",
+    file = file.path(analysis_dir, paste0("MitochondrialVariants/Variants_", .y, ".csv"))
+  ))
+
+saveRDS(variant.df.MBL, file = file.path(RDS_dir, "variant.df.MBL.RDS"))
+variant.df.MBL <- readRDS(file = file.path(RDS_dir, "variant.df.MBL.RDS"))
+```
+
+```{r Plot_mt_variants}
+all.variant.df.plots <- c(variant.df, variant.df.MBL) %>%
+  map(VariantPlot) %>%
+  iwalk(~ ggsave(
+    filename = file.path(analysis_dir, paste0("MitochondrialVariants/Plot_Variance_Mean_Ratio_", .y, ".pdf")),
+    plot = .x,
+    width = 5,
+    height = 3
+  ))
+```
+
+## Filtering clonal mtDNA mutations
+```{r Filter_clonal_mt_variants}
+# Get clonal variants
+cln.variants <- variant.df %>%
+  imap(~dplyr::filter(., variant %in% ATAC_cln_variants[[.y]][["variant"]]))
+  
+# # Export_cln_mito_variants
+cln.variants %>%
+  imap(~ write_tsv(.x, file = file.path(analysis_dir, paste0("MitochondrialVariants/Clonal_Variants_", .y, ".tsv"))))
+
+saveRDS(cln.variants, file = file.path(RDS_dir, "cln.variants.RDS"))
+
+# Get clonal variants
+cln.variants.MBL <- variant.df.MBL %>%
+  imap(~dplyr::filter(., variant %in% ATAC_MBL_cln_variants[[.y]][["variant"]]))
+
+# Export_cln_mito_variants
+cln.variants.MBL %>%
+  imap(~ write_tsv(.x, file = paste0(analysis_dir, "/MitochondrialVariants/Clonal_Variants_", .y, ".tsv")))
+
+saveRDS(cln.variants.MBL, file = file.path(RDS_dir, "cln.variants.MBL.RDS"))
+```
+
+### Heteroplasmy calculation
+```{r VAFs_clonal_mt_variants}
+# Get clonal VAFs
+VAFs.cln <- mito.data %>%
+  map2(cln.variants, ~ AlleleFreq(.,
+    variants = .y$variant,
+    assay = NULL
+  ))
+
+VAFs.cln %>%
+  imap( ~ writeMM(., file = file.path(analysis_dir, paste0("MitochondrialVariants/VAFs_Variants_sparse_", .y, ".mtx"))))
+
+saveRDS(VAFs.cln, file = file.path(RDS_dir, "VAFs.cln.RDS"))
+
+VAFs.cln.MBL <- mito.data.MBL%>%
+  map2(cln.variants.MBL, ~ AlleleFreq(.,
+    variants = .y$variant,
+    assay = NULL
+  ))
+
+# export in sparse format
+VAFs.cln.MBL %>%
+  imap( ~ writeMM(., file = file.path(analysis_dir, paste0("MitochondrialVariants/VAFs_Variants_sparse_", .y, ".mtx"))))
+
+saveRDS(VAFs.cln.MBL, file = file.path(RDS_dir, "VAFs.cln.MBL.RDS"))
+```
+
+
+```{r Summarise_mutation_counts}
+ bind_rows(bind_rows(VAFs.cln.MBL[-c(1,4)] %>%
+  map(~ t(.) %>% as.matrix() %>%
+    .[as.logical(rowSums(. != 0)), as.logical(colSums(. != 0))] %>%
+    as_tibble(rownames = "label_cellbarcode") %>% 
+    pivot_longer(cols=-label_cellbarcode, names_to = "variant_id", values_to = "VAF")),
+  .id = "patient_id"),
+ bind_rows(VAFs.cln %>%
+  map(~ t(.) %>% as.matrix() %>%
+    .[as.logical(rowSums(. != 0)), as.logical(colSums(. != 0))] %>%
+    as_tibble(rownames = "label_cellbarcode") %>% 
+    pivot_longer(cols=-label_cellbarcode, names_to = "variant_id", values_to = "VAF")),
+  .id = "patient_id")) %>% 
+  left_join(metadata_all %>% dplyr::filter(data_type=="GEX") %>%
+              dplyr::select(plotting_id, patient_id) %>% unique) %>% 
+  dplyr::filter(plotting_id !="P9dup") %>% 
+  dplyr::select(plotting_id, variant_id) %>% 
+  unique() %>% 
+  group_by(plotting_id) %>% 
+  dplyr::summarise(variant_count=n()) %>% 
+  dplyr::mutate(plotting_id=fct_reorder(plotting_id, -variant_count)) %>% 
+  ggplot2::ggplot(aes(x=plotting_id, y=variant_count))+
+  geom_bar(stat="identity",fill="midnightblue")+
+  labs(y="mtDNA mutation counts [#]", x="")+
+  scale_y_continuous(expand = expansion(mult = c(0, NA)))+
+  theme_pub()
+```
+
+## Coverage mtDNA variants
+```{r}
+#Calculates means per position across all cells --> then calculates rolling mean across positions
+pull_coverage <- function(SE, cells, resolution = 5){
+  zoo::rollmean(rowMeans(assays(SE)[['coverage']]), resolution)
+}
+
+mtmut_positions_patient <- bind_rows(bind_rows(VAFs.cln.MBL %>%
+  map(~ as.matrix(.) %>%
+    as_tibble(rownames = "variant_id") %>%
+    .[, as.logical(colSums(. != 0))]), .id = "patient_id"),
+ bind_rows(VAFs.cln %>%
+  map(~ as.matrix(.) %>%
+    as_tibble(rownames = "variant_id") %>%
+    .[, as.logical(colSums(. != 0))]), .id = "patient_id")) %>% 
+  left_join(metadata_all %>% dplyr::filter(data_type=="GEX") %>%
+              dplyr::select(plotting_id, patient_id) %>% unique) %>% 
+  dplyr::select(patient_id, variant_id) %>% 
+  tidyr::separate(variant_id, into = c("position", NA), sep = "(A|C|G|T)", remove = FALSE)
+
+mtmut_positions_label <- mtmut_positions_patient %>% 
+  dplyr::filter(str_starts(patient_id, "CLL")) %>% 
+  dplyr::mutate(label=paste0(patient_id, ".2")) %>% 
+  bind_rows(mtmut_positions_patient %>% 
+              dplyr::mutate(label=if_else(str_starts(patient_id, "CLL"), paste0(patient_id, ".1"), patient_id))) %>% 
+  arrange(label) %>% 
+  dplyr::mutate(position=as.numeric(position)) %>% 
+  split(~label)
+
+coverage_all_samples <- file.path(library_path, paste0(names(mtDNA_samples), ".mgatk"), paste0(names(mtDNA_samples), ".rds")) %>% 
+  map2(mtDNA_samples, ~data.frame(
+  position = zoo::rollmean(1:16569, 5),
+  coverage = pull_coverage(readRDS(.))) %>% 
+  dplyr::left_join(mtmut_positions_label[[.y]])
+  ) %>% 
+  set_names(mtDNA_samples)
+
+write_tsv(bind_rows(coverage_all_samples, .id = "label"),
+          file=file.path(tsv_dir, "mtDNA_coverage_GEX_samples.tsv"))
+```
+
+```{r}
+coverage_plots_variants <- coverage_all_samples %>%
+  imap(~ggplot(., aes(x = position, y = coverage, label=variant_id)) +
+  geom_line(color = "black") +
+  geom_label_repel(label.size = NA, 
+                   fill=NA, max.overlaps = 47,
+                   nudge_y = 40, 
+                   colour = "darkred")+
+  scale_y_continuous(expand = expansion(mult=c(0, 0.05)))+
+  scale_x_continuous(expand = expansion(mult=c(0, 0.01)))+
+  theme_pub()+
+  labs(x = "Position on mtDNA chromosome", 
+       y = "Rolling mean coverage across cells",
+       title=.y))
+coverage_plots_variants
+```
+
+```{r fig.width=10}
+cowplot::plot_grid(plotlist = coverage_plots_variants[16:17], cols = 2, rows = 1)
+```
+
+## FindClonotypes 
+```{r }
+# Cluster together per patient and filter for non-zero VAF cells exclude patients with variants "2617A>G", "2617A>T" as present in every patient seem to be artefacts
+mito_VAFs_MBL <- VAFs.cln.MBL[-c(4)] %>%
+  map(~ as.matrix(.) %>%
+    as_tibble(rownames = "variant_id") %>%
+    column_to_rownames(var = "variant_id") %>%
+    .[, as.logical(colSums(. != 0))] %>%
+    .[,colSums(is.na(.))<nrow(.)] %>%
+    dplyr::mutate(across(where(is.numeric), ~ ifelse(. < 10e-6 & .>0, 10e-6, .))) %>%
+    as.matrix() %>%
+    as("sparseMatrix") %>%
+    Seurat::CreateSeuratObject(assay = "alleles"))
+
+mito_VAFs <- VAFs.cln %>%
+  map(~ as.matrix(.) %>%
+    as_tibble(rownames = "variant_id") %>%
+    column_to_rownames(var = "variant_id") %>%
+    .[, as.logical(colSums(. != 0))] %>%
+    .[,colSums(is.na(.))<nrow(.)] %>%
+    dplyr::mutate(across(where(is.numeric), ~ ifelse(. < 10e-6 & .>0, 10e-6, .))) %>%
+    as.matrix() %>%
+    as("sparseMatrix") %>%
+    CreateSeuratObject(assay = "alleles"))
+
+clonotypes_MBL_new <- mito_VAFs_MBL[-c(1,2,7,12)] %>%
+  map(~ FindClonotypes(.))
+
+saveRDS(object = clonotypes_MBL, file = file.path(RDS_dir, "clonotypes_MBL.RDS"))
+
+
+clonotypes <- mito_VAFs[-c(5)] %>%
+  map(~ FindClonotypes(.))
+
+saveRDS(object = clonotypes, file = file.path(RDS_dir, "clonotypes.RDS"))
+
+find_clonotype_clusters_MBL <- clonotypes_MBL %>%
+  map(~ .@active.ident %>%
+    data.frame() %>%
+    rownames_to_column("label_cellbarcode") %>%
+    dplyr::rename(Cluster = ".")) %>%
+  imap( ~ write_tsv(.x, file = file.path(analysis_dir, paste0("MitochondrialVariants/FindClonotypesClusters_", .y, ".tsv"))))
+
+find_clonotype_clusters <- clonotypes %>%
+  map(~ .@active.ident %>%
+    data.frame() %>%
+    rownames_to_column("label_cellbarcode") %>%
+    dplyr::rename(Cluster = ".")) %>%
+  imap (~write_tsv(.x, file = file.path(analysis_dir, paste0("MitochondrialVariants/FindClonotypesClusters_", .y, ".tsv"))))
+```
+
+```{r fig.width=6}
+bind_rows(bind_rows(new_BCR_paired) %>% 
+  dplyr::select(patient_id, new_common_ct_id) %>% 
+  left_join(metadata_all %>% dplyr::filter(data_type=="GEX") %>%
+              dplyr::select(plotting_id, patient_id) %>% unique) %>%
+  unique() %>% 
+  dplyr::filter(plotting_id !="P9dup") %>% 
+  group_by(plotting_id) %>% 
+  dplyr::summarise(clone_counts=n()) %>%
+  dplyr::mutate("method"="BCR"),
+find_clonotype_clusters_MBL %>% 
+  bind_rows(.id = "patient_id") %>% dplyr::select(patient_id, Cluster) %>%  
+  left_join(metadata_all %>% dplyr::filter(data_type=="GEX") %>%
+              dplyr::select(plotting_id, patient_id) %>% unique) %>%
+  dplyr::filter(plotting_id !="P9dup") %>% 
+  unique() %>% 
+  group_by(plotting_id) %>% 
+  dplyr::summarise(clone_counts=n())%>%
+  dplyr::mutate("method"="mtDNA mutation"),
+find_clonotype_clusters %>% 
+  bind_rows(.id = "patient_id") %>% dplyr::select(patient_id, Cluster) %>%  
+  left_join(metadata_all %>% dplyr::filter(data_type=="GEX") %>%
+              dplyr::select(plotting_id, patient_id) %>% unique) %>%
+  dplyr::filter(plotting_id !="P9dup") %>% 
+  unique() %>% 
+  group_by(plotting_id) %>% 
+  dplyr::summarise(clone_counts=n())%>%
+  dplyr::mutate("method"="mtDNA mutation"))%>% 
+  dplyr::mutate(plotting_id=fct_reorder(plotting_id, -clone_counts)
+                ) %>% 
+  ggplot2::ggplot(aes(x=plotting_id, y=clone_counts, fill=method))+
+  geom_bar(stat="identity", position=position_dodge2(width = 0.9, preserve = "single"))+
+  labs(y="clone counts [#]", x="")+
+  scale_y_log10(expand = expansion(mult = c(0, NA)))+
+  scale_fill_manual(name="Tracing method", values = c("BCR"="lightgoldenrod3", 
+                                                      "mtDNA mutation"="indianred"))+
+  theme_pub()+
+  theme(axis.text.x=element_text(angle=90))
+```
+
+## UMAP mt clones
+```{r fig.width=10, fig.height=10}
+gex_scaled_all <- AddMetaData(gex_scaled_all,
+  metadata = c(find_clonotype_clusters, find_clonotype_clusters_MBL) %>% 
+    map(~dplyr::mutate(., label_cellbarcode = str_replace(label_cellbarcode, "#", "_"))) %>%
+    bind_rows() %>% 
+    deframe(),
+  col.name = "mt_clonotypes")
+
+matched_mt_BCR_clonotypes <- gex_scaled_all@meta.data %>%
+  as_tibble(rownames = NA) %>%
+  dplyr::filter(
+    !is.na(BCR_clonotype),
+    !is.na(mt_clonotypes)
+  ) %>%
+  rownames()
+
+gex_scaled_clonotypes <- subset(gex_scaled_all, 
+                                cells = matched_mt_BCR_clonotypes)
+
+sample_umap <- DimPlot(
+  object = gex_scaled_clonotypes,
+  reduction = "umap",
+  group.by = "orig.ident",
+  split.by = "plotting_id",
+  pt.size = 0.001, 
+  ncol = 5) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "none",
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+
+mt_clontoype_umap <- DimPlot(
+  object = gex_scaled_clonotypes,
+  reduction = "umap",
+  group.by = "mt_clonotypes",
+  split.by = "plotting_id",
+  cols = annotation_colours_named,
+  ncol = 5,
+  shuffle = FALSE,
+  pt.size = 0.001, 
+) +
+  scale_colour_manual(values = sample(colorRampPalette(brewer.pal(8, "Set2"))(length(unique(gex_scaled_clonotypes@meta.data$mt_clonotypes))))) +
+  labs(x = "UMAP1", y = "UMAP2", title = "mt clones") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "right",
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    plot.title = element_text(hjust = 0.5, 
+                                size = 10,
+                                face = "plain")
+  )
+
+saveRDS(mt_clontoype_umap, file.path(RDS_dir, "mt_clontoype_umap.RDS"))
+
+BCR_clontoype_umap <- DimPlot(gex_scaled_clonotypes,
+  reduction = "umap",
+  raster = FALSE,
+  shuffle = FALSE,
+  split.by = "plotting_id",
+  cols = annotation_colours_named,
+  ncol = 5,
+  group.by = "BCR_clonotype",
+  pt.size=0.001
+) +
+  scale_colour_manual(values = sample(colorRampPalette(brewer.pal(12, "Set2"))(length(unique(gex_scaled_clonotypes@meta.data$BCR_clonotype))))) +
+  labs(x = "UMAP1", y = "UMAP2", title = "BCR clones") +
+  theme_pub() +
+  theme(
+    legend.position = "none",
+    aspect.ratio = 1
+  ) +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "none",
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    plot.title = element_text(hjust = 0.5, 
+                                size = 10,
+                                face = "plain")
+  )
+saveRDS(BCR_clontoype_umap, file.path(RDS_dir, "BCR_clontoype_umap.RDS"))
+
+sample_umap
+mt_clontoype_umap
+BCR_clontoype_umap
+```
+
+### MBL11 
+```{r}
+matched_mt_BCR_clonotypes_MBL11 <- gex_scaled_all@meta.data %>%
+  as_tibble(rownames = NA) %>%
+  dplyr::filter(
+    !is.na(BCR_clonotype),
+    !is.na(mt_clonotypes),
+    patient_id == "MBL11",
+    My_annotation =="MBL B Cell"
+  ) %>%
+  rownames()
+
+gex_scaled_clonotypes_MBL11 <- subset(gex_scaled_all, cells = matched_mt_BCR_clonotypes_MBL11)
+
+sample_umap_MBL11 <- DimPlot(
+  object = gex_scaled_clonotypes_MBL11,
+  reduction = "umap",
+  cols="antiquewhite2",
+  group.by = "orig.ident",
+  pt.size=0.001) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "none",
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    plot.title = element_text(hjust = 0.5, 
+                                size = 10,
+                                face = "plain")
+  )
+
+set.seed(128)
+mt_colours <- sample(colorRampPalette(brewer.pal(12, "Set2"))(length(unique(gex_scaled_clonotypes_MBL11@meta.data$mt_clonotypes))))
+names(mt_colours) <- gex_scaled_clonotypes_MBL11@meta.data$mt_clonotypes %>% unique()
+  
+mt_clontoype_umap_MBL11 <- DimPlot(
+  object = gex_scaled_clonotypes_MBL11,
+  reduction = "umap",
+  group.by = "mt_clonotypes",
+  cols = annotation_colours_named,
+  shuffle = FALSE,
+  pt.size = 0.001, 
+) +
+  scale_colour_manual(values = mt_colours) +
+  labs(x = "UMAP1", 
+       y = "UMAP2", 
+       title = paste0("mt clones\n(n=", gex_scaled_clonotypes_MBL11@meta.data$mt_clonotypes %>% unique() %>% length, ")")) +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "none",
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    plot.title = element_text(hjust = 0.5, 
+                                size = 10,
+                                face = "plain")
+  )
+
+saveRDS(mt_clontoype_umap_MBL11, file.path(RDS_dir, "mt_clontoype_umap_MBL11.RDS"))
+
+BCR_colours <-rep("black", length(unique(gex_scaled_clonotypes@meta.data$BCR_clonotype))) %>% 
+  set_names(unique(gex_scaled_clonotypes@meta.data$BCR_clonotype)) %>% 
+  enframe(name="BCR_clone", value="colour") %>% 
+  dplyr::mutate(colour=dplyr::if_else(BCR_clone =="907","#ef8fd5", "#c9c9c9")) %>% 
+  deframe()
+
+BCR_clonotype_umap_MBL11 <- DimPlot(gex_scaled_clonotypes_MBL11,
+  reduction = "umap",
+  raster = FALSE,
+  shuffle = FALSE,
+  cols = annotation_colours_named,
+  group.by = "BCR_clonotype",
+  pt.size=0.001
+) +
+  scale_colour_manual(values = BCR_colours) +
+  labs(x = "UMAP1", 
+       y = "UMAP2", 
+       title = paste0("BCR clones\n(n=", gex_scaled_clonotypes_MBL11@meta.data$BCR_clonotype %>% unique() %>% length, ")")) +
+  theme_pub() +
+  theme(
+    legend.position = "none",
+    aspect.ratio = 1
+  ) +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "none",
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    plot.title = element_text(hjust = 0.5, 
+                                size = 10,
+                                face = "plain")
+  )
+saveRDS(BCR_clonotype_umap_MBL11, file.path(RDS_dir, "BCR_clontoype_umap_MBL11.RDS"))
+```
+
+
+```{r, fig.height=6, fig.width=6}
+# Filtered out all clonotype matchings which were supported by only one cell
+input_alluvial_MBL11 <- gex_scaled_clonotypes_MBL11@meta.data %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column(var = "label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, mt_clonotypes, BCR_clonotype) %>%
+  dplyr::mutate(combination = paste0(mt_clonotypes, "_", BCR_clonotype)) %>%
+  group_by(combination) %>%
+  dplyr::summarise(counts = n()) %>%
+  dplyr::arrange(desc(counts)) %>%
+  tidyr::separate(combination, into = c("mt_clonotype", "BCR_clonotype"), sep = "_", remove = FALSE) %>%
+  rowid_to_column("id") %>%
+  mutate(freq = counts / sum(counts) * 100) %>%
+  dplyr::mutate(
+    BCR_clonotype = paste0("BCR_clone_", BCR_clonotype)) %>% 
+  dplyr::mutate(BCR_clonotype=fct_reorder(BCR_clonotype, freq),
+                mt_clonotype=factor(mt_clonotype, levels=rev(c(0, 5,3, 1, 2,4,6,7,8,9,10,11,12,13, 14))))
+  
+
+clonotype_matching_plot_MBL11 <- ggplot(
+  input_alluvial_MBL11 %>% 
+    dplyr::arrange(desc(BCR_clonotype)),
+  aes(y = freq, 
+      axis1 = BCR_clonotype, 
+      axis2 = mt_clonotype)
+) +
+  geom_alluvium(aes(fill = mt_clonotype), width = 1 / 12) +
+  geom_stratum(size=0.1,
+    width = 1 / 12,
+    color = "lightgrey"
+  ) +
+  scale_x_discrete(
+    limits = c("BCR clones", "mt clones"),
+    expand = c(.04, .04)
+  ) +
+  scale_y_continuous(expand = expansion(mult=0, 0))+
+  scale_fill_manual(values = mt_colours) +
+  labs(y = "Frequency [%]", x = "", title = paste0("n= ", sum(input_alluvial_MBL11$counts), " cells" )) +
+  theme_pub() +
+  theme(legend.position = "none",
+        plot.title = element_text(face="plain",
+                                  hjust=0.5))
+
+saveRDS(clonotype_matching_plot_MBL11, file.path(RDS_dir, "clonotype_matching_plot_MBL11.RDS"))
+```
+
+```{r}
+# 28 907 BCR clones get filtered out
+input_alluvial_wo_major_MBL11 <- gex_scaled_clonotypes_MBL11@meta.data %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column(var = "label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, mt_clonotypes, BCR_clonotype) %>%
+  dplyr::mutate(combination = paste0(mt_clonotypes, "_", BCR_clonotype)) %>%
+  group_by(combination) %>%
+  dplyr::summarise(counts = n()) %>%
+  dplyr::arrange(desc(counts)) %>%
+  tidyr::separate(combination, into = c("mt_clonotype", "BCR_clonotype"), sep = "_", remove = FALSE) %>%
+  dplyr::filter(BCR_clonotype != "907") %>%
+  rowid_to_column("id") %>%
+  mutate(freq = counts / sum(counts) * 100) %>%
+  dplyr::mutate(
+    BCR_clonotype = paste0("BCR_clone_", BCR_clonotype)
+  ) %>% 
+  dplyr::mutate(BCR_clonotype=fct_reorder(BCR_clonotype, freq),
+                mt_clonotype=factor(mt_clonotype, levels=rev(c(0, 5,3, 1, 2,4,6,7,8,9,10,11,12,13, 14))))
+
+set.seed(14)
+clonotype_matching_plot_wo_major_MBL11 <- ggplot(
+  input_alluvial_wo_major_MBL11,
+  aes(y = freq, 
+      axis1 = BCR_clonotype, 
+      axis2 = mt_clonotype)
+) +
+  geom_alluvium(aes(fill = mt_clonotype), width = 1 / 12) +
+  geom_stratum(size=0.1,
+    width = 1 / 12,
+    alpha=0.8,
+    color = "azure4"
+  ) +
+  scale_x_discrete(
+    limits = c("BCR clones", "mt clones"),
+    expand = c(.04, .04)
+  ) +
+  scale_y_continuous(expand = expansion(mult=0, 0))+
+  scale_fill_manual(values = mt_colours) +
+  labs(y = "Frequency [%]", x = "", title = "Without BCR major clone\n(n=788 cells)") +
+  theme_pub() +
+  theme(legend.position = "none")
+```
+
+## Clone annotation heteroplasmy heatmap 
+```{r}
+# Add cell type annotation to seurat clonotype object
+clonotypes_MBL$MBL11 <- AddMetaData(
+  object = clonotypes_MBL$MBL11,
+  metadata = gex_scaled_all@meta.data %>%
+    as_tibble(rownames = NA) %>%
+    rownames_to_column("label_cellbarcode") %>%
+    dplyr::select(label_cellbarcode, My_annotation) %>%
+    dplyr::mutate(label_cellbarcode = str_replace(label_cellbarcode, pattern = "_", replacement = "#")) %>%
+    dplyr::filter(label_cellbarcode %in% str_replace(colnames(clonotypes_MBL$MBL11), pattern = "_", replacement = "#")) %>%
+    deframe(),
+  col.name = "My_annotation"
+)
+
+# filter only cells with BCR annotation
+MBL11_barcodes <- new_BCR_paired$individual %>%
+  unique() %>%
+  dplyr::filter(label == "MBL11") %>%
+  dplyr::filter(!is.na(new_common_ct_id)) %>%
+  pull(label_cellbarcode) %>%
+  unique()
+
+clonotypes_MBL$MBL11 <- subset(
+  x = clonotypes_MBL$MBL11,
+  cells = MBL11_barcodes
+)
+```
+
+```{r}
+# Adapted from https://gist.github.com/armish/564a65ab874a770e2c26
+memoSort <- function(M, seurat_obj) {
+  geneOrder <- sort(rowSums(M), decreasing = TRUE, index.return = TRUE)$ix
+
+  scoreCol <- function(x) {
+    score <- 0
+    for (i in 1:length(x)) {
+      if (x[i]) {
+        score <- score + 2^(length(x) - i)
+      }
+    }
+    return(score)
+  }
+  
+  scores <- apply(M[geneOrder, ], 2, scoreCol)
+  sampleOrder <- sort(scores, decreasing = TRUE, index.return = TRUE)$ix
+  
+  barcode2mt_clone <- tibble(
+    "label_cellbarcode" = colnames(seurat_obj),
+    "seurat_clusters" = seurat_obj@meta.data$seurat_clusters
+  ) %>%
+    deframe()
+  
+  mt_clone_frequency <- enframe(barcode2mt_clone,
+                      name="label_cellbarcode",
+                      value = "mt_clone") %>%
+  dplyr::group_by(mt_clone) %>%
+  dplyr::summarise(frequency_mt=n()) %>%
+  dplyr::arrange(desc(frequency_mt)) %>%
+  dplyr::mutate(mt_clone=factor(mt_clone, levels=c(0,5,3,1,2,4,6,7,8,9,10,11,12,13,14)))%>%
+  pull(mt_clone)
+  
+  barcodes_mt_ordered <- tibble("label_cellbarcode_M"=colnames(M),
+         "scores_memosort"=scores) %>% 
+    left_join(enframe(barcode2mt_clone, 
+                      name="label_cellbarcode", 
+                      value = "mt_clone"), 
+              by = join_by("label_cellbarcode_M" == "label_cellbarcode")) %>% 
+    dplyr::mutate(mt_clone=factor(mt_clone, levels=levels(mt_clone_frequency))) %>% 
+    dplyr::group_by(mt_clone) %>% 
+    dplyr::arrange(mt_clone, desc(scores_memosort)) %>% 
+    pull(label_cellbarcode_M)
+  
+  return(list(geneOrder, barcodes_mt_ordered))
+}
+```
+
+```{r fig.width=10, fig.height=7}
+# plotting function
+plot_heatmap_MBL11 <- function(pat, celltype, suf) {
+  # subset and logtransform data
+  cells <- subset(x = clonotypes_MBL[[pat]], subset = My_annotation == celltype)
+  cell_matrix <- GetAssayData(object = cells, slot = "counts") %>%
+    .[rowSums(.) != 0,] %>% 
+    .[, as.logical(colSums(. != 0))] %>%
+    .[,colSums(is.na(.))<nrow(.)] %>%
+    .[c("7161G>A",
+        "1966G>A",
+        "1793G>A",
+        "2333G>A",
+        "9481T>C",
+        "7368T>C",
+        "13539A>G",
+        "9725T>C" ,
+        "8696T>C" ,
+        "8563A>G",
+        "2833A>G",
+        "3022G>A",
+        "2623A>G",
+        "2916G>A",
+        "2702G>A" ,
+        "10675G>A",
+        "6149A>C",
+        "1797G>A",
+        "2592G>A" ,
+        "14423G>A",
+        "13453C>T",
+        "8737A>G"),]
+    # dplyr::mutate(across(where(is.numeric), ~ ifelse(. < 10e-6 & .>0, 10e-6, .)))
+
+  
+  ## Ordering of rows and columns
+  ordering <- memoSort(cell_matrix, cells)
+  
+      
+  cell_matrix <- -log10(cell_matrix)
+
+  #reconcatenate columns and replace 0 with NA for complex heatmap
+  cell_matrix <- as.matrix(cell_matrix)
+  cell_matrix[cell_matrix == Inf] <- NA
+  
+  # get all cellbarcodes from matrix
+  cell_barcodes <- colnames(cell_matrix)
+  
+  
+  ## Prepare mtclones
+  #assign barcode zu mt clone
+  mt_clones <- tibble("mt_clone"=clonotypes_MBL[[pat]]@meta.data$seurat_clusters,
+       "label_cellbarcode"=colnames(clonotypes_MBL[[pat]])) %>% 
+  dplyr::filter(label_cellbarcode %in% cell_barcodes) %>% 
+  dplyr::mutate(mt_clone=as.numeric(as.character(mt_clone)))
+
+  #count mt clone number for colour palette
+  mt_clones_n <- mt_clones$mt_clone %>% 
+    unique() %>% 
+    length()
+  
+  mt_clones2colour <- mt_colours
+  
+  #named vector of barcode to mtclone
+  barcode2mtclone <- mt_clones %>% 
+    dplyr::select(label_cellbarcode, mt_clone) %>% 
+    deframe
+  
+  ## Prepare BCRclones
+  #assign barcode zu BCR clone
+  BCR_clones <- new_BCR_paired$individual %>%
+    dplyr::filter(label == pat) %>%   
+    dplyr::select(label_cellbarcode,new_common_ct_id) %>% 
+    dplyr::filter(label_cellbarcode %in% cell_barcodes) %>% 
+    unique() %>% 
+    dplyr::rename("BCR_clone"=new_common_ct_id)
+
+  #count BCR clone number for colour palette
+  BCR_clones_n <- BCR_clones$BCR_clone %>% 
+    unique() %>% 
+    length()
+  
+  #assign colour to BCR clone
+  BCR_clones2colour <- tibble(
+      "clonotype" = BCR_clones$BCR_clone %>% 
+    unique(),
+      "colour" = sample(get_palette(palette = "Set3", k = BCR_clones_n))
+    ) %>%
+      deframe()
+  
+  #named vector of barcode to BCR clone
+  barcode2BCRclone <- BCR_clones %>% 
+    dplyr::select(label_cellbarcode, BCR_clone) %>% 
+    deframe
+  
+  colours <- list(
+    "mt clone" = mt_clones2colour,
+    "BCR clone" = BCR_colours
+  )
+
+  anno_df <- tibble(
+      "mt clone" = barcode2mtclone[colnames(cell_matrix)],
+      "BCR clone" = barcode2BCRclone[colnames(cell_matrix)]
+    )
+
+  column_ha <- HeatmapAnnotation(
+    df = anno_df, # data frame with all clonotype label versions
+    col = colours, # is list of named vector
+    show_legend = FALSE,
+    border = TRUE,
+    height = unit(0.1, "cm")
+  )
+
+  
+  # Colouring
+  # edit legend manually to >6 as max cut off
+  col_fun <- colorRamp2(c(0, 6), c("darkred", "yellow"))
+
+  hm <- Heatmap(# input functions 
+                matrix = cell_matrix,
+                row_order=c(
+                            "7161G>A",
+                            "1966G>A",
+                            "1793G>A",
+                            "2333G>A",
+                            "9481T>C",
+                            "7368T>C",
+                            "13539A>G",
+                            "9725T>C" ,
+                            "8696T>C" ,
+                            "8563A>G",
+                            "2833A>G",
+                            "3022G>A",
+                            "2623A>G",
+                            "2916G>A",
+                            "2702G>A" ,
+                            "10675G>A",
+                            "6149A>C",
+                            "1797G>A",
+                            "2592G>A" ,
+                            "14423G>A",
+                            "13453C>T",
+                            "8737A>G"#,
+                            # "3591G>A",
+                            # "9921G>A",
+                            # "13718G>A",
+                            # "7138T>C"  , 
+                            # "1082A>G",
+                            # "709G>A"  ,
+                            # "13369T>C" ,
+                            # "3147G>A",
+                            # "13063G>A" ,
+                            # "12997G>A",
+                            # "14831G>A" ,
+                            # "16390G>A",
+                            # "16527C>T" ,
+                            # "5205T>C"   ,
+                            # "3085A>G"  ,
+                            # "3244G>A" ,
+                            # "5970G>A" ,
+                            # "9305G>A"  ,
+                            # "11711G>A",
+                            # "1200G>A"  ,  
+                            # "11914G>A" ,
+                            # "11404A>G",
+                            # "204T>C"
+                            ),
+                column_order = ordering[[2]],
+                top_annotation = column_ha,
+                col = col_fun,
+                na_col = "white",
+                border_gp = gpar(col = "black", lty = 1),
+                raster_by_magick = TRUE,
+                use_raster = TRUE,
+                raster_quality = 6,
+                
+                #column parameters
+                column_title = "",
+                column_title_gp = gpar(fontsize = 5),
+                show_column_names = FALSE,
+                
+                #row parameters
+                row_title = "mtDNA mutation",
+                row_title_gp = gpar(fontsize = 10),
+                show_row_names = FALSE,
+
+                #legend parameters
+                heatmap_legend_param = list(
+                  title = "Heteroplasmy",
+                  #border="black",
+                  direction = "vertical",
+                  legend_direction = "vertical",
+                  at = c(6, 4, 2, 0),
+                  labels = c("≤ 10e-6", "10e-4", "10e-2", "1"),
+                  title_gp = gpar(fontsize = 10, fontface = "plain") ,
+                  labels_gp = gpar(
+                       fontsize = 10,
+                       fontface = "plain"
+                  )
+                )
+              )
+
+  # needs to be a grob for heatmap to be placable in cowplot grid
+  hm_grob <- grid::grid.grabExpr(draw(hm,
+     heatmap_legend_side = "right"
+   ))
+
+
+  cairo_pdf(
+    file = file.path(plotting_dir, paste0("Heteroplasmy_heatmap_matched_mt_BCR_clones_2", pat, suf, ".pdf")),
+    width = 7.26,
+    height = 4  )
+  
+  draw(hm,
+    column_title = pat,
+    heatmap_legend_side = "right",
+    column_title_gp = grid::gpar(
+      fontsize = 10,
+      fontface = "plain"
+    ),
+    annotation_legend_side = "right"
+  )
+  dev.off()
+  return(hm_grob)
+}
+
+ordered_MBL11_heatmap <- plot_heatmap_MBL11(pat = "MBL11", 
+                                            celltype = "MBL B Cell", 
+                                            suf = "")
+
+saveRDS(ordered_MBL11_heatmap, file.path(RDS_dir, "ordered_MBL11_heatmap.RDS"))
+
+cowplot::plot_grid(ordered_MBL11_heatmap,
+  nrow = 1,
+  ncol = 1
+)
+```
+
+```{r, fig.height=7, fig.width=9}
+cowplot::plot_grid(
+  cowplot::plot_grid(
+    mt_clontoype_umap_MBL11,
+    BCR_clonotype_umap_MBL11,NULL,
+    nrow = 1
+  ),
+  cowplot::plot_grid(clonotype_matching_plot_MBL11,
+    ordered_MBL11_heatmap,
+    nrow = 1, rel_widths = c(1,  2)
+  ),
+  nrow = 2,
+  ncol = 1
+) %>%
+  ggsave(.,
+    file = file.path(plotting_dir, "Compare_clones_Figure.png"),
+    width = 11,
+    height = 7,
+    units = "in",
+    bg = "white",
+    dpi = 600
+  )
+```
+
+Pie charts
+```{r}
+input_alluvial_MBL11 %>%
+  dplyr::mutate(malignance=if_else(condition=BCR_clonotype =="BCR_clone_907", true="malignant", false="non-malignant")) %>% 
+  dplyr::group_by(malignance, mt_clonotype) %>% 
+  summarise(cell_counts=sum(counts)) %>% 
+  split(~malignance) %>% imap(~
+ggplot(., aes(x="", y=cell_counts, fill=mt_clonotype)) +
+  geom_bar(stat="identity", width=0.01) +
+  coord_polar("y", start=0)+
+  labs(title=.y)+
+  scale_fill_manual(values = mt_colours)+
+  theme_pub()+
+  theme(axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        legend.position = "none",
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        )) %>% 
+  ggarrange(plotlist = .) %>% 
+  ggsave(., file=file.path(plotting_dir, "MBL11_mt_clones_piechart.pdf"))
+```
+
+```{r}
+input_alluvial_MBL11 %>%
+  dplyr::mutate(malignance=if_else(condition=BCR_clonotype =="BCR_clone_907", true="malignant", false="non-malignant")) %>% 
+  dplyr::group_by(malignance, BCR_clonotype) %>% 
+  summarise(cell_counts=sum(counts)) %>% 
+  dplyr::mutate(BCR_clonotype=str_split_i(BCR_clonotype, pattern="_", i=3 )) %>% 
+  split(~malignance) %>% 
+  imap(~
+ggplot(., aes(x="", y=cell_counts, fill=BCR_clonotype)) +
+  geom_bar(stat="identity", width=0.01, colour="darkgrey") +
+  coord_polar("y", start=0)+
+  labs(title=.y)+
+  scale_fill_manual(values = BCR_colours)+
+  theme_pub()+
+  theme(axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        legend.position = "none",
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        )) %>% 
+  ggarrange(plotlist = .) %>% 
+  ggsave(., file=file.path(plotting_dir, "MBL11_BCR_clones_piechart.pdf"))
+```
+
+## Coverage mtDNA variants MBL11
+```{r}
+# find out which mutations contribute to clonotypes in MBL11
+MBL11_mt_variants <-c(
+  "7161G>A",
+  "1966G>A",
+  "1793G>A",
+  "2333G>A",
+  "9481T>C",
+  "7368T>C",
+  "13539A>G",
+  "9725T>C",
+  "8696T>C",
+  "8563A>G",
+  "2833A>G",
+  "3022G>A",
+  "2623A>G",
+  "2916G>A",
+  "2702G>A",
+  "10675G>A",
+  "6149A>C",
+  "1797G>A",
+  "2592G>A",
+  "14423G>A",
+  "13453C>T",
+  "8737A>G"
+)
+
+mtmut_positions_MBL11 <- bind_rows(ATAC_VAFs_cln_MBL %>%
+  map(~ as.matrix(.) %>%
+    as_tibble(rownames = "variant_id") %>%
+    .[, as.logical(colSums(. != 0))]), .id = "patient_id") %>% 
+  dplyr::filter(patient_id =="MBL11") %>% 
+  left_join(metadata_all %>% 
+              dplyr::filter(data_type=="GEX") %>%
+              dplyr::select(plotting_id, patient_id) %>% unique) %>% 
+  dplyr::select(patient_id, variant_id) %>% 
+  tidyr::separate(variant_id, into = c("position", NA), 
+                  sep = "(A|C|G|T)", 
+                  remove = FALSE) %>% 
+  dplyr::filter(variant_id %in% MBL11_mt_variants)
+
+mtmut_positions_label_MBL11 <- mtmut_positions_MBL11 %>% 
+  dplyr::filter(str_starts(patient_id, "CLL")) %>% 
+  dplyr::mutate(label=paste0(patient_id, ".2")) %>% 
+  bind_rows(mtmut_positions_MBL11 %>% 
+              dplyr::mutate(label=if_else(str_starts(patient_id, "CLL"), paste0(patient_id, ".1"), patient_id))) %>% 
+  arrange(label) %>% 
+  dplyr::mutate(position=as.numeric(position)) 
+
+coverage_MBL11 <- file.path(library_path, paste0(names(mtDNA_samples[27]), ".mgatk"), paste0(names(mtDNA_samples[27]), ".rds")) %>% 
+  map( ~data.frame(
+  position = zoo::rollmean(1:16569, 5),
+  coverage = pull_coverage(readRDS(.x))) %>% 
+  dplyr::left_join(mtmut_positions_label_MBL11, by = "position")
+  )
+```
+
+```{r}
+coverage_MBL11_plot <- coverage_MBL11[[1]] %>% 
+  ggplot(aes(x = position, y = coverage, label=variant_id)) +
+  geom_line(colour="thistle4") +
+  geom_label_repel(label.size = NA, 
+                   fill=NA, 
+                   nudge_y = 500,
+                   max.overlaps = 30,
+                   colour = "darkred")+
+  scale_y_continuous(expand = expansion(mult=c(0, 0.05)))+
+  scale_x_continuous(expand = expansion(mult=c(0, 0.01)))+
+  labs(x = "mtDNA position [bp]", 
+       y = "Rolling mean coverage across cells",
+       title="P3\n(LC-MBL)")+
+  theme_pub()+
+  theme(legend.position = "none")
+
+write_tsv(coverage_MBL11_plot$data, file.path(tsv_dir, "mtDNA_coverage_GEX_MBL11.tsv"))
+```

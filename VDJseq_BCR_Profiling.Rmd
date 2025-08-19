@@ -1,0 +1,2747 @@
+---
+title: "VDJseq_BCR_Profiling"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+    email: anja.rathgeber@mdc-berlin.de
+---
+GOAL: The aim of this script is to investigate the diversity of the BCR repertoire.
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(ggsignif)
+library(ggpubr)
+library(Seurat)
+library(circlize)
+library(magick)
+```
+
+# Set paths
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+BCR_data_dir <- file.path(data_dir, "BCR")
+
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "VDJ_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+tsv_dir <- file.path(analysis_dir, "tsv_data") 
+summary_dir <- file.path(project_dir, "Summary_Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_Objects")
+
+GEX_RDS_dir <- file.path(result_dir, "GEX_analysis/RDS_objects")
+```
+
+# Load data
+
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+source(file.path(project_dir, "scripts/heatmap_plotting_functions.R"))
+```
+
+```{r}
+metadata <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata_vdj.tsv"))
+metadata_all <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv"))
+
+library_names <- metadata %>%
+  dplyr::select(label, pool) %>%
+  deframe()
+
+pool2label <- metadata %>%
+  dplyr::select(pool, label) %>%
+  deframe()
+
+label2pool <- metadata %>%
+  dplyr::select(label, pool) %>%
+  deframe()
+
+patient_id2plotting_id <- metadata %>%
+  dplyr::select(patient_id, plotting_id) %>%
+  deframe()
+
+label2plotting_id <- metadata_all %>%
+  dplyr::filter(data_type == "GEX") %>%
+  dplyr::select(label, plotting_id) %>%
+  deframe()
+
+library_paths <- file.path(BCR_data_dir, library_names) %>%
+  set_names(names(library_names))
+
+library_paths_annotation <- file.path(library_paths, "filtered_contig_annotations.csv") %>%
+  set_names(names(library_paths))
+
+library_paths_clonotypes <- file.path(library_paths, "clonotypes.csv") %>%
+  set_names(names(library_paths))
+
+library_paths_aggregated_clonotypes <- file.path(library_paths, "aggregated_clonotypes.csv") %>%
+  set_names(names(library_paths))
+
+metric_paths <- file.path(library_paths, "metrics_summary.csv") %>%
+  set_names(names(library_paths))
+
+BCR_files <- library_paths_annotation %>%
+  imap(~ read_csv(file = ., show_col_types = FALSE) %>%
+    dplyr::mutate(label = .y) %>%
+    tidyr::unite("label_cellbarcode", c(label, barcode), sep = "#", remove = FALSE) %>%
+    relocate("label_cellbarcode", .before = "barcode") %>%
+    relocate("label", .before = "is_cell"))
+
+clonotype_files <- imap(library_paths_clonotypes, ~ read_csv(file = ., show_col_types = FALSE)) %>%
+  map2(library_paths_aggregated_clonotypes[names(.)], ~ dplyr::left_join(.x, read_csv(.y, show_col_types = FALSE), by = c("clonotype_id" = "sample_clone")))
+
+metrics <- metric_paths %>%
+  imap(~ read_csv(file = .) %>%
+    dplyr::mutate(label = .y)) %>%
+  bind_rows() %>%
+  relocate("label", .before = "Estimated Number of Cells")
+
+gex_scaled_all_noIG <- readRDS(file.path(GEX_RDS_dir, "gex_scaled_all_noIG.RDS"))
+
+disease_markers_downsampled_LC <- readRDS(file = file.path(GEX_RDS_dir, "disease_markers_downsampled_LC.RDS"))
+disease_markers_downsampled_HC_prog <- readRDS(file = file.path(GEX_RDS_dir, "disease_markers_downsampled_all.RDS"))
+
+new_BCR_paired <- readRDS(file.path(RDS_dir, "new_BCR_paired.RDS"))
+```
+
+# Analyse metrics
+```{r}
+metrics %>%
+  dplyr::select(label, `Number of Cells With Productive V-J Spanning Pair`, `Estimated Number of Cells`) %>%
+  tidyr::pivot_longer(-label, names_to = "Cell set", values_to = "cell counts [#]") %>%
+  dplyr::mutate(label = factor(label, levels = dplyr::arrange(., desc(`cell counts [#]`)) %>% pull(label) %>% unique())) %>%
+  ggplot(aes(x = `label`, y = `cell counts [#]`, fill = `Cell set`)) +
+  geom_bar(stat = "identity", position = position_dodge(), width = 0.8) +
+  scale_fill_manual(values = c("midnightblue", "lightblue")) +
+  scale_y_continuous(expand = expansion(mult = c(0, NA))) +
+  labs(x = "", y = "Cell counts [#]") +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.9)
+  )
+
+metrics %>%
+  dplyr::select(label, `Mean Read Pairs per Cell`) %>%
+  dplyr::mutate(label = factor(label, levels = arrange(., desc(`Mean Read Pairs per Cell`)) %>%
+    pull(label) %>%
+    unique())) %>%
+  ggplot(aes(x = `label`, y = `Mean Read Pairs per Cell`)) +
+  geom_bar(stat = "identity", width = 0.8, fill = "midnightblue") +
+  scale_y_continuous(expand = expansion(mult = c(0, NA))) +
+  labs(x = "", y = "Mean Read Pairs per Cell [#]") +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.9)
+  )
+```
+
+```{r}
+BCR_paired <- BCR_files %>%
+  bind_rows() %>%
+  dplyr::mutate(
+    paired = case_when(str_detect(label, "CLL") ~ "paired",
+      str_detect(label, "MBL") ~ "individual",
+      .default = label
+    ),
+    clonotype_id = if_else(str_detect(label, "CLL\\d+\\.2"), paste0(raw_clonotype_id, "_CLL"), paste0(raw_clonotype_id, "_MBL"))
+  ) %>%
+  dplyr::left_join(metadata %>% dplyr::select(label, disease)) %>%
+  tidyr::separate(label, c("patient_id", "sample"), sep = "\\.", remove = FALSE) %>%
+  split(.$paired)
+```
+
+# enclone clonotype annotation 
+
+Unify clonotype annotation between matched samples
+```{r}
+all_sample_patients <- metadata$patient_id %>%
+  unique()
+unify_clonotypes <- list()
+
+for (patient in all_sample_patients) {
+  # combine clonotype annotation files based and give unique identifier if paired sample
+  if (startsWith(patient, "CLL")) {
+    ct_both <- clonotype_files[paste0(patient, ".1")] %>%
+      purrr::list_c() %>%
+      dplyr::mutate(clonotype_id = paste0(clonotype_id, "_MBL")) %>%
+      bind_rows(clonotype_files[paste0(patient, ".2")] %>%
+        purrr::list_c() %>%
+        dplyr::mutate(clonotype_id = paste0(clonotype_id, "_CLL")))
+  } else {
+    ct_both <- clonotype_files[patient] %>%
+      purrr::list_c() %>%
+      dplyr::mutate(clonotype_id = paste0(clonotype_id, "_MBL"))
+  }
+  # multiple different IGH_1, IGK or IGL chains within one clonotype, identify doublets
+  doublets <- ct_both %>%
+    dplyr::arrange(desc(cdr3s_nt)) %>%
+    group_by(cdr3s_nt) %>%
+    mutate("common_ct_id" = paste0("merged_clonotype_", cur_group_id())) %>%
+    ungroup() %>%
+    tidyr::separate_longer_delim(cdr3s_nt, delim = ";") %>%
+    tidyr::separate(cdr3s_nt, into = c("IG_locus", "nt_sequence"), sep = ":") %>%
+    dplyr::summarise(n = dplyr::n(), .by = c(common_ct_id, clonotype_id, frequency, proportion, cdr3s_aa, IG_locus)) %>%
+    dplyr::filter(n > 1L) %>%
+    dplyr::pull(common_ct_id)
+
+  print(paste0("For patient ", patient, " ", length(doublets), " doublet clonotypes were found."))
+
+  # generate reference which IG loci define which common clonotype
+  merged_ct_both <- ct_both %>%
+    dplyr::arrange(desc(cdr3s_nt)) %>%
+    group_by(cdr3s_nt) %>%
+    mutate(
+      "common_ct_id" = paste0("merged_clonotype_", cur_group_id()),
+      "patient_id" = patient
+    ) %>%
+    ungroup() %>%
+    dplyr::filter(!(common_ct_id %in% doublets)) %>%
+    tidyr::separate_longer_delim(cdr3s_nt, delim = ";") %>%
+    tidyr::separate(cdr3s_nt, into = c("IG_locus", "nt_sequence"), sep = ":") %>%
+    tidyr::pivot_wider(id_cols = c(patient_id, common_ct_id, clonotype_id, frequency, proportion, cdr3s_aa), names_from = IG_locus, values_from = nt_sequence)
+
+  unify_clonotypes[[patient]] <- merged_ct_both
+}
+
+BCR_paired <- BCR_paired %>%
+  map(~ dplyr::left_join(., unify_clonotypes %>% bind_rows() %>%
+    dplyr::select(patient_id, common_ct_id, clonotype_id)))
+```
+
+```{r}
+small_clone_counts_paired <- BCR_paired[["paired"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  split(.$plotting_id) %>%
+  map(~ group_by(., disease, common_ct_id) %>%
+    dplyr::summarise("cell counts" = n()) %>%
+    dplyr::arrange(desc(`cell counts`)) %>%
+    dplyr::mutate(common_ct_id = case_when(`cell counts` <= 5 ~ "BCR <= 5 cells", .default = common_ct_id)) %>%
+    dplyr::filter(common_ct_id == "BCR <= 5 cells") %>%
+    group_by(disease, common_ct_id) %>%
+    dplyr::summarise("cell counts" = n()))
+
+small_clone_counts_individual <- BCR_paired[["individual"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  split(.$plotting_id) %>%
+  map(~ group_by(., disease, common_ct_id) %>%
+    dplyr::summarise("cell counts" = n()) %>%
+    dplyr::arrange(desc(`cell counts`)) %>%
+    dplyr::mutate(common_ct_id = case_when(`cell counts` <= 5 ~ "BCR <= 5 cells", .default = common_ct_id)) %>%
+    dplyr::filter(common_ct_id == "BCR <= 5 cells") %>%
+    group_by(disease, common_ct_id) %>%
+    dplyr::summarise("cell counts" = n()))
+```
+
+```{r}
+# Get levels for others than <=5 celll count clonotype and add <= to last position so plotted at bottom
+sorting_order_paired <- BCR_paired[["paired"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  split(.$plotting_id) %>%
+  map(
+    ~ group_by(., disease, common_ct_id) %>%
+      dplyr::summarise("cell counts" = n()) %>%
+      dplyr::arrange(desc(`cell counts`)) %>%
+      # dplyr::mutate(common_ct_id = case_when(`cell counts`<=5 ~ "BCR <= 5 cells", .default=common_ct_id)) %>%
+      # dplyr::filter(common_ct_id != "BCR <= 5 cells") %>%
+      group_by(common_ct_id) %>%
+      dplyr::summarise("cell count sum" = sum(`cell counts`)) %>%
+      dplyr::arrange(`cell count sum`) %>%
+      dplyr::pull(common_ct_id) # %>%
+    # append( "BCR <= 5 cells", after=0)
+  )
+
+sorting_order_individual <- BCR_paired[["individual"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  split(.$plotting_id) %>%
+  map(
+    ~ group_by(., disease, common_ct_id) %>%
+      dplyr::summarise("cell counts" = n()) %>%
+      dplyr::arrange(desc(`cell counts`)) %>%
+      # dplyr::mutate(common_ct_id = case_when(`cell counts`<=5 ~ "BCR <= 5 cells", .default=common_ct_id)) %>%
+      # dplyr::filter(common_ct_id != "BCR <= 5 cells") %>%
+      group_by(common_ct_id) %>%
+      dplyr::summarise("cell count sum" = sum(`cell counts`)) %>%
+      dplyr::arrange(`cell count sum`) %>%
+      dplyr::pull(common_ct_id) # %>%
+    # append( "BCR <= 5 cells", after=0)
+  )
+```
+
+```{r}
+# create colour palette
+color <- grDevices::colors()[grep("gr(a|e)y", grDevices::colors(), invert = T)]
+```
+
+```{r}
+# summarise all BCR clones <=5 cells and plot
+set.seed(13)
+BCR_paired_plot <- BCR_paired[["paired"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  split(.$plotting_id) %>%
+  imap(~ group_by(., disease, common_ct_id) %>%
+    dplyr::summarise("cell counts" = n()) %>%
+    # dplyr::mutate(common_ct_id = case_when(`cell counts`<=5 ~ "BCR <= 5 cells", .default=common_ct_id)) %>%
+    # dplyr::filter(common_ct_id != "BCR <= 5 cells") %>%
+    # dplyr::bind_rows(small_clone_counts_paired[[.y]]) %>%
+    dplyr::mutate(
+      disease = factor(disease, levels = c("MBL", "CLL")),
+      common_ct_id = factor(common_ct_id, levels = (sorting_order_paired[[.y]]))
+    ) %>%
+    ggplot2::ggplot(aes(x = disease, y = `cell counts`, fill = common_ct_id)) +
+    geom_bar(position = "fill", stat = "identity") +
+    scale_y_continuous(labels = c("0", "25", "50", "75", "100"), expand = expansion(mult = c(0, NA))) +
+    scale_fill_manual(values = c("lightgrey", sample(colorRampPalette(brewer.pal(12, "Set3"))(length(sorting_order_paired[[.y]]) - 1))), name = "CDR3 variant") +
+    labs(x = "", y = "Frequency BCR variant [%]", title = .y) +
+    theme_bw() +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      legend.text = element_text(size = 8),
+      legend.position = "none",
+      strip.placement = "outside",
+      strip.background = element_rect(fill = NA, color = "white"),
+      strip.text = element_text(face = "bold", size = rel(1.2))
+    ))
+
+BCR_paired_plot <- BCR_paired_plot[c(paste0("P", c(15:16, 19:23)))] %>%
+  ggarrange(plotlist = ., nrow = 1)
+
+ggsave(BCR_paired_plot,
+  path = plotting_dir,
+  filename = "BCR_paired_enclone_plot.png",
+  width = 49,
+  height = 10,
+  units = "cm"
+)
+```
+
+```{r}
+# summarise all BCR clones <=5 cells and plot
+set.seed(14)
+BCR_individual_plot <- BCR_paired[["individual"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  split(.$plotting_id) %>%
+  imap(~ group_by(., disease, common_ct_id) %>%
+    dplyr::summarise("cell counts" = n()) %>%
+    # dplyr::mutate(common_ct_id = case_when(`cell counts`<=5 ~ "BCR <= 5 cells", .default=common_ct_id)) %>%
+    # dplyr::filter(common_ct_id != "BCR <= 5 cells") %>%
+    # dplyr::bind_rows(small_clone_counts_individual[[.y]]) %>%
+    dplyr::mutate(
+      disease = factor(disease, levels = c("MBL", "CLL")),
+      common_ct_id = factor(common_ct_id, levels = (sorting_order_individual[[.y]]))
+    ) %>%
+    ggplot2::ggplot(aes(x = disease, y = `cell counts`, fill = common_ct_id)) +
+    geom_bar(position = "fill", stat = "identity") +
+    scale_y_continuous(labels = c("0", "25", "50", "75", "100"), expand = expansion(mult = c(0, NA))) +
+    scale_fill_manual(values = c("lightgrey", sample(colorRampPalette(brewer.pal(12, "Set3"))(length(sorting_order_individual[[.y]]) - 1))), name = "BCR variant") +
+    labs(x = "", y = "Frequency BCR variant [%]", title = .y) +
+    theme_bw() +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      legend.text = element_text(size = 8),
+      legend.position = "none",
+      strip.placement = "outside",
+      strip.background = element_rect(fill = NA, color = "white"),
+      strip.text = element_text(face = "bold", size = rel(1.2))
+    ))
+
+BCR_individual_plot_figure <- BCR_individual_plot[c(paste0("P", 1:9), "P9dup", paste0("P", 10:13), "P24")] %>%
+  ggarrange(plotlist = ., nrow = 1)
+
+ggsave(BCR_individual_plot_figure,
+  path = plotting_dir,
+  filename = "BCR_individual_enclone_plot.png",
+  width = 78.43,
+  height = 10,
+  units = "cm"
+)
+```
+
+# Own clonotype definition
+Own clonotype definition is generated using python script which aggregates clonotypes based on CDR3 region presenting unique subsets with their chains to the next larger set of chain combinations to account for incomplete detection.
+```{r}
+new_BCR_paired <- BCR_files %>%
+  map2(clonotype_files[names(.)][names(.)], ~ dplyr::left_join(.x, .y, by = c("raw_clonotype_id" = "clonotype_id")) %>%
+    dplyr::select(-c("frequency", "proportion", "cdr3s_aa", "cdr3s_nt")) %>%
+    dplyr::rename("new_common_ct_id" = merged_clone)) %>%
+  bind_rows() %>%
+  dplyr::mutate(
+    paired = case_when(str_detect(label, "CLL") ~ "paired",
+      str_detect(label, "MBL") ~ "individual",
+      .default = label
+    )
+  ) %>%
+  dplyr::left_join(metadata %>% dplyr::select(label, disease)) %>%
+  tidyr::separate(label, c("patient_id", "sample"), sep = "\\.", remove = FALSE) %>%
+  split(.$paired)
+
+# saveRDS(new_BCR_paired, file.path(RDS_dir, "new_BCR_paired.RDS"))
+```
+
+```{r Sorting_order}
+# Get levels for others than <=5 celll count clonotype and add <= to last position so plotted at bottom
+sorting_order_paired_manual_clonotypes <- new_BCR_paired[["paired"]] %>%
+  dplyr::left_join(metadata %>%
+    dplyr::select(patient_id, plotting_id) %>%
+    unique()) %>%
+  split(.$plotting_id) %>%
+  map(
+    ~ group_by(., disease, new_common_ct_id) %>%
+      dplyr::summarise("cell counts" = n()) %>%
+      dplyr::arrange(desc(`cell counts`)) %>%
+      # dplyr::mutate(new_common_ct_id = case_when(`cell counts`<=5 ~ "BCR <= 5 cells", .default=new_common_ct_id)) %>%
+      # dplyr::filter(new_common_ct_id != "BCR <= 5 cells") %>%
+      group_by(new_common_ct_id) %>%
+      dplyr::summarise("cell count sum" = sum(`cell counts`)) %>%
+      dplyr::arrange(`cell count sum`) %>%
+      dplyr::pull(new_common_ct_id) # %>%
+    # append( "BCR <= 5 cells", after=0)
+  )
+
+sorting_order_individual_manual_clonotypes <- new_BCR_paired[["individual"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  split(.$plotting_id) %>%
+  map(
+    ~ group_by(., disease, new_common_ct_id) %>%
+      dplyr::summarise("cell counts" = n()) %>%
+      dplyr::arrange(desc(`cell counts`)) %>%
+      # dplyr::mutate(new_common_ct_id = case_when(`cell counts`<=5 ~ "BCR <= 5 cells", .default=new_common_ct_id)) %>%
+      # dplyr::filter(new_common_ct_id != "BCR <= 5 cells") %>%
+      group_by(new_common_ct_id) %>%
+      dplyr::summarise("cell count sum" = sum(`cell counts`)) %>%
+      dplyr::arrange(`cell count sum`) %>%
+      dplyr::pull(new_common_ct_id) # %>%
+    # append( "BCR <= 5 cells", after=0)
+  )
+```
+
+```{r, Plot_abundance_plots, fig.height=5, fig.width=10}
+set.seed(13)
+
+BCR_paired_manual_clonotypes_plot <- new_BCR_paired[["paired"]] %>%
+  dplyr::left_join(metadata %>%
+    dplyr::select(patient_id, plotting_id) %>%
+    unique()) %>%
+  dplyr::filter(plotting_id != "P14") %>%
+  group_by(plotting_id, new_common_ct_id, disease) %>%
+  dplyr::summarise("cell counts" = n(), .groups = "drop_last") %>%
+  dplyr::mutate(cell_counts_clone = sum(`cell counts`)) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    disease = factor(disease, levels = c("MBL", "CLL")),
+    unique_ct_id = fct_reorder(paste(plotting_id, new_common_ct_id, sep = "_"), `cell counts`, .fun = sum)
+  ) %>%
+  {
+    ggplot2::ggplot(., aes(x = disease, y = `cell counts`, fill = unique_ct_id)) +
+      facet_wrap(~plotting_id,
+        nrow = 1, strip.position = "bottom"
+      ) +
+      geom_bar(position = "fill", stat = "identity") +
+      scale_y_continuous(labels = c("0", "25", "50", "75", "100"), expand = expansion(mult = c(0, NA))) +
+      scale_fill_manual(values = sample(colorRampPalette(brewer.pal(12, "Set3"))(length(levels(.$unique_ct_id))), replace = FALSE)) +
+      labs(x = "", y = "Frequency\nBCR clone [%]") +
+      theme_pub() +
+      theme(
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "none",
+        strip.text = element_text(face = "plain")
+      )
+  }
+
+ggsave(BCR_paired_manual_clonotypes_plot,
+  path = plotting_dir,
+  filename = "BCR_paired_plot.png",
+  width = 56,
+  height = 10,
+  units = "cm"
+)
+
+saveRDS(BCR_paired_manual_clonotypes_plot, file.path(RDS_dir, "BCR_paired_plot_manual_clonotypes.RDS"))
+```
+
+```{r fig.height=10, fig.width=10}
+create_circle_plots <- function(patient_sample_df){
+  pid <- patient_sample_df$plotting_id %>% unique()
+  set.seed(222)
+  BCR_clone_colours <- tibble("unique_ct_id"=patient_sample_df$unique_ct_id %>% unique(), 
+                              "fill"=sample(colorRampPalette(brewer.pal(12, "Set3"))(length(unique(patient_sample_df$unique_ct_id))), replace = FALSE)) %>%
+    deframe()
+  
+  data_cond1 <- patient_sample_df %>% dplyr::filter(disease=="MBL")
+  packing_cond1 <- circleProgressiveLayout(data_cond1$cell_counts_clone) %>% cbind(data_cond1 %>% dplyr::select(unique_ct_id))
+  data_cond1 <- cbind(data_cond1, packing_cond1)
+  
+  data_cond2 <- patient_sample_df %>% dplyr::filter(disease=="CLL")
+  packing_cond2 <- circleProgressiveLayout(data_cond2$cell_counts_clone) %>% cbind(data_cond2 %>% dplyr::select(unique_ct_id))
+  data_cond2 <- cbind(data_cond2, packing_cond2)
+
+  dat.gg_cond1 <- circleLayoutVertices(packing_cond1, npoints=50, idcol = "unique_ct_id")
+  dat.gg_cond2 <- circleLayoutVertices(packing_cond2, npoints=50, idcol = "unique_ct_id")
+
+  circleplot_cond1 <- ggplot() + 
+    geom_polygon(data = dat.gg_cond1, aes(x, y, group = id, fill=id), colour = "lightgrey", alpha = 0.8, size=0.01) +
+    labs(title="LC-MBL")+
+    scale_fill_manual(values = BCR_clone_colours)+
+    scale_size_continuous(range = c(1,4)) +
+    theme_void() + 
+    theme(legend.position="none",
+          plot.title = element_text(hjust = 0.5, vjust=0)) +
+    coord_equal()
+  
+  circleplot_cond2 <- ggplot() +
+    geom_polygon(data = dat.gg_cond2, aes(x, y, group = id, fill=id), colour = "lightgrey", alpha = 0.8, size=0.01) +
+    labs(title="CLL")+
+    scale_fill_manual(values = BCR_clone_colours)+
+    scale_size_continuous(range = c(1,4)) +
+    theme_void() +
+    theme(legend.position="none",
+          plot.title = element_text(hjust = 0.5, vjust=0)) +
+    coord_equal()
+  
+  ggarrange(circleplot_cond1,  nrow=1, ncol=2, labels = pid, label.x = 0.9, label.y=1)
+}
+
+new_BCR_paired[["paired"]] %>%
+  dplyr::left_join(metadata %>%
+    dplyr::select(patient_id, plotting_id) %>%
+    unique()) %>%
+  dplyr::filter(plotting_id != "P14") %>%
+  group_by(plotting_id, new_common_ct_id, disease) %>%
+  dplyr::summarise("cell counts" = n(), .groups = "drop_last") %>%
+  dplyr::mutate(cell_counts_clone = sum(`cell counts`)) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    disease = factor(disease, levels = c("MBL", "CLL")),
+    unique_ct_id = fct_reorder(paste(plotting_id, new_common_ct_id, sep = "_"), `cell counts`, .fun = sum)) %>% 
+  group_split(plotting_id) %>%
+  map(~create_circle_plots(.)) %>% 
+  ggarrange(plotlist = ., ncol=3, nrow=3)
+
+# to plot below modify function for only one condition
+new_BCR_paired[["individual"]] %>%
+  dplyr::left_join(metadata  %>% 
+    dplyr::select(patient_id, plotting_id, MBL_subtype) %>%
+    unique()) %>%
+  dplyr::filter(plotting_id != "P14",
+                MBL_subtype=="LC") %>%
+  group_by(plotting_id, new_common_ct_id, disease) %>%
+  dplyr::summarise("cell counts" = n(), .groups = "drop_last") %>%
+  dplyr::mutate(cell_counts_clone = sum(`cell counts`)) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    disease = factor(disease, levels = c("MBL", "CLL")),
+    unique_ct_id = fct_reorder(paste(plotting_id, new_common_ct_id, sep = "_"), `cell counts`, .fun = sum)) %>% 
+  group_split(plotting_id) %>%
+  map(~create_circle_plots(.))%>% 
+  ggarrange(plotlist = ., ncol=3, nrow=2)
+```
+
+```{r fig.height=5, fig.width=10}
+BCR_paired_manual_clonotypes_plot <- new_BCR_paired[["paired"]] %>%
+  dplyr::left_join(metadata %>%
+    dplyr::select(patient_id, plotting_id) %>%
+    unique()) %>%
+  dplyr::filter(plotting_id != "P14") %>%
+  group_by(plotting_id, new_common_ct_id, disease) %>%
+  dplyr::summarise("cell counts" = n()) %>%
+  ungroup() %>% 
+  group_by(plotting_id, disease) %>% 
+  dplyr::mutate(cell_counts_clone = sum(`cell counts`)) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    disease = factor(disease, levels = c("MBL", "CLL")),
+    unique_ct_id = fct_reorder(paste(plotting_id, new_common_ct_id, sep = "_"), `cell counts`, .fun = sum)
+  ) %>%
+  dplyr::mutate(frequency=`cell counts`/cell_counts_clone*100,
+                plotting_id=factor(plotting_id, levels=paste0("P", rev(c(20, 22,23,16, 19,21,15))))) %>% 
+  dplyr::arrange(plotting_id, disease, desc(frequency)) %>% 
+  ggplot2::ggplot(., aes(x = disease, y = frequency, fill = frequency)) +
+      geom_bar(position = "stack", stat = "identity") +
+      scale_y_continuous(labels = c("0", "25", "50", "75", "100"), expand = expansion(mult = c(0, NA))) +
+  scale_fill_gradientn(
+    colours = c(
+      "#7ec0ee",
+      "#36648b",
+      "#7677d3",
+      "plum1",
+      "#ef8fd5"
+    ),
+    guide = "colourbar",
+    name = "Clonal expansion [%]",
+    breaks = c(0, 25, 50, 75, 100),
+    limits = c(0, 100),
+    na.value = "lightgrey"
+  )+
+  labs(x = "", y = "Frequency\nBCR clone [%]") +
+      theme_pub() +
+      theme(
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "none",
+        axis.text.x=element_blank(),
+        strip.text = element_text(face = "plain")
+      ) +
+      facet_wrap(~plotting_id,
+        nrow = 1, 
+        strip.position = "bottom"
+      )
+
+saveRDS(BCR_paired_manual_clonotypes_plot, file.path(RDS_dir, "BCR_paired_plot_manual_clonotypes_expansion_colours.RDS"))
+BCR_paired_manual_clonotypes_plot
+```
+
+```{r, fig.height=5, fig.width=10}
+set.seed(14)
+BCR_individual_plot_manual_clonotypes <- new_BCR_paired[["individual"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::filter(plotting_id != "P9dup") %>%
+  group_by(plotting_id, new_common_ct_id) %>%
+  dplyr::summarise("cell counts" = n(), .groups = "drop_last") %>%
+  dplyr::mutate(cell_counts_clone = sum(`cell counts`)) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    unique_ct_id = fct_reorder(paste(plotting_id, new_common_ct_id, sep = "_"), `cell counts`, .fun = sum),
+    plotting_id = factor(plotting_id, levels = paste0("P", c(1:9, "9dup", 10:24))),
+    new_common_ct_id = factor(new_common_ct_id)
+  ) %>%
+  dplyr::left_join(gex_scaled_all_noIG@meta.data %>% as_tibble(rownames = NA) %>% 
+                     dplyr::select(plotting_id, BCR_clonotype, expansion_score), 
+                   by = join_by(new_common_ct_id==BCR_clonotype,                                                                                                              plotting_id ==plotting_id)) %>% 
+  {
+    ggplot2::ggplot(., aes(x = plotting_id, y = `cell counts`, fill = unique_ct_id)) +
+      geom_bar(position = "fill", stat = "identity") +
+      scale_y_continuous(labels = c("0", "25", "50", "75", "100"), expand = expansion(mult = c(0, NA))) +
+      scale_fill_manual(values = sample(colorRampPalette(brewer.pal(12, "Set3"))(length(levels(.$unique_ct_id))), replace = FALSE)) +
+      labs(x = "", y = "Frequency\nBCR clone [%]") +
+      theme_pub() +
+      theme(
+        plot.title = element_text(hjust = 0.5),
+        legend.position = "none"
+      )
+  }
+BCR_individual_plot_manual_clonotypes
+
+saveRDS(BCR_individual_plot_manual_clonotypes, file.path(RDS_dir, "BCR_individual_plot_manual_clonotypes.RDS"))
+
+
+ggsave(BCR_individual_plot_manual_clonotypes,
+  path = plotting_dir,
+  filename = "BCR_individual_plot.png",
+  width = 73.20,
+  height = 10,
+  units = "cm"
+)
+```
+
+```{r fig.height=5, fig.width=10}
+BCR_individual_plot_manual_clonotypes <- new_BCR_paired[["individual"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::filter(!(plotting_id %in%c( "P9dup"))) %>%
+  group_by(plotting_id, new_common_ct_id) %>%
+  dplyr::summarise("cell counts" = n(), .groups = "drop_last") %>%
+  dplyr::mutate(cell_counts_clone = sum(`cell counts`)) %>%
+  ungroup() %>%
+  dplyr::mutate(
+    unique_ct_id = fct_reorder(paste(plotting_id, new_common_ct_id, sep = "_"), `cell counts`, .fun = sum),
+    plotting_id = factor(plotting_id, levels = paste0("P", c(3,6,2,4,1,5,24, 11,12,13,7,10,8,9))),
+    new_common_ct_id = factor(new_common_ct_id)
+  ) %>%
+  unique() %>% 
+  dplyr::mutate(frequency = `cell counts`/cell_counts_clone*100) %>%
+  dplyr::arrange(plotting_id, desc(frequency)) %>%
+  ggplot2::ggplot(., aes(x = plotting_id, y = frequency, fill = frequency)) +
+  geom_bar(position = "stack", stat = "identity") +
+  scale_y_continuous(breaks = c(0, 25, 50, 75, 100),
+                     expand = expansion(mult = c(0, NA))) +
+  scale_fill_gradientn(
+    colours = c(
+      "#7ec0ee",
+      "#36648b",
+      "#7677d3",
+      "plum1",
+      "#ef8fd5"),
+    guide = "colourbar",
+    name = "Clonal expansion [%]",
+    breaks = c(0, 25, 50, 75, 100),
+    limits = c(0, 100),
+    na.value = "lightgrey"
+  ) +
+  labs(x = "", y = "Frequency\nBCR clone [%]") +
+  theme_pub() +
+  theme(axis.text.x = element_text(angle=90),
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "none"
+  )
+
+BCR_individual_plot_manual_clonotypes
+saveRDS(BCR_individual_plot_manual_clonotypes, file.path(RDS_dir, "BCR_individual_plot_manual_clonotypes_expansion_colours.RDS"))
+```
+
+
+# Compare enclone and my clonotype annotation
+```{r,fig.height=10, fig.width=20}
+ggarrange(BCR_paired_plot,
+  BCR_paired_manual_clonotypes_plot,
+  nrow = 2
+)
+
+ggarrange(BCR_individual_plot_figure,
+  BCR_individual_plot_manual_clonotypes,
+  nrow = 2
+)
+```
+
+# Clonotype statistics
+```{r}
+clonality_percentage_data <- new_BCR_paired %>% 
+  bind_rows() %>%
+  dplyr::left_join(metadata %>%
+    dplyr::select(patient_id, plotting_id, MBL_subtype, disease) %>%
+    unique(), by = join_by(patient_id, disease)) %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  dplyr::mutate(MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL")),
+                plotting_id =factor(plotting_id, levels=c(paste0("P", 1:9), "P9dup", paste0("P", 10:24)))) %>% 
+  dplyr::filter(!(patient_id %in% c("CLL6", "MBL7dup"))) %>%
+  group_by(plotting_id, new_common_ct_id, MBL_CLL_subtype) %>%
+  dplyr::summarise("cell counts" = n()) %>% 
+  ungroup() %>%
+  group_by(plotting_id, MBL_CLL_subtype) %>%
+  dplyr::mutate(
+    max_cell_counts = max(`cell counts`),
+    max_new_common_ct_id = new_common_ct_id[which.max(`cell counts`)]
+  ) %>%
+  dplyr::summarise(
+    max_new_common_ct_id = dplyr::first(max_new_common_ct_id),
+    max_cell_counts = dplyr::first(max_cell_counts),
+    sum_other_cells = sum(`cell counts`) - max_cell_counts,
+    .groups = "drop"
+  ) %>% 
+  dplyr::mutate(monoclonal=max_cell_counts/(max_cell_counts+sum_other_cells)*100,
+                polyclonal=100-monoclonal) %>% 
+  dplyr::select(plotting_id, MBL_CLL_subtype, monoclonal, polyclonal) %>% 
+  tidyr::pivot_longer(cols = -c(plotting_id, MBL_CLL_subtype), names_to = "clonality", values_to = "percentage") 
+
+clonality_percentage_data_P11 <- new_BCR_paired$individual %>%   
+  dplyr::left_join(metadata %>%
+    dplyr::select(patient_id, plotting_id, MBL_subtype, disease), by = join_by(patient_id, disease)) %>%
+      dplyr::filter(plotting_id=="P11") %>% 
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  dplyr::mutate(MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL")),
+                plotting_id =factor(plotting_id, levels=c(paste0("P", 1:9), "P9dup", paste0("P", 10:24)))) %>% 
+  dplyr::filter(!(patient_id %in% c("CLL6", "MBL7dup"))) %>%
+  dplyr::mutate(new_common_ct_id=if_else(condition = new_common_ct_id %in% c(605, 149), true = 1000, false=new_common_ct_id)) %>% 
+  group_by(plotting_id, new_common_ct_id, MBL_CLL_subtype) %>% 
+  dplyr::summarise("cell counts" = n()) %>% 
+  ungroup() %>%
+  group_by(plotting_id, MBL_CLL_subtype) %>%
+  dplyr::mutate(
+    max_cell_counts = max(`cell counts`),
+    max_new_common_ct_id = new_common_ct_id[which.max(`cell counts`)]
+  ) %>% 
+  dplyr::summarise(
+    max_new_common_ct_id = dplyr::first(max_new_common_ct_id),
+    max_cell_counts = dplyr::first(max_cell_counts),
+    sum_other_cells = sum(`cell counts`) - max_cell_counts,
+    .groups = "drop"
+  ) %>% 
+  dplyr::mutate(biclonal=max_cell_counts/(max_cell_counts+sum_other_cells)*100,
+                polyclonal=100-biclonal) %>% 
+  dplyr::select(plotting_id, MBL_CLL_subtype, biclonal, polyclonal) %>% 
+  tidyr::pivot_longer(cols = -c(plotting_id, MBL_CLL_subtype), names_to = "clonality", values_to = "percentage") 
+  
+  
+clonality_percentage_data %>%
+  dplyr::filter(!plotting_id %in% c("P24", "P11")) %>% 
+  bind_rows(clonality_percentage_data_P11) %>% 
+  group_by(MBL_CLL_subtype, clonality) %>%
+  dplyr::summarize(min_perc=min(percentage),
+                   max_perc=max(percentage),
+                   mean_perc=mean(percentage)) %>% 
+  dplyr::filter(clonality == "polyclonal")
+
+monoclonal_percentage_plot <- clonality_percentage_data %>% 
+  dplyr::filter(clonality =="monoclonal",
+                plotting_id != "P11") %>% # P11 is considered bi-clonal which is why the sample is excluded here
+  ggplot(aes(x=MBL_CLL_subtype, y=percentage, fill = MBL_CLL_subtype))+
+  geom_boxplot(colour = "black", aes(fill = MBL_CLL_subtype),outlier.shape = NA ) +
+  geom_jitter(width = 0.2, colour = "black", aes(fill = MBL_CLL_subtype), pch = 21) +
+  geom_signif(comparisons = list(c('LC_MBL', 'HC_MBL'), c('LC_MBL', 'CLL')), step_increase = 0.1, textsize = 2) + 
+  scale_x_discrete(name="", labels=c("LC_MBL"="LC-MBL", "HC_MBL"="HC-MBL","CLL"="CLL"))+
+  scale_y_continuous(limits=c(0,115), expand = expansion(mult=c(0, 0.1)))+
+  scale_fill_manual(name="Condition", values = my_MBL_CLL_colours_named, labels=c("LC_MBL"="LC-MBL", "HC_MBL"="HC-MBL","CLL"="CLL")) +
+  scale_colour_manual(name="Condition", values = my_MBL_CLL_colours_named, labels=c("LC_MBL"="LC-MBL", "HC_MBL"="HC-MBL","CLL"="CLL")) +
+  labs(y="Monoclonal cells [%]")+
+  theme_pub()+
+  theme(legend.position = "top",
+        axis.title.x=element_blank(), 
+        axis.text.x = element_text(angle=30, hjust=1))
+
+write_tsv(monoclonal_percentage_plot$data, file =file.path(tsv_dir, "monoclonal_percentage.tsv"))
+```
+
+```{r, fig.width=10, fig.height=5}
+new_BCR_paired[["individual"]] %>%
+  dplyr::select(label_cellbarcode, patient_id, disease, new_common_ct_id) %>%
+  group_by(patient_id, disease) %>%
+  dplyr::summarise("cell counts" = n())
+
+clonotype_counts_pre <- BCR_paired[["paired"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(label, plotting_id, MBL_subtype)) %>%
+  dplyr::select(patient_id, plotting_id, disease, common_ct_id, MBL_subtype) %>%
+  dplyr::filter(patient_id != "CLL6") %>%
+  unique() %>%
+  group_by(patient_id, plotting_id, disease, MBL_subtype) %>%
+  dplyr::summarise("Clonotype counts" = n()) %>%
+  bind_rows(BCR_paired[["individual"]] %>%
+    dplyr::left_join(metadata %>% dplyr::select(label, plotting_id, MBL_subtype)) %>%
+    dplyr::select(patient_id, plotting_id, disease, MBL_subtype, common_ct_id) %>%
+    unique() %>%
+    group_by(patient_id, disease, plotting_id, MBL_subtype) %>%
+    dplyr::summarise("Clonotype counts" = n()) %>%
+    dplyr::mutate(
+      disease = factor(disease, levels = c("MBL", "CLL"))
+    )) %>%
+  dplyr::mutate(
+    disease = factor(disease, levels = c("MBL", "CLL")),
+    plotting_id = factor(plotting_id, levels = c(paste0("P", 1:9), "P9dup", paste0("P", 10:25)))
+  ) %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  dplyr::mutate(MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL"))) %>%
+  ggplot(aes(x = plotting_id, y = `Clonotype counts`, fill = MBL_CLL_subtype)) +
+  scale_fill_manual(
+    name = "Condition", values = my_MBL_CLL_colours_named,
+    labels = c("HC_MBL" = "HC MBL", "LC_MBL" = "LC MBL", "CLL" = "CLL")
+  ) +
+  scale_x_discrete(labels = patient_id2plotting_id) +
+  scale_y_log10(expand = expansion(mult = c(0, NA))) +
+  geom_bar(stat = "identity", , position = position_dodge2(preserve = "single")) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.9)
+  ) +
+  labs(x = "", title = "Before clonotype aggregation")
+
+clonotype_counts_post <- new_BCR_paired[["paired"]] %>%
+  dplyr::left_join(metadata %>% dplyr::select(label, plotting_id, MBL_subtype)) %>%
+  dplyr::select(patient_id, plotting_id, disease, new_common_ct_id, MBL_subtype) %>%
+  dplyr::filter(patient_id != "CLL6") %>%
+  unique() %>%
+  group_by(patient_id, plotting_id, disease, MBL_subtype) %>%
+  dplyr::summarise("Clonotype counts" = n()) %>%
+  bind_rows(new_BCR_paired[["individual"]] %>%
+    dplyr::left_join(metadata %>% dplyr::select(label, plotting_id, MBL_subtype)) %>%
+    dplyr::select(patient_id, plotting_id, disease, MBL_subtype, new_common_ct_id) %>%
+    unique() %>%
+    group_by(patient_id, disease, plotting_id, MBL_subtype) %>%
+    dplyr::summarise("Clonotype counts" = n()) %>%
+    dplyr::mutate(
+      disease = factor(disease, levels = c("MBL", "CLL"))
+    )) %>%
+  dplyr::mutate(
+    disease = factor(disease, levels = c("MBL", "CLL")),
+    plotting_id = factor(plotting_id, levels = c(paste0("P", 1:9), "P9dup", paste0("P", 10:25)))
+  ) %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  dplyr::mutate(MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL"))) %>%
+  ggplot(aes(x = plotting_id, y = `Clonotype counts`, fill = MBL_CLL_subtype)) +
+  scale_fill_manual(
+    name = "Condition", values = my_MBL_CLL_colours_named,
+    labels = c("HC_MBL" = "HC MBL", "LC_MBL" = "LC MBL", "CLL" = "CLL")
+  ) +
+  scale_x_discrete(labels = patient_id2plotting_id) +
+  scale_y_log10(expand = expansion(mult = c(0, NA))) +
+  geom_bar(stat = "identity", , position = position_dodge2(preserve = "single")) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.9)
+  ) +
+  labs(x = "", title = "After clonotype aggregation")
+
+ggarrange(clonotype_counts_pre, clonotype_counts_post,
+  nrow = 1,
+  common.legend = TRUE,
+  legend = "bottom"
+)
+
+ggsave(clonotype_counts_post,
+  path = plotting_dir,
+  filename = "BCR_clonotype_counts_plot.png",
+  width = 10,
+  height = 10,
+  units = "cm",
+  bg = "white"
+)
+
+saveRDS(clonotype_counts_post, file.path(RDS_dir, "clonotype_counts_post.RDS"))
+write_tsv(clonotype_counts_post$data, file =file.path(tsv_dir, "BCR_clonotype_counts.tsv"))
+```
+
+# Map clonotypes to RNAseq data
+```{r}
+BCR_clonotype_annotation <- new_BCR_paired %>%
+  bind_rows() %>%
+  dplyr::select(label_cellbarcode, new_common_ct_id) %>%
+  dplyr::rename("BCR_clonotype" = new_common_ct_id) %>%
+  dplyr::mutate(BCR_clonotype = as.factor(str_remove(BCR_clonotype, "_clonotype"))) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#") %>%
+  tidyr::unite("label_cellbarcode", label:cellbarcode, sep = "_") %>%
+  with(setNames(BCR_clonotype, label_cellbarcode))
+
+gex_scaled_all_noIG <- AddMetaData(gex_scaled_all_noIG, metadata = BCR_clonotype_annotation, col.name = "BCR_clonotype")
+```
+
+## Total VDJ cell count
+```{r}
+cell_counts_VDJ <-  c(new_BCR_paired$individual$patient_id, new_BCR_paired$paired$patient_id) %>% 
+  .[.!="MBL7dup"] %>% 
+  table() %>% 
+  sum()
+
+cell_counts_VDJ_GEX_matched <- gex_scaled_all_noIG@meta.data %>% 
+  dplyr::select(patient_id, BCR_clonotype) %>% 
+  dplyr::filter(!is.na(BCR_clonotype)) %>% 
+  dim() %>% 
+  .[1]
+
+
+cell_counts_VDJ
+cell_counts_VDJ_GEX_matched
+```
+
+
+Plot clonotypes in UMAP
+```{r, fig.width=16, fig.height=8}
+clonotype_plot <- DimPlot(subset(gex_scaled_all_noIG, subset = BCR_clonotype != "<NA>"),
+  reduction = "umap",
+  raster = FALSE,
+  group.by = c("BCR_clonotype")) +
+  labs(x = "UMAP1", y = "UMAP2", title = "BCR clones") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "none",
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+
+clonotype_split_plot <- DimPlot(subset(gex_scaled_all_noIG, subset = BCR_clonotype != "<NA>"),
+  reduction = "umap",
+  raster = FALSE, 
+  split.by = "MBL_CLL_subtype",
+  group.by = c("BCR_clonotype")) +
+  labs(x = "UMAP1", y = "UMAP2", title = "BCR clones") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "none",
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+
+write_tsv(clonotype_split_plot[[1]][["data"]], file=file.path(tsv_dir, "BCR_clonotype_umap.tsv"))
+```
+
+```{r}
+IGHV_annotation <- tibble("label_cellbarcode"=colnames(gex_scaled_all_noIG)) %>% 
+  tidyr::separate(label_cellbarcode, into = c("label", "cellbarcode"), sep = "_", remove = FALSE) %>% 
+  dplyr::left_join(metadata %>% 
+                     dplyr::select(label, IGHV)) %>% 
+  dplyr::select(label_cellbarcode, IGHV) %>% 
+  deframe()
+
+
+gex_scaled_all_noIG <- AddMetaData(gex_scaled_all_noIG, 
+                              metadata = IGHV_annotation,
+                              col.name = "IGHV_status")
+
+IGHV_split_plot <- DimPlot(subset(gex_scaled_all_noIG, subset = BCR_clonotype != "<NA>"),
+  reduction = "umap",
+  raster = FALSE, 
+  cols = IGHV_colours,
+  na.value = "NA",
+  split.by="MBL_CLL_subtype", 
+  shuffle=TRUE,
+  group.by = "IGHV_status") +
+  labs(x = "UMAP1", 
+       y = "UMAP2", 
+       title = "IGHV muational status") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "bottom",
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+
+write_tsv(IGHV_split_plot[[1]][["data"]], file.path(tsv_dir, "GEX_IGHV_umap.tsv"))
+```
+
+B cell (minor clones) and malignant cell (major clone) annotation
+```{r}
+# get top two clones for MBL8
+malignant_clones <- bind_rows(
+  gex_scaled_all_noIG@meta.data %>%
+    dplyr::filter(!is.na(BCR_clonotype)) %>%
+    dplyr::group_by(patient_id, BCR_clonotype) %>%
+    dplyr::summarize(clonotype_frequency = n()) %>%
+    dplyr::arrange(desc(clonotype_frequency)) %>%
+    slice_max(clonotype_frequency, n = 2) %>%
+    dplyr::filter(patient_id == "MBL8"),
+
+  # get top one clone for other patients
+  gex_scaled_all_noIG@meta.data %>%
+    dplyr::filter(!is.na(BCR_clonotype)) %>%
+    dplyr::group_by(patient_id, BCR_clonotype) %>%
+    dplyr::summarize(clonotype_frequency = n()) %>%
+    ungroup() %>%
+    group_by(patient_id) %>%
+    # arrange(desc(clonotype_frequency)) %>%
+    slice_max(clonotype_frequency, n = 1) %>%
+    dplyr::filter(!(patient_id %in% c("MBL8")))
+) %>%
+  unite(patient_id_BCR_clonotype, c(patient_id, BCR_clonotype), sep = "_", remove = FALSE)
+
+#
+clone_annotation <- gex_scaled_all_noIG@meta.data %>%
+  dplyr::select(patient_id, disease, BCR_clonotype) %>%
+  dplyr::mutate(clone = case_when(paste0(patient_id, "_", BCR_clonotype) %in% malignant_clones$patient_id_BCR_clonotype ~ "major",
+    !(paste0(patient_id, "_", BCR_clonotype) %in% malignant_clones$patient_id_BCR_clonotype) & !is.na(BCR_clonotype) ~ "minor",
+    .default = NA
+  )) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  with(setNames(clone, label_cellbarcode))
+
+gex_scaled_all_noIG <- AddMetaData(gex_scaled_all_noIG, metadata = clone_annotation, col.name = "clone_annotation")
+```
+
+Plot major and minor clones
+```{r, fig.width=20, fig.height=16}
+clone_plot_MBL <- DimPlot(subset(gex_scaled_all_noIG, subset = !is.na(clone_annotation) & disease == "MBL"),
+  reduction = "umap",
+  raster = FALSE,
+  group.by = c("clone_annotation"),
+  split.by = "patient_id",
+  ncol = 3
+) +
+  scale_colour_manual(
+    values = c("minor" = "darkred", "major" = "#483D8B"), name = "Clone",
+    labels = c("minor" = "Minor clone", "major" = "Major clone")
+  ) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+
+clone_plot_CLL <- DimPlot(subset(gex_scaled_all_noIG, subset = !is.na(clone_annotation) & disease == "CLL"),
+  reduction = "umap",
+  raster = FALSE,
+  group.by = c("clone_annotation"),
+  split.by = "patient_id",
+  ncol = 3
+) +
+  scale_colour_manual(
+    values = c("minor" = "darkred", "major" = "#483D8B"), name = "Clone",
+    labels = c("minor" = "Minor clone", "major" = "Major clone")
+  ) + labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+
+ggarrange(clone_plot_MBL, clone_plot_CLL)
+```
+
+```{r}
+clone_plot_summary_MBL <- DimPlot(subset(gex_scaled_all_noIG, subset = !is.na(clone_annotation) & disease == "MBL"),
+  reduction = "umap",
+  raster = FALSE,
+  shuffle = TRUE,
+  group.by = c("clone_annotation")
+) +
+  scale_colour_manual(
+    values = c("minor" = "darkred", "major" = "#483D8B"), name = "Clone",
+    labels = c("minor" = "Minor clone", "major" = "Major clone")
+  ) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+
+clone_plot_summary_CLL <- DimPlot(subset(gex_scaled_all_noIG, subset = !is.na(clone_annotation) & disease == "CLL"),
+  reduction = "umap",
+  raster = FALSE,
+  shuffle = TRUE,
+  group.by = "clone_annotation"
+) +
+  scale_colour_manual(
+    values = c("minor" = "darkred", "major" = "#483D8B"), name = "Clone",
+    labels = c("minor" = "Minor clone", "major" = "Major clone")
+  ) + labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+
+clone_plot_summary <- DimPlot(subset(gex_scaled_all_noIG, subset = !is.na(clone_annotation) & disease %in% c("MBL", "CLL")),
+  reduction = "umap",
+  split.by = "disease",
+  ncol = 2,
+  raster = FALSE,
+  shuffle = TRUE,
+  group.by = "clone_annotation"
+) +
+  scale_colour_manual(
+    values = c("minor" = "darkred", "major" = "#483D8B"), name = "Clone",
+    labels = c("minor" = "Minor clone", "major" = "Major clone")
+  ) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+
+clone_plot_summary_subtype <- DimPlot(subset(gex_scaled_all_noIG, subset = !is.na(clone_annotation) & MBL_CLL_subtype %in% c("LC", "HC", "CLL")),
+  reduction = "umap",
+  split.by = "MBL_CLL_subtype",
+  ncol = 3,
+  raster = FALSE,
+  shuffle = TRUE,
+  group.by = "clone_annotation"
+) +
+  scale_colour_manual(
+    values = c("minor" = "darkred", "major" = "#483D8B"), name = "Clone",
+    labels = c("minor" = "Minor clone", "major" = "Major clone")
+  ) +
+  labs(x = "UMAP1", y = "UMAP2", title = "Patients") +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  )
+```
+
+```{r}
+# umap clone expansion score
+expansion_score <- new_BCR_paired %>%
+  bind_rows() %>%
+  dplyr::select(label_cellbarcode, new_common_ct_id) %>%
+  dplyr::rename("BCR_clonotype" = new_common_ct_id) %>%
+  dplyr::mutate(BCR_clonotype = as.factor(str_remove(BCR_clonotype, "_clonotype"))) %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#") %>%
+  dplyr::group_by(label, BCR_clonotype) %>%
+  dplyr::summarise(counts = n()) %>%
+  ungroup() %>%
+  group_by(label) %>%
+  dplyr::mutate(expansion = counts / sum(counts) * 100) %>%
+  ungroup() %>%
+  dplyr::arrange(desc(expansion))
+
+expansion_score_annotation <- gex_scaled_all_noIG@meta.data %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, BCR_clonotype, orig.ident) %>%
+  dplyr::rename("label" = orig.ident) %>%
+  dplyr::left_join(expansion_score) %>%
+  dplyr::filter(!is.na(BCR_clonotype)) %>%
+  dplyr::select(label_cellbarcode, expansion) %>%
+  deframe()
+
+
+gex_scaled_all_noIG <- AddMetaData(gex_scaled_all_noIG, metadata = expansion_score_annotation, col.name = "expansion_score")
+```
+
+```{r}
+expansion_umap <- as_tibble(gex_scaled_all_noIG@reductions[["umap"]]@cell.embeddings, rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  left_join(tibble(
+    "label_cellbarcode" = colnames(gex_scaled_all_noIG),
+    "expansion_score" = gex_scaled_all_noIG@meta.data$expansion_score,
+    "label" = gex_scaled_all_noIG@meta.data$orig.ident,
+    "MBL_CLL_subtype" = gex_scaled_all_noIG@meta.data$MBL_CLL_subtype
+  )) %>%
+  dplyr::filter(!is.na(expansion_score)) %>%
+  dplyr::arrange(desc(expansion_score)) %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, colour = expansion_score)) +
+  geom_point_rast(size = 0.1, stroke=NA) +
+  scale_colour_gradientn(
+    colours = c(
+      "#7ec0ee",
+      "#36648b",
+      "#7677d3",
+      "plum1",
+      "#ef8fd5"),
+    guide = "colourbar",
+    name = "Clonal expansion [%]",
+    breaks = c(0, 25, 50, 75, 100),
+    limits = c(0, 100),
+    na.value = "lightgrey"
+  ) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    aspect.ratio = 1
+  ) +
+  facet_wrap(~MBL_CLL_subtype)
+expansion_umap
+
+saveRDS(expansion_umap, file.path(RDS_dir, "clonal_expansion_umap.RDS"))
+```
+
+Perform chi2 test to find out if clonotype is associated with disease state
+```{r, fig.width=9, fig.height=12}
+build_coningency_tables <- function(clono_cll_cnts) {
+  all_clonotype_ch2p_values <- list()
+
+  for (clonotype in unique(clono_cll_cnts$Cluster)) {
+    this_clonotype_MBL <- clono_cll_cnts %>%
+      dplyr::filter(Cluster == clonotype & label == "MBL") %>%
+      dplyr::pull(var = `cell counts`)
+    this_clonotype_CLL <- clono_cll_cnts %>%
+      dplyr::filter(Cluster == clonotype & label == "CLL") %>%
+      dplyr::pull(var = `cell counts`)
+    other_clonotypes_MBL <- clono_cll_cnts %>%
+      dplyr::filter(Cluster != clonotype & label == "MBL") %>%
+      group_by(plotting_id) %>% 
+      dplyr::summarise(n = sum(`cell counts`)) %>%
+      dplyr::pull()
+    other_clonotypes_CLL <- clono_cll_cnts %>%
+      dplyr::filter(Cluster != clonotype & label == "CLL") %>%
+      group_by(plotting_id) %>% 
+      dplyr::summarise(n = sum(`cell counts`)) %>%
+      dplyr::pull()
+
+    contingency_table <- data.frame("MBL" = c(this_clonotype_MBL, other_clonotypes_MBL), 
+                                    "CLL" = c(this_clonotype_CLL, other_clonotypes_CLL), 
+                                    row.names = c("this_clonotype", "other_clonotypes"))
+    
+    ch2p_value <- chisq.test(contingency_table, correct = FALSE) %>% .$`p.value`
+    
+    result <- tibble("Cluster" = clonotype, "p_value" = ch2p_value)
+    
+    all_clonotype_ch2p_values[[clonotype]] <- result
+  }
+
+  all_clonotype_ch2p_values <- all_clonotype_ch2p_values %>% 
+    bind_rows()
+}
+```
+
+
+```{r, fig.width=9, fig.height=12}
+clonotypes_cell_counts_all_paired <- gex_scaled_all_noIG@meta.data %>% 
+  as_tibble(rownames = NA) %>% 
+  rownames_to_column("label_cellbarcode") %>% 
+  dplyr::select(orig.ident, disease, plotting_id, expansion_score, BCR_clonotype) %>% 
+  dplyr::filter(!is.na(BCR_clonotype),
+                plotting_id %in% paste0("P", 15:23)) %>% 
+  group_by(orig.ident, plotting_id, BCR_clonotype, expansion_score) %>% 
+  dplyr::summarise(`cell counts`=n()) %>% 
+  rename("Clonotype frequency [% cells]"=expansion_score,
+         "Cluster"=BCR_clonotype,
+         "label"=orig.ident) %>% 
+  # dplyr::mutate(`Clonotype frequency [% cells]`= factor(`Clonotype frequency [% cells]`)) %>% 
+  split(~plotting_id)
+
+# Apply function to all samples and clonotypes
+ch2_stat <- clonotypes_cell_counts_all_paired %>%
+  map(~ dplyr::select(., -`Clonotype frequency [% cells]`) %>%
+    dplyr::mutate(label = case_when(
+      stringr::str_ends(label, "\\.1") ~ "MBL",
+      stringr::str_ends(label, "\\.2") ~ "CLL", TRUE ~ label
+    )) %>%
+    pivot_wider(id_cols = c( plotting_id, Cluster), names_from = label, values_from = `cell counts`, values_fill = 0) %>% 
+    pivot_longer(cols = c(MBL, CLL), names_to = "label", values_to = "cell counts") %>% 
+    build_coningency_tables())
+```
+
+```{r, fig.width=9, fig.height=12}
+# Apply Benjamini Hochberg Correction for multiple testing
+clonotypes_cell_counts_all_paired_stats <- clonotypes_cell_counts_all_paired %>% 
+  map2(
+  ch2_stat,
+  ~ dplyr::select(.x, -`cell counts`) %>%
+    pivot_wider(names_from = `label`, values_from = `Clonotype frequency [% cells]`,values_fill = 0) %>%
+    dplyr::rename(
+      `Clonotype frequency MBL [% cells]` = ends_with(".1"),
+      `Clonotype frequency CLL [% cells]` = ends_with(".2")
+    ) %>%
+    dplyr::mutate(
+      `Clonotype frequency MBL [% cells]` = replace_na(`Clonotype frequency MBL [% cells]`, 0),
+      `Clonotype frequency CLL [% cells]` = replace_na(`Clonotype frequency CLL [% cells]`, 0),
+      Cluster = as.character(Cluster)
+    ) %>%
+    left_join(.y, by = join_by(Cluster)) %>%
+    dplyr::mutate(
+      p_adjust = p.adjust(p_value, method = "BH", n = length(.$p_value)),
+      significance = p_value <= 0.05 & p_adjust <= 0.05,
+      clonotype_label = case_when(significance == "TRUE" ~ Cluster, .default = NA)
+    )
+)
+
+saveRDS(clonotypes_cell_counts_all_paired_stats, file.path(RDS_dir, "clonotypes_BCR_cell_counts_all_paired_stats.RDS"))
+```
+
+
+```{r, fig.width=5, fig.height=5}
+# find out which are the major clones per patient
+major_clones <- clonotypes_cell_counts_all_paired_stats %>%
+  imap(~ mutate(.x,
+      `Change CLL/MBL` = (`Clonotype frequency CLL [% cells]` / `Clonotype frequency MBL [% cells]`),
+      `threshold_1_2_fc` = `Change CLL/MBL` >= 1.2 & significance == TRUE | `Change CLL/MBL` <= 1 / 1.2 & significance == TRUE,
+      `Stability` = if_else(threshold_1_2_fc == TRUE, "Instable", "Stable"),
+      `plotting_id` = .y
+    )
+  ) %>%
+  bind_rows() %>%
+  mutate(Stability = factor(Stability, levels = c("Stable", "Instable"))) %>%
+  group_by(plotting_id) %>% 
+  dplyr::summarise(
+    "Clonotype frequency MBL [% cells]"=max(`Clonotype frequency MBL [% cells]`)) %>% 
+  dplyr::left_join(clonotypes_cell_counts_all_paired_stats %>%
+  map2(
+    names(.),
+    ~ mutate(.x,
+      `Change CLL/MBL` = (`Clonotype frequency CLL [% cells]` / `Clonotype frequency MBL [% cells]`),
+      `threshold_1_2_fc` = `Change CLL/MBL` >= 1.2 & significance == TRUE | `Change CLL/MBL` <= 1 / 1.2 & significance == TRUE,
+      `Stability` = if_else(threshold_1_2_fc == TRUE, "Instable", "Stable"),
+      `plotting_id` = .y
+    )
+  ) %>%
+  bind_rows())
+
+```
+
+
+```{r}
+# Filter with 20% change threshold
+scatterplot_clonotype_frequency_threshold <- clonotypes_cell_counts_all_paired_stats%>%
+  imap(
+    ~ mutate(.x,
+      `Change CLL/MBL` = (`Clonotype frequency CLL [% cells]` / `Clonotype frequency MBL [% cells]`),
+      `threshold_1_2_fc` = `Change CLL/MBL` >= 1.2 & significance == TRUE | `Change CLL/MBL` <= 1 / 1.2 & significance == TRUE,
+      `clonotype_label` = case_when(threshold_1_2_fc == TRUE ~ paste0(Cluster, "_", .y), .default = NA)
+    )
+  ) %>%
+  bind_rows(.id = "patient_id") %>%
+  right_join(major_clones) %>% 
+  tidyr::separate(clonotype_label, c(NA, "plotting_id"), sep = "_", remove = FALSE) %>%
+  dplyr::left_join(metadata %>% dplyr::select(plotting_id, patient_id) %>% unique()) %>% 
+  dplyr::mutate(patient_id = factor(patient_id, levels = c(paste0("CLL", 1:10)))) %>%
+  arrange(threshold_1_2_fc) %>%
+  ggplot2::ggplot(aes(
+    x = `Clonotype frequency CLL [% cells]`,
+    y = `Clonotype frequency MBL [% cells]`,
+    colour = threshold_1_2_fc#, label=clonotype_label
+  )) +
+  geom_point(size = 1) +
+  # geom_label_repel()+
+  geom_function(fun = function(x) 1.2 * x, colour = "darkgrey", linetype = "dashed") +
+  geom_function(fun = function(x) x / 1.2, colour = "darkgrey", linetype = "dashed") +
+  scale_y_log10(
+    limits = c(0.01, 100),
+    oob = scales::oob_squish_infinite,
+    breaks = 10^seq(-2, 2, 1),
+    labels = c(0.01, 0.1, 1, 10, 100)
+  ) +
+  scale_x_log10(
+    limits = c(0.01, 100),
+    oob = scales::oob_squish_infinite,
+    breaks = 10^seq(-2, 2, 1),
+    labels = c(0.01, 0.1, 1, 10, 100)
+  ) +
+  labs(
+    x = "Clone frequency in CLL [%]",
+    y = "Clone frequency in MBL [%]"
+  )+ 
+  theme_pub()+
+  theme(
+    aspect.ratio = 1,
+    legend.position = "right",
+    legend.direction = "vertical",
+    panel.grid.minor = NULL
+  ) +
+  guides(color = guide_legend(nrow = 8)) +
+  scale_colour_manual(
+    name = "Significance",
+    values = c("lightgrey", "#956A77"),
+    na.value = "black",
+    labels = patient_id2plotting_id
+  )
+
+scatterplot_clonotype_frequency_threshold
+
+scatterplot_clonotype_frequency_threshold %>%
+  ggsave(
+    filename = file.path(summary_dir, "Clonotype_chi2_summary_scatterplot.jpg"),
+    width = 14,
+    height = 10,
+    unit = "cm"
+  )
+
+saveRDS(scatterplot_clonotype_frequency_threshold, file.path(RDS_dir, "scatterplot_clonotype_BCR_frequency_threshold.RDS"))
+```
+
+```{r}
+stability_clonotypes_1_2_fc_histogram <- clonotypes_cell_counts_all_paired_stats %>%
+  imap(~ mutate(.x,
+      `Change CLL/MBL` = (`Clonotype frequency CLL [% cells]` / `Clonotype frequency MBL [% cells]`),
+      `threshold_1_2_fc` = `Change CLL/MBL` >= 1.2 & significance == TRUE | `Change CLL/MBL` <= 1 / 1.2 & significance == TRUE,
+      `Stability` = if_else(threshold_1_2_fc == TRUE, "Instable", "Stable"),
+      `plotting_id` = .y
+    )
+  ) %>%
+  bind_rows() %>%
+    right_join(major_clones) %>% 
+  mutate(Stability = factor(Stability, levels = c("Stable", "Instable"))) %>%
+  group_by(plotting_id, Stability) %>%
+  dplyr::summarise("clonotype_counts" = n()) %>%
+  dplyr::mutate(clonotype_counts = if_else(Stability == "Stable", clonotype_counts, clonotype_counts * (-1))) %>%
+  dplyr::mutate(plotting_id = factor(plotting_id, levels = paste0("P", c(20, 23,22,19,21,16,15)))) %>%
+  ggplot(aes(
+    x = clonotype_counts,
+    y = plotting_id,
+    fill = `Stability`
+  )) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = clonotype_counts), 
+    ## make labels left-aligned
+    hjust = 1, nudge_x = -.5)+
+  scale_fill_manual(values = c("Stable" = "lightgrey", "Instable" = "#956A77")) +
+  scale_x_continuous(expand = expansion(mult = c(0, NA)),
+                     limits = c(-1600, 1600),
+                     breaks=c(-1600, -1200, -800, -400, 0, 400, 800, 1200, 1600),
+                     labels=c("1600", "1200", "800", "400", "0", "400", "800", "1200", "1600")
+                     ) +
+  scale_y_discrete(labels=patient_id2plotting_id)+
+  labs(x = "Clone counts", y = "") +
+  theme_pub() +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y=element_blank(),
+    strip.text = element_text(face = "plain"),
+    legend.position = c(0.8, 0.25),
+    legend.direction = "vertical"
+  )
+stability_clonotypes_1_2_fc_histogram
+saveRDS(stability_clonotypes_1_2_fc_histogram, file.path(RDS_dir, "stability_clonotypes_BCR_1_2_fc_histogram.RDS"))
+```
+
+## Clonal persistance
+```{r}
+clonotypes_BCR_counts <- clonotypes_cell_counts_all_paired_stats %>% 
+  map(~dplyr::select(., Cluster, 
+                     `Clonotype frequency MBL [% cells]`,
+                     `Clonotype frequency CLL [% cells]`) %>% 
+        tidyr::pivot_longer(cols = c(`Clonotype frequency MBL [% cells]`, `Clonotype frequency CLL [% cells]`) , names_to = "Condition", values_to = "frequency") %>% 
+        dplyr::mutate(Condition=if_else(Condition =="Clonotype frequency MBL [% cells]", true="MBL", false="CLL", missing=NA)) %>% 
+        dplyr::filter(frequency != 0) %>% 
+        dplyr::group_by(Condition) %>% 
+        summarise(clone_counts=n())) %>% 
+  bind_rows(.id="plotting_id") %>% 
+  tidyr::pivot_wider(id_cols=c(plotting_id), names_from = "Condition", values_from = clone_counts)
+
+clonotypes_BCR_persistance <- clonotypes_cell_counts_all_paired_stats %>% 
+  map(~dplyr::select(., Cluster, 
+                     `Clonotype frequency MBL [% cells]`,
+                     `Clonotype frequency CLL [% cells]`) %>% 
+        dplyr::mutate(persistant=if_else(`Clonotype frequency MBL [% cells]` & `Clonotype frequency CLL [% cells]` != 0, true=TRUE, false=FALSE, missing=NA)) %>% 
+        dplyr::group_by(persistant) %>% 
+        summarise(count_persistance=n())) %>% 
+  bind_rows(.id="plotting_id")
+  
+```
+
+```{r}
+scatterplot_clonotype_counts <- clonotypes_BCR_counts %>%
+  ggplot2::ggplot(aes(
+    x = `CLL`,
+    y = `MBL`)) +
+  geom_point(size = 1, colour="#956A77") +
+  scale_y_log10(
+    limits = c(10, 2000),
+    breaks = 10^seq(1, 3, 1))+
+  scale_x_log10(
+    limits = c(10, 2000),
+    breaks = 10^seq(1, 3, 1))+
+  labs(
+    x = "Clone counts in CLL",
+    y = "Clone counts in MBL"
+  )+ 
+  theme_pub()+
+  theme(
+    aspect.ratio = 1,
+    legend.position = "right",
+    legend.direction = "vertical",
+    panel.grid.minor = NULL
+  )
+
+scatterplot_clonotype_counts
+saveRDS(scatterplot_clonotype_counts, file.path(RDS_dir, "scatterplot_clonotype_counts.RDS"))
+```
+
+
+```{r}
+clonotypes_BCR_persistance_histogram <- clonotypes_BCR_persistance %>%
+  dplyr::mutate(persistance = factor(persistant, levels = c("TRUE", "FALSE"))) %>%
+  group_by(plotting_id, persistance) %>%
+  dplyr::mutate(clonotype_counts = if_else(persistance == "TRUE", count_persistance, count_persistance * (-1))) %>%
+  dplyr::mutate(plotting_id = factor(plotting_id, levels = paste0("P", c(20, 23,22,19,21,16,15))),
+                persistance=factor(persistance, levels=c("FALSE", "TRUE"))) %>%
+  ggplot(aes(
+    x = plotting_id,
+    y = count_persistance,
+    fill =persistance
+  )) +
+  geom_bar(position = "stack", stat = "identity", width = 0.7) +
+  geom_text(aes(label = clonotype_counts), 
+    ## make labels left-aligned
+    vjust = -1, nudge_y = 0)+
+  scale_fill_manual(name="Persistance", values = c("FALSE" = "lightgrey", "TRUE" = "#956A77"),
+                    labels=c("FALSE"="not persistant", "TRUE"="persistant")) +
+  scale_y_continuous(expand = expansion(mult = c(0, NA)),
+                     limits = c(-500, 1700),
+                     breaks=c(-500, 0, 500, 1000, 1500),
+                     labels=c("500", "0", "500", "1000", "1500")
+                     ) +
+  scale_x_discrete(labels=patient_id2plotting_id)+
+  labs(x = "", y = "") +
+  theme_pub() +
+  theme(axis.ticks.y=element_blank(),
+    strip.text = element_text(face = "plain"),
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+clonotypes_BCR_persistance_histogram
+```
+
+
+```{r}
+clonotypes_BCR_persistance_histogram_vertical <- clonotypes_BCR_persistance %>%
+  dplyr::mutate(persistance = factor(persistant, levels = c("TRUE", "FALSE"))) %>%
+  group_by(plotting_id, persistance) %>%
+  dplyr::mutate(clonotype_counts = if_else(persistance == "TRUE", count_persistance, count_persistance * (-1))) %>%
+  dplyr::mutate(
+    plotting_id = factor(plotting_id, levels = paste0("P", c(20, 23, 22, 19, 21, 16, 15))),
+    persistance = factor(persistance, levels = rev(c("FALSE", "TRUE")))
+  ) %>%
+  ggplot(aes(x = plotting_id, y = clonotype_counts, fill = persistance)) +
+  geom_bar(position = "stack", stat = "identity", width = 0.7) +
+  geom_text(aes(label = clonotype_counts), 
+    ## make labels left-aligned
+    hjust = 1, nudge_x = 0)+
+  scale_x_discrete(labels = patient_id2plotting_id) +
+  scale_y_continuous(
+    breaks = c(-1500, -1000, -500, 0),
+    labels = c("1500", "1000", "500", "0"),
+    limits = c(-1600, 10)
+  ) +
+  scale_fill_manual(
+    name = "Persistence", values = c("FALSE" = "lightgrey", "TRUE" = "#956A77"),
+    labels = c("FALSE" = "not persistent", "TRUE" = "persistent")
+  ) +
+  labs(x = "", title = "") +
+  coord_flip() +
+  theme_pub() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(angle = 0),
+    plot.title = element_text(margin = margin(t = 8, b = -20))
+  )
+clonotypes_BCR_persistance_histogram_vertical
+#saveRDS(clonotypes_BCR_persistance_histogram, file.path(RDS_dir, "persistance_clonotypes_BCR_histogram.RDS"))
+
+write_tsv(clonotypes_BCR_persistance_histogram_vertical$data, file = file.path(tsv_dir, "BCR_clonotype_persistance_histogram_vertical.tsv"))
+```
+
+```{r}
+My_annotation_B_annotation <- gex_scaled_all_noIG@meta.data %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::select(label_cellbarcode, My_annotation, clone_annotation, orig.ident) %>%
+  dplyr::rename("label" = orig.ident) %>%
+  dplyr::mutate(My_annotation_B=if_else(clone_annotation == "minor", 
+                                        true="B", 
+                                        false=My_annotation, 
+                                        missing=My_annotation)) %>% 
+  dplyr::select(label_cellbarcode, My_annotation_B) %>%
+  deframe()
+
+gex_scaled_all_noIG <- AddMetaData(gex_scaled_all_noIG, metadata = My_annotation_B_annotation, col.name = "My_annotation_B")
+```
+
+```{r}
+b_cell_annotation_umap <- as_tibble(gex_scaled_all_noIG@reductions[["umap"]]@cell.embeddings, rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  left_join(tibble(
+    "label_cellbarcode" = colnames(gex_scaled_all_noIG),
+    "My_annotation_B" = gex_scaled_all_noIG@meta.data$My_annotation_B,
+    "label" = gex_scaled_all_noIG@meta.data$orig.ident,
+    "MBL_CLL_subtype" = gex_scaled_all_noIG@meta.data$MBL_CLL_subtype
+  ) %>% 
+    dplyr::mutate(My_annotation_LC=if_else(My_annotation_B=="MBL B Cell" & MBL_CLL_subtype=="LC", "LC_MBL_B_Cells", My_annotation_B))) %>%
+  ggplot(aes(x = UMAP_1, y = UMAP_2, colour = My_annotation_LC)) +
+  geom_point(size = 0.0001) +
+  scale_colour_manual(values=annotation_colours_named,
+    name = "Cell type") +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    aspect.ratio = 1
+  ) +
+  guides(colour = guide_legend(
+    keywidth = 0.3,
+    keyheight = 0.3,
+    override.aes = list(size = 2)
+  ))+
+  facet_wrap(~MBL_CLL_subtype)
+
+b_cell_annotation_umap
+
+saveRDS(b_cell_annotation_umap, file.path(RDS_dir, "b_cell_annotation_umap.RDS"))
+```
+
+## Major clone vs other clones for each patient 
+### Downsampled per condition and patient for progressive patients
+```{r}
+cellcounts <- gex_scaled_all_noIG@meta.data %>%
+  rownames_to_column(var = "label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  dplyr::filter(!is.na(clone_annotation) & startsWith(label, "CLL")) %>%
+  group_by(label, clone_annotation, disease) %>%
+  dplyr::summarise("cell_counts" = n()) %>%
+  split(.$disease) %>%
+  map(~ ungroup(.) %>%
+    dplyr::arrange(desc(cell_counts)) %>%
+    dplyr::mutate(label = factor(label, unique(label))) %>%
+    ggplot(aes(x = label, y = cell_counts, fill = label)) +
+    geom_bar(stat = "Identity") +
+    scale_fill_manual(values = c(my_paired_colours_named, my_unpaired_colours_named)) +
+    scale_y_continuous(expand = expansion(mult = c(0, NA))) +
+    labs(x = "Sample", y = "Cell counts") +
+    theme_pub() +
+    theme(
+      legend.position = "none",
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 0.9)
+    ))
+cellcounts
+```
+
+```{r Downsampling_sizes}
+min_clone_cells_B <- gex_scaled_all_noIG@meta.data %>%
+  rownames_to_column(var = "label_cellbarcode") %>% 
+  dplyr::filter(!is.na(clone_annotation),
+                My_annotation_B =="B",
+                !(orig.ident %in% c("CLL2.1", "CLL2.2", "CLL5.1", "CLL5.2"))
+                ) %>% 
+    dplyr::summarise("cell_counts" = n()) %>% 
+  pull(cell_counts)
+# total healthy B cell number is 20319
+
+# Determine number to downsample to for LC-MBL so each sample contributes equally
+min_clone_cells_LC_MBL <- gex_scaled_all_noIG@meta.data %>%
+  rownames_to_column(var = "label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  dplyr::filter(
+    My_annotation_B == "MBL B Cell",
+    MBL_subtype == "LC") %>%
+  group_by(label) %>%
+  dplyr::summarise("cell_counts" = n()) %>%
+  dplyr::arrange(desc(cell_counts)) 
+
+# Determine number to downsample to for HC-MBL so each sample contributes equally
+min_clone_cells_HC_MBL <- gex_scaled_all_noIG@meta.data %>%
+  rownames_to_column(var = "label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  dplyr::filter(
+    My_annotation_B == "MBL B Cell",
+    MBL_CLL_subtype == "HC",
+                !(orig.ident %in% c("CLL2.1", "CLL5.1"))) %>%
+  group_by(label) %>%
+  dplyr::summarise("cell_counts" = n()) %>%
+  dplyr::arrange(desc(cell_counts))
+
+
+# Determine number to downsample to for CLL so each sample contributes equally
+min_clone_cells_CLL <- gex_scaled_all_noIG@meta.data %>%
+  rownames_to_column(var = "label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+  dplyr::filter(
+    My_annotation_B == "CLL B Cell",
+    MBL_CLL_subtype=="CLL",
+                !(orig.ident %in% c("CLL2.2", "CLL5.2"))) %>%
+  group_by(label) %>%
+  dplyr::summarise("cell_counts" = n()) %>%
+  dplyr::arrange(desc(cell_counts)) 
+```
+
+```{r Set_identities}
+gex_scaled_B <- subset(gex_scaled_all_noIG,
+  subset = My_annotation_B == "B")
+Idents(gex_scaled_B) <- "My_annotation"
+
+
+#leave CLL6.1 out as only 65 HC MBL cells
+Idents(gex_scaled_all_noIG) <- "orig.ident"
+gex_scaled_downsampled_HC_MBL <- subset(gex_scaled_all_noIG,
+  subset = MBL_CLL_subtype == "HC" & My_annotation_B =="MBL B Cell",
+  idents= setdiff(gex_scaled_all_noIG@meta.data$orig.ident, c("CLL6.1", "CLL5.1", "CLL2.1")),
+  downsample = floor(min_clone_cells_B/15)
+)
+gex_scaled_downsampled_HC_MBL <- merge(gex_scaled_downsampled_HC_MBL, gex_scaled_B)
+gex_scaled_downsampled_HC_MBL <- SCTransform(gex_scaled_downsampled_HC_MBL)
+Idents(gex_scaled_downsampled_HC_MBL) <- "My_annotation_B"
+
+
+gex_scaled_downsampled_LC_MBL <- subset(gex_scaled_all_noIG,
+   subset = MBL_CLL_subtype == "LC" & My_annotation_B =="MBL B Cell"
+)
+#downsample healthy B cells to 14936
+gex_scaled_downsampled_LC_MBL <- merge(gex_scaled_downsampled_LC_MBL, subset(x = gex_scaled_B, downsample=14936))
+gex_scaled_downsampled_LC_MBL <- SCTransform(gex_scaled_downsampled_LC_MBL)
+Idents(gex_scaled_downsampled_LC_MBL) <- "My_annotation_B"
+
+gex_scaled_downsampled_CLL <- subset(gex_scaled_all_noIG,
+  subset = MBL_CLL_subtype == "CLL" & My_annotation_B =="CLL B Cell",
+  idents=setdiff(gex_scaled_all_noIG@meta.data$orig.ident, c("CLL2.2", "CLL5.2")),
+  downsample = floor(min_clone_cells_B/9)
+)
+gex_scaled_downsampled_CLL <- merge(gex_scaled_downsampled_CLL, gex_scaled_B)
+gex_scaled_downsampled_CLL <- SCTransform(gex_scaled_downsampled_CLL)
+Idents(gex_scaled_downsampled_CLL) <- "My_annotation_B"
+
+
+Idents(gex_scaled_all_noIG) <- "My_annotation"
+```
+
+```{r Calculate_Differential_expression_MBL}
+# currently filtered for at least avglog2FC > 2 and non IG genes
+clone_markers_downsampled_LC_MBL <- FindMarkers(gex_scaled_downsampled_LC_MBL, ident.1 = "MBL B Cell", ident.2 = "B") %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::mutate(significance = case_when(p_val_adj <= 0.05 & avg_log2FC >= 1 ~ "MBL B Cell",
+    p_val_adj <= 0.05 & avg_log2FC <= -1 ~ "B",
+    .default = "not significant"
+  )) %>%
+  dplyr::mutate(label = if_else(significance != "not significant" & !str_starts(gene, "IGH") & !str_starts(gene, "IGL") & !str_starts(gene, "IGK") & abs(avg_log2FC) >= 1, gene, NA))
+
+clone_markers_downsampled_LC_MBL_lr <- FindMarkers(gex_scaled_downsampled_LC_MBL, ident.1 = "MBL B Cell", ident.2 = "B", test.use = "LR") %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::mutate(significance = case_when(p_val_adj <= 0.05 & avg_log2FC >= 1 ~ "MBL B Cell",
+    p_val_adj <= 0.05 & avg_log2FC <= -1 ~ "B",
+    .default = "not significant"
+  )) %>%
+  dplyr::mutate(label = if_else(significance != "not significant" & !str_starts(gene, "IGH") & !str_starts(gene, "IGL") & !str_starts(gene, "IGK") & abs(avg_log2FC) >= 1, gene, NA))
+
+clone_markers_downsampled_HC_MBL <- FindMarkers(gex_scaled_downsampled_HC_MBL, ident.1 = "MBL B Cell", ident.2 = "B", ) %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::mutate(significance = case_when(p_val_adj <= 0.05 & avg_log2FC >= 1 ~ "MBL B Cell",
+    p_val_adj <= 0.05 & avg_log2FC <= -1 ~ "B",
+    .default = "not significant"
+  )) %>%
+  dplyr::mutate(label = if_else(significance != "not significant" & !str_starts(gene, "IGH") & !str_starts(gene, "IGL") & !str_starts(gene, "IGK") & abs(avg_log2FC) >= 1, gene, NA))
+
+clone_markers_downsampled_HC_MBL_lr <- FindMarkers(gex_scaled_downsampled_HC_MBL, ident.1 = "MBL B Cell", ident.2 = "B", test.use = "LR") %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::mutate(significance = case_when(p_val_adj <= 0.05  & avg_log2FC >= 1 ~ "MBL B Cell",
+    p_val_adj <= 0.05 & avg_log2FC <= -1 ~ "B",
+    .default = "not significant"
+  )) %>%
+  dplyr::mutate(label = if_else(significance != "not significant" & !str_starts(gene, "IGH") & !str_starts(gene, "IGL") & !str_starts(gene, "IGK")  & abs(avg_log2FC) >= 1, gene, NA))
+```
+
+```{r Calculate_Differential_expression_CLL}
+clone_markers_downsampled_CLL <- FindMarkers(gex_scaled_downsampled_CLL, ident.1 = "CLL B Cell", ident.2 = "B") %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::mutate(significance = case_when(p_val_adj <= 0.05 & avg_log2FC >= 1 ~ "CLL B Cell",
+    p_val_adj <= 0.05 & avg_log2FC <= -1 ~ "B",
+    .default = "not significant"
+  )) %>%
+  dplyr::mutate(label = if_else(significance != "not significant" & !str_starts(gene, "IGH") & !str_starts(gene, "IGL") & !str_starts(gene, "IGK") &  abs(avg_log2FC) >= 1, gene, NA))
+
+clone_markers_downsampled_CLL_lr <- FindMarkers(gex_scaled_downsampled_CLL,  ident.1 = "CLL B Cell", ident.2 = "B", test.use = "LR") %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::mutate(significance = case_when(p_val_adj <= 0.05 & avg_log2FC >= 1 ~ "CLL B Cell",
+    p_val_adj <= 0.05 & avg_log2FC <= -1 ~ "B",
+    .default = "not significant"
+  )) %>%
+  dplyr::mutate(label = if_else(significance != "not significant" & !str_starts(gene, "IGH") & !str_starts(gene, "IGL") & !str_starts(gene, "IGK") &  abs(avg_log2FC) >= 1, gene, NA))
+```
+
+```{r Plot_Differential_expression_MBL, fig.height=10, fig.width=10}
+volcanoplot_LC_MBL_clones_downsampled <- clone_markers_downsampled_LC_MBL %>%
+  ggplot(aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+  geom_point(size=1) +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.color = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 150, colour = "black"
+  ) +
+  scale_x_continuous("log2(Fold change)", 
+                     limits = c(-5, 5),
+                     breaks=c(-4, -2, 0, 2, 4)) +
+  scale_y_continuous("-log10(FDR)", 
+                     limits = c(0, 300), 
+                     oob = scales::squish_infinite, 
+                     expand = expansion(mult = c(0, 0.1))) +
+  scale_colour_manual(
+    name = "DEG", values = c("B" = "darkred", "MBL B Cell" = "#fcbda4", "not significant" = "lightgrey"),
+    labels = c("B" = "Physiologic B cells", "MBL B Cell" = "LC-MBL Cells")
+  ) +
+  theme_pub() +
+  theme(legend.position = "bottom") +
+  labs(title = "LC-MBL\nWilcoxon rank sum")
+
+volcanoplot_LC_MBL_clones_downsampled_lr <- clone_markers_downsampled_LC_MBL_lr %>%
+  ggplot(aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+  geom_point() +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 150, colour = "black"
+  ) +
+  scale_x_continuous("log2(Fold change)", 
+                     limits = c(-5, 5),
+                     breaks=c(-4, -2, 0, 2, 4)) +
+  scale_y_continuous("-log10(FDR)", 
+                     limits = c(0, 300), 
+                     oob = scales::squish_infinite, 
+                     expand = expansion(mult = c(0, 0.1))) +
+  scale_colour_manual(
+    name = "DEG", values = c("B" = "darkred", "MBL B Cell" = "#fcbda4", "not significant" = "lightgrey"),
+    labels = c("B" = "Physiologic B Cell", "MBL B Cell" = "LC-MBL Cells")
+  ) +
+  theme_pub() +
+  theme(legend.position = "bottom") +
+  labs(title = "LC-MBL\nLogistic regression")
+
+volcanoplot_HC_MBL_clones_downsampled <- clone_markers_downsampled_HC_MBL %>%
+  ggplot(aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+  geom_point(size=1) +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.color = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 150, colour = "black"
+  ) +
+  scale_x_continuous("log2(Fold change)", 
+                     limits = c(-5, 5),
+                     breaks=c(-4, -2, 0, 2, 4)) +
+  scale_y_continuous("-log10(FDR)", 
+                     limits = c(0, 300), 
+                     oob = scales::squish_infinite, 
+                     expand = expansion(mult = c(0, 0.1))) +
+  scale_colour_manual(
+    name = "DEG", values = c("B" = "darkred", "MBL B Cell" = "#FC8D62", "not significant" = "lightgrey"),
+    labels = c("B" = "Physiologic B cells", "MBL B Cell" = "HC-MBL Cells")
+  ) +
+  theme_pub() +
+  theme(legend.position = "bottom") +
+  labs(title = "HC-MBL\nWilcoxon rank sum")
+
+volcanoplot_HC_MBL_clones_downsampled_lr <- clone_markers_downsampled_HC_MBL_lr %>%
+  ggplot(aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+  geom_point() +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 150, colour = "black"
+  ) +
+  scale_x_continuous("log2(Fold change)", 
+                     limits = c(-5, 5),
+                     breaks=c(-4, -2, 0, 2, 4)) +
+  scale_y_continuous("-log10(FDR)", 
+                     limits = c(0, 300), 
+                     oob = scales::squish_infinite, 
+                     expand = expansion(mult = c(0, 0.1))) +
+  scale_colour_manual(
+    name = "DEG", values = c("B" = "darkred", "MBL B Cell" = "#FC8D62", "not significant" = "lightgrey"),
+    labels = c("B" = "Physiologic B Cells", "MBL B Cell" = "HC-MBL Cells")
+  ) +
+  theme_pub() +
+  theme(legend.position = "bottom") +
+  labs(title = "HC-MBL\nLogistic regression")
+```
+
+```{r Plot_Differential_expression_CLL, fig.height=5, fig.width=5}
+volcanoplot_CLL_clones_downsampled <- clone_markers_downsampled_CLL %>%
+  ggplot(aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+  geom_point(size=1) +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 150, colour = "black"
+  ) +
+  scale_x_continuous("log2(Fold change)", 
+                     limits = c(-5, 5),
+                     breaks=c(-4, -2, 0, 2, 4)) +
+  scale_y_continuous("-log10(FDR)", 
+                     limits = c(0, 300), 
+                     oob = scales::squish_infinite, 
+                     expand = expansion(mult = c(0, 0.1))) +
+  scale_colour_manual(
+    name = "DEG", values = c("B" = "darkred", "CLL B Cell" = "#66C2A5", "not significant" = "lightgrey"),
+    labels = c("B" = "Physiologic B", "CLL B Cell" = "CLL Cells")
+  ) +
+  theme_pub() +
+  theme(legend.position = "bottom") +
+  labs(title = "CLL\nWilcoxon rank sum")
+
+volcanoplot_CLL_clones_downsampled_lr <- clone_markers_downsampled_CLL_lr %>%
+  ggplot(aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+  geom_point() +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 150,
+    colour = "black"
+  ) +
+  scale_x_continuous("log2(Fold change)", 
+                     limits = c(-5, 5)) +
+  scale_y_continuous("-log10(FDR)", 
+                     limits = c(0, 300), 
+                     oob = scales::squish_infinite, 
+                     expand = expansion(mult = c(0, 0.1))) +
+  scale_colour_manual(
+    name = "DEG", values = c("B" = "darkred", "CLL B Cell" = "#66C2A5", "not significant" = "lightgrey"),
+    labels = c("B" = "Physiologic B", "CLL B Cell" = "CLL Cells")
+  ) +
+  theme_pub() +
+  theme(legend.position = "bottom") +
+  labs(title = "CLL\nLogistic regression")
+```
+
+```{r Plot_Differential_expression_all, fig.height=10, fig.width=15}
+ggarrange(volcanoplot_LC_MBL_clones_downsampled, volcanoplot_LC_MBL_clones_downsampled_lr,
+          volcanoplot_HC_MBL_clones_downsampled, volcanoplot_HC_MBL_clones_downsampled_lr,
+  volcanoplot_CLL_clones_downsampled, volcanoplot_CLL_clones_downsampled_lr,
+  nrow = 3,
+  ncol = 2,
+  labels = "AUTO",
+  common.legend = TRUE,
+  legend = "bottom"
+)
+```
+
+```{r fig.width=12, fig.height=4}
+ggarrange(volcanoplot_LC_MBL_clones_downsampled, volcanoplot_HC_MBL_clones_downsampled,
+  volcanoplot_CLL_clones_downsampled,
+  nrow = 1,
+  ncol = 3,
+  labels = "AUTO",
+  common.legend = TRUE,
+  legend = "bottom"
+)
+```
+
+
+```{r}
+# LC MBL vs B
+saveRDS(volcanoplot_LC_MBL_clones_downsampled, file.path(RDS_dir, "volcanoplot_LC_MBL_clones_downsampled.RDS"))
+
+#HC-MBL samples vs B
+saveRDS(volcanoplot_HC_MBL_clones_downsampled, file.path(RDS_dir, "volcanoplot_HC_MBL_clones_downsampled"))
+
+# CLL samples vs B
+saveRDS(volcanoplot_CLL_clones_downsampled, file.path(RDS_dir, "volcanoplot_CLL_clones_downsampled.RDS"))
+```
+
+#Per patient individual analysis
+## Per paired sample patient
+## Wilcoxon Rank Sum approach
+```{r Subset_Seurat_per_patient}
+clone_markers_patients_MBL <- list()
+clone_markers_patients_CLL <- list()
+for (patient in paste0("CLL", c(1, 3, 4, 7, 8, 9, 10))) {
+  print(patient)
+  plotting_id <- metadata %>%
+    dplyr::select(patient_id, plotting_id) %>%
+    dplyr::filter(patient_id == patient) %>%
+    pull(plotting_id) %>%
+    unique()
+  # calculate smallest cell number between major and minor clones
+  min_clone_cells_MBL_pat <- subset(gex_scaled_all_noIG, subset = patient_id == patient & disease == "MBL" & !is.na(clone_annotation) & progression == "TRUE") %>%
+    .@meta.data %>%
+    group_by(clone_annotation) %>%
+    dplyr::summarise("cell_counts" = n()) %>%
+    dplyr::arrange(desc(cell_counts)) %>%
+    pull(cell_counts) %>%
+    min()
+
+  print(min_clone_cells_MBL_pat)
+
+  min_clone_cells_CLL_pat <- subset(gex_scaled_all_noIG, subset = patient_id == patient & disease == "CLL" & !is.na(clone_annotation) & progression == "TRUE") %>%
+    .@meta.data %>%
+    group_by(clone_annotation) %>%
+    dplyr::summarise("cell_counts" = n()) %>%
+    dplyr::arrange(desc(cell_counts)) %>%
+    pull(cell_counts) %>%
+    min()
+
+  print(min_clone_cells_CLL_pat)
+
+  # subset and downsample data for patient, disease and clones
+  Idents(gex_scaled_all_noIG) <- "clone_annotation"
+  gex_scaled_patient_MBL <- subset(gex_scaled_all_noIG, subset = patient_id == patient & disease == "MBL" & !is.na(clone_annotation) & progression == "TRUE", downsample = min_clone_cells_MBL_pat)
+  gex_scaled_patient_CLL <- subset(gex_scaled_all_noIG, subset = patient_id == patient & disease == "CLL" & !is.na(clone_annotation) & progression == "TRUE", downsample = min_clone_cells_CLL_pat, )
+  Idents(gex_scaled_all_noIG) <- "My_annotation"
+
+  # calculate markers
+  Idents(gex_scaled_patient_MBL) <- "clone_annotation"
+  clone_markers_patient_MBL <- FindMarkers(gex_scaled_patient_MBL, ident.1 = "major", ident.2 = "minor") %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::mutate(significance = case_when(p_val_adj <= 0.05 & avg_log2FC >= 1 ~ "major",
+      p_val_adj <= 0.05 & avg_log2FC <= -1 ~ "minor",
+      .default = "not significant"
+    )) %>%
+    dplyr::mutate(label = if_else(significance != "not significant" & !str_starts(gene, "IG") & abs(avg_log2FC) >= 1, gene, NA))
+
+  Idents(gex_scaled_patient_CLL) <- "clone_annotation"
+  clone_markers_patient_CLL <- FindMarkers(gex_scaled_patient_CLL, ident.1 = "major", ident.2 = "minor") %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::mutate(significance = case_when(p_val_adj <= 0.05 & avg_log2FC >= 1 ~ "major",
+      p_val_adj <= 0.05 & avg_log2FC <= -1 ~ "minor",
+      .default = "not significant"
+    )) %>%
+    dplyr::mutate(label = if_else(significance != "not significant" & !str_starts(gene, "IG") & abs(avg_log2FC) >= 1, gene, NA))
+
+  clone_markers_patients_MBL[[plotting_id]] <- clone_markers_patient_MBL
+  clone_markers_patients_CLL[[plotting_id]] <- clone_markers_patient_CLL
+}
+```
+
+```{r}
+volcanoplots_patients_clones_MBL <- clone_markers_patients_MBL[-3] %>%
+  imap(~
+    ggplot(., aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+      geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+      geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+      geom_point() +
+      ggrepel::geom_label_repel(
+        size = 2.5,
+        label.size = NA,
+        label.padding = 0.1,
+        segment.size = 0.25,
+        segment.colour = "grey",
+        min.segment.length = 0.1,
+        max.overlaps = 150,
+        colour = "black"
+      ) +
+      scale_x_continuous("Log2(Fold change)", limits = c(-13, 13)) +
+      scale_y_continuous("-log10(FDR)", oob = scales::squish_infinite, expand = expansion(mult = c(0, NA)), limits = c(NA, 200)) +
+      scale_colour_manual(
+        name = "DEG",
+        values = c("minor" = "darkred", "major" = "#483D8B", "not significant" = "lightgrey"),
+        labels = c("minor" = "Minor clone", "major" = "Major clone", "not significant" = "not significant")
+      ) +
+      theme_pub() +
+      labs(title = .y) +
+      theme(legend.position = "bottom"))
+
+volcanoplots_patients_clones_CLL <- clone_markers_patients_CLL[-c(3, 4, 6)] %>%
+  imap(~
+    ggplot(., aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+      geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+      geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+      geom_point() +
+      ggrepel::geom_label_repel(
+        size = 2.5,
+        label.size = NA,
+        label.padding = 0.1,
+        segment.size = 0.25,
+        segment.colour = "grey",
+        min.segment.length = 0.1,
+        max.overlaps = 150,
+        colour = "black"
+      ) +
+      scale_x_continuous("Log2(Fold change)", limits = c(-13, 13)) +
+      scale_y_continuous("-log10(FDR)", oob = scales::squish_infinite, expand = expansion(mult = c(0, NA)), limits = c(NA, 200)) +
+      scale_colour_manual(
+        name = "DEG",
+        values = c("minor" = "darkred", "major" = "#483D8B", "not significant" = "lightgrey"),
+        labels = c("minor" = "Minor clone", "major" = "Major clone", "not significant" = "not significant")
+      ) +
+      theme_pub() +
+      labs(title = .y) +
+      theme(legend.position = "bottom"))
+```
+
+```{r fig.width=15, fig.height=10}
+volcanoplots_patients_clones_MBL[paste0("P", c(15:16, 19, 21:23))] %>%
+  ggarrange(
+    plotlist = .,
+    ncol = 3,
+    nrow = 5,
+    common.legend = TRUE,
+    legend = "bottom"
+  )
+
+volcanoplots_patients_clones_CLL[paste0("P", c(15, 19, 21, 23))] %>%
+  ggarrange(
+    plotlist = .,
+    ncol = 3,
+    nrow = 5,
+    common.legend = TRUE,
+    legend = "bottom"
+  )
+```
+
+
+```{r, fig.width=10, fig.height=5}
+volcanoplots_patients_clones_MBL_summary <- clone_markers_patients_MBL[-3] %>%
+  imap(~ mutate(.x, label = if_else(significance %in% c("major", "minor") & !str_starts(gene, "IG"), paste0(gene, "_", .y), NA))) %>%
+  bind_rows() %>%
+  ggplot(aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+  geom_point() +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 150,
+    colour = "black"
+  ) +
+  scale_x_continuous("Log2(Fold change)", limits = c(-6, 6)) +
+  scale_y_continuous("-log10(FDR)", oob = scales::squish_infinite, expand = expansion(mult = c(0, NA)), limits = c(NA, 160)) +
+  scale_colour_manual(
+    name = "DEG",
+    values = c("minor" = "darkred", "major" = "#483D8B", "not significant" = "lightgrey"),
+    labels = c("minor" = "Minor clone", "major" = "Major clone", "not significant" = "not significant")
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ) +
+  labs(title = "MBL\nAll DEGs across patients")
+
+
+volcanoplots_patients_clones_CLL_summary <- clone_markers_patients_CLL[-c(3, 4, 6)] %>%
+  imap(~ mutate(.x, label = if_else(significance %in% c("major", "minor") & !str_starts(gene, "IG"), paste0(gene, "_", .y), NA))) %>%
+  bind_rows() %>%
+  ggplot(aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+  geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+  geom_point() +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 150,
+    colour = "black"
+  ) +
+  scale_x_continuous("Log2(Fold change)", limits = c(-6, 6)) +
+  scale_y_continuous("-log10(FDR)", oob = scales::squish_infinite, expand = expansion(mult = c(0, NA)), limits = c(NA, 160)) +
+  scale_colour_manual(
+    name = "DEG",
+    values = c("minor" = "darkred", "major" = "#483D8B", "not significant" = "lightgrey"),
+    labels = c("minor" = "Minor clone", "major" = "Major clone", "not significant" = "not significant")
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ) +
+  labs(title = "CLL\nAll DEGs across patients")
+
+
+ggarrange(volcanoplots_patients_clones_MBL_summary,
+  volcanoplots_patients_clones_CLL_summary,
+  label = "AUTO",
+  nrow = 1,
+  ncol = 2,
+  common.legend = TRUE,
+  legend = "bottom"
+)
+
+saveRDS(volcanoplots_patients_clones_MBL_summary, file.path(RDS_dir, "volcanoplots_patients_clones_MBL_summary.RDS"))
+
+saveRDS(volcanoplots_patients_clones_CLL_summary, file.path(RDS_dir, "volcanoplots_patients_clones_CLL_summary.RDS"))
+```
+
+##### Quantify DEGs
+```{r}
+# How many DEGs did we find in total over all patients?
+total_degs_MBL <- clone_markers_patients_MBL[-3] %>%
+  map(~ filter(., significance %in% c("major", "minor")) %>%
+    # group_by(significance) %>%
+    dplyr::summarise("DEGs" = n())) %>%
+  bind_rows() %>%
+  dplyr::summarise("Total DEG counts" = sum(DEGs)) %>%
+  dplyr::mutate(Fraction = 100) %>%
+  ggplot(aes(x = "", y = Fraction, fill = `Total DEG counts`)) +
+  geom_bar(stat = "identity", width = 1, fill = "#082567") +
+  coord_polar("y", start = 0) +
+  geom_text(aes(y = 0.0, label = clone_markers_patients_MBL %>%
+    map(~ filter(., significance %in% c("major", "minor")) %>%
+      dplyr::summarise("DEGs" = n())) %>%
+    bind_rows() %>%
+    summarise("Total DEG counts" = sum(DEGs)) %>% pull("Total DEG counts")), color = "white", size = 6) +
+  theme_void() +
+  labs(title = "Total MBL DEG counts\nacross patients") +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 12,
+      face = "bold"
+    ),
+    legend.position = "none"
+  )
+
+total_degs_CLL <- clone_markers_patients_CLL[-c(3, 4, 6)] %>%
+  map(~ filter(., significance %in% c("major", "minor")) %>%
+    # group_by(significance) %>%
+    dplyr::summarise("DEGs" = n())) %>%
+  bind_rows() %>%
+  dplyr::summarise("Total DEG counts" = sum(DEGs)) %>%
+  dplyr::mutate(Fraction = 100) %>%
+  ggplot(aes(x = "", y = Fraction, fill = `Total DEG counts`)) +
+  geom_bar(stat = "identity", width = 1, fill = "#082567") +
+  coord_polar("y", start = 0) +
+  geom_text(aes(y = 0.0, label = clone_markers_patients_CLL %>%
+    map(~ filter(., significance %in% c("major", "minor")) %>%
+      dplyr::summarise("DEGs" = n())) %>%
+    bind_rows() %>%
+    summarise("Total DEG counts" = sum(DEGs)) %>% pull("Total DEG counts")), color = "white", size = 6) +
+  theme_void() +
+  labs(title = "Total CLL DEG counts\nacross patients") +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 12,
+      face = "bold"
+    ),
+    legend.position = "none"
+  )
+
+ggarrange(total_degs_MBL, total_degs_CLL, nrow = 1, ncol = 2, label = "AUTO")
+```
+
+```{r}
+# How many DEGs did each sample display?
+degs_per_patient_MBL <- clone_markers_patients_MBL[-3] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::summarise("DEGs" = n()) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id)) %>%
+  mutate(patient_id = forcats::fct_reorder(patient_id, dplyr::desc(DEGs))) %>%
+  ggplot(aes(x = patient_id, y = DEGs, fill = patient_id)) +
+  geom_bar(stat = "Identity") +
+  scale_fill_manual(values = c(my_paired_colours_named, my_unpaired_colours_named)) +
+  scale_x_discrete(labels = patient_id2plotting_id) +
+  scale_y_continuous(expand = expansion(mult = c(0, NA)), limits = c(NA, 30)) +
+  labs(x = "", y = "DEG counts", title = "MBL") +
+  theme_pub() +
+  theme(
+    legend.position = "none"
+  )
+
+degs_per_patient_CLL <- clone_markers_patients_CLL[-c(3, 4, 6)] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::summarise("DEGs" = n()) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id)) %>%
+  mutate(patient_id = fct_reorder(patient_id, dplyr::desc(DEGs))) %>%
+  ggplot(aes(x = patient_id, y = DEGs, fill = patient_id)) +
+  geom_bar(stat = "Identity") +
+  scale_fill_manual(values = c(my_paired_colours_named, my_unpaired_colours_named)) +
+  scale_x_discrete(labels = patient_id2plotting_id) +
+  scale_y_continuous(expand = expansion(mult = c(0, NA)), limits = c(NA, 30)) +
+  labs(x = "", y = "DEG counts", title = "CLL") +
+  theme_pub() +
+  theme(
+    legend.position = "none"
+  )
+
+ggarrange(degs_per_patient_MBL,
+  degs_per_patient_CLL,
+  nrow = 1,
+  ncol = 2,
+  label = "AUTO"
+)
+
+saveRDS(degs_per_patient_MBL, file.path(RDS_dir, "degs_per_patient_MBL_VDJ.RDS"))
+saveRDS(degs_per_patient_CLL, file.path(RDS_dir, "degs_per_patient_CLL_VDJ.RDS"))
+```
+
+```{r}
+# How many genes are uniquely expressed and how many genes are differentially expressed in multiple patients but do follow the same "direction"?
+shared_DEG_counts_MBL <- clone_markers_patients_MBL[-3] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::mutate(avg_log2FC_dir = if_else(avg_log2FC >= 0, "positive", "negative")) %>%
+  group_by(gene, avg_log2FC_dir) %>%
+  dplyr::summarise(DEG_in_patients = n()) %>%
+  group_by(avg_log2FC_dir, DEG_in_patients) %>%
+  dplyr::summarise(DEG_counts_mult_patients = n()) %>%
+  ungroup() %>%
+  group_by(DEG_in_patients) %>%
+  dplyr::summarise(DEG_counts_mult_patients_dir = sum(DEG_counts_mult_patients)) %>%
+  ggplot(aes(x = DEG_in_patients, y = DEG_counts_mult_patients_dir, fill = DEG_counts_mult_patients_dir)) +
+  geom_bar(stat = "Identity", fill = "#082567") +
+  scale_y_continuous(expand = expansion(mult = c(0, NA)), limits = c(NA, 40)) +
+  labs(x = "Patient counts", y = "DEG counts", title = "MBL") +
+  theme_pub() +
+  theme(legend.position = "right")
+
+shared_DEG_counts_CLL <- clone_markers_patients_CLL[-c(3, 4, 6)] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::mutate(avg_log2FC_dir = if_else(avg_log2FC >= 0, "positive", "negative")) %>%
+  group_by(gene, avg_log2FC_dir) %>%
+  dplyr::summarise(DEG_in_patients = n()) %>%
+  group_by(avg_log2FC_dir, DEG_in_patients) %>%
+  dplyr::summarise(DEG_counts_mult_patients = n()) %>%
+  ungroup() %>%
+  group_by(DEG_in_patients) %>%
+  dplyr::summarise(DEG_counts_mult_patients_dir = sum(DEG_counts_mult_patients)) %>%
+  ggplot(aes(x = DEG_in_patients, y = DEG_counts_mult_patients_dir, fill = DEG_counts_mult_patients_dir)) +
+  geom_bar(stat = "Identity", fill = "#082567") +
+  scale_y_continuous(expand = expansion(mult = c(0, NA)), limits = c(NA, 40)) +
+  labs(x = "Patient counts", y = "DEG counts", title = "CLL") +
+  theme_pub() +
+  theme(legend.position = "right")
+
+ggarrange(shared_DEG_counts_MBL, shared_DEG_counts_CLL,
+  nrow = 1, ncol = 2, label = "AUTO"
+)
+
+saveRDS(shared_DEG_counts_MBL, file.path(RDS_dir, "shared_DEG_counts_MBL_VDJ.RDS"))
+saveRDS(shared_DEG_counts_CLL, file.path(RDS_dir, "shared_DEG_counts_CLL_VDJ.RDS"))
+```
+
+```{r}
+common_DEGS_direction_independent_MBL <- clone_markers_patients_MBL[-3] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::mutate(avg_log2FC_dir = if_else(avg_log2FC >= 0, "positive", "negative")) %>%
+  group_by(gene) %>%
+  dplyr::summarise(DEG_in_patients = n()) %>%
+  dplyr::filter(DEG_in_patients > 2)
+common_DEGS_direction_independent_MBL
+
+print(paste0(dim(common_DEGS_direction_independent_MBL)[1], " genes are differentially expressed in >= 3 patients in MBL, without matching effect direction"))
+
+common_DEGS_direction_independent_CLL <- clone_markers_patients_CLL[-c(3, 4, 6)] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::mutate(avg_log2FC_dir = if_else(avg_log2FC >= 0, "positive", "negative")) %>%
+  group_by(gene) %>%
+  dplyr::summarise(DEG_in_patients = n()) %>%
+  dplyr::filter(DEG_in_patients > 2)
+common_DEGS_direction_independent_CLL
+
+print(paste0(dim(common_DEGS_direction_independent_CLL)[1], " genes are differentially expressed in >= 3 patients in CLL, without matching effect direction"))
+
+# Which are the genes which are differentially expressed by 3-5 patients with same direction?
+common_DEGs_MBL <- clone_markers_patients_MBL[-3] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::mutate(avg_log2FC_dir = if_else(avg_log2FC >= 0, "positive", "negative")) %>%
+  group_by(gene, avg_log2FC_dir) %>%
+  dplyr::summarise(DEG_in_patients = n()) %>%
+  dplyr::filter(DEG_in_patients > 2) %>%
+  arrange(desc(DEG_in_patients))
+common_DEGs_MBL
+
+common_DEGs_CLL <- clone_markers_patients_CLL[-c(3, 4, 6)] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::mutate(avg_log2FC_dir = if_else(avg_log2FC >= 0, "positive", "negative")) %>%
+  group_by(gene, avg_log2FC_dir) %>%
+  dplyr::summarise(DEG_in_patients = n()) %>%
+  dplyr::filter(DEG_in_patients > 2) %>%
+  arrange(desc(DEG_in_patients))
+common_DEGs_CLL
+
+# Which of the patients are the ones expressing the DEGs
+common_DEGs_patients_MBL <- clone_markers_patients_MBL[-3] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::mutate(avg_log2FC_dir = if_else(avg_log2FC >= 0, "positive", "negative")) %>%
+  semi_join(common_DEGs_MBL[, 1:2]) %>%
+  split(.$gene)
+common_DEGs_patients_MBL
+
+common_DEGs_patients_CLL <- clone_markers_patients_CLL[-c(3, 4, 6)] %>%
+  imap(~ dplyr::filter(.x, significance %in% c("major", "minor")) %>%
+    dplyr::mutate(plotting_id = .y)) %>%
+  bind_rows() %>%
+  dplyr::left_join(metadata %>% dplyr::select(patient_id, plotting_id) %>% unique()) %>%
+  dplyr::mutate(avg_log2FC_dir = if_else(avg_log2FC >= 0, "positive", "negative")) %>%
+  semi_join(common_DEGs_CLL[, 1:2]) %>%
+  split(.$gene)
+common_DEGs_patients_CLL
+```
+
+```{r}
+# all_gene_plots_CLL <- list()
+# for (g in  common_DEGs_patients_CLL){
+#   gene <- g$gene %>% unique()
+#   patients <- g %>% pull(patient_id)
+#   print(gene)
+#   ex_values <-FetchData(object = subset(gex_scaled,
+#                                         subset = patient_id %in% patients & My_annotation %in% c("MBL B Cell", "CLL B Cell")),
+#                         vars = gene) %>% dplyr::rename("expression"=1)
+#   gene_plot <- ex_values %>%
+#     rownames_to_column("label_cellbarcode") %>%
+#     separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_") %>%
+#     separate(label, c("patient_id", "sample"), sep = "\\.") %>%
+#     dplyr::mutate(disease = if_else(`sample` == 1, "MBL", "CLL"),
+#                   patient_id=factor(patient_id, levels=c(paste0("CLL", 1:10)))) %>%
+#     dplyr::mutate(disease = factor(disease, levels = c("MBL", "CLL"))) %>%
+#     group_by(disease) %>%
+#     ggplot(aes(x = patient_id, y = expression)) +
+#     geom_violin(aes(fill = disease), trim = FALSE, position = position_dodge(0.9)) +
+#     geom_boxplot(aes(fill = disease), width = 0.05, position = position_dodge(0.9)) +
+#     scale_y_continuous(expand = expansion(mult = c(0, NA))) +
+#     scale_fill_manual(name = "Condition", values = my_MBL_CLL_colours_named) +
+#     labs(x = "", fill = "Condition", y = "Expression", title = gene) +
+#     theme_pub() +
+#     theme(legend.position = "bottom")
+#   all_gene_plots[[gene]] <- gene_plot
+# }
+```
+
+## Per individual sample patient
+## Wilcoxon Rank Sum approach
+```{r Subset_Seurat_per_patient}
+clone_markers_ind_patients_MBL <- list()
+for (patient in paste0("MBL", c(1:4, 6:15, "7dup"))) {
+  print(patient)
+  plotting_id <- metadata %>%
+    dplyr::select(patient_id, plotting_id) %>%
+    dplyr::filter(patient_id == patient) %>%
+    pull(plotting_id) %>%
+    unique()
+
+  # calculate smallest cell number between major and minor clones
+  min_clone_cells_ind_MBL_pat <- subset(gex_scaled_all_noIG, subset = patient_id == patient & !is.na(clone_annotation)) %>%
+    .@meta.data %>%
+    group_by(clone_annotation) %>%
+    dplyr::summarise("cell_counts" = n()) %>%
+    dplyr::arrange(desc(cell_counts)) %>%
+    pull(cell_counts) %>%
+    min()
+
+  print(min_clone_cells_ind_MBL_pat)
+
+  # subset and downsample data for patient, disease and clones
+  Idents(gex_scaled_all_noIG) <- "clone_annotation"
+  gex_scaled_patient_ind_MBL <- subset(gex_scaled_all_noIG, subset = patient_id == patient & !is.na(clone_annotation), downsample = min_clone_cells_ind_MBL_pat)
+  Idents(gex_scaled_all_noIG) <- "My_annotation"
+
+  # calculate markers
+  Idents(gex_scaled_patient_ind_MBL) <- "clone_annotation"
+  clone_markers_patient_ind_MBL <- FindMarkers(gex_scaled_patient_ind_MBL, ident.1 = "major", ident.2 = "minor") %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::mutate(significance = case_when(p_val_adj <= 0.05 & avg_log2FC >= 1 ~ "major",
+      p_val_adj <= 0.05 & avg_log2FC <= -1 ~ "minor",
+      .default = "not significant"
+    )) %>%
+    dplyr::mutate(label = if_else(significance != "not significant" & !str_starts(gene, "IG") & abs(avg_log2FC) >= 1, gene, NA))
+
+  clone_markers_ind_patients_MBL[[plotting_id]] <- clone_markers_patient_ind_MBL
+}
+```
+
+```{r}
+volcanoplots_patients_clones_ind_MBL <- clone_markers_ind_patients_MBL %>%
+  imap(~
+    ggplot(., aes(x = avg_log2FC, y = -log10(p_val_adj), colour = significance, label = label)) +
+      geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+      geom_hline(yintercept = c(-log10(0.05)), color = "grey", linetype = "dashed") +
+      geom_point() +
+      ggrepel::geom_label_repel(
+        size = 2.5,
+        label.size = NA,
+        label.padding = 0.1,
+        segment.size = 0.25,
+        segment.colour = "grey",
+        min.segment.length = 0.1,
+        max.overlaps = 150,
+        colour = "black"
+      ) +
+      scale_x_continuous("Log2(Fold change)", limits = c(-13, 13)) +
+      scale_y_continuous("-log10(FDR)", oob = scales::squish_infinite, expand = expansion(mult = c(0, NA)), limits = c(NA, 200)) +
+      scale_colour_manual(
+        name = "DEG",
+        values = c("minor" = "darkred", "major" = "#483D8B", "not significant" = "lightgrey"),
+        labels = c("minor" = "Minor clone", "major" = "Major clone", "not significant" = "not significant")
+      ) +
+      theme_pub() +
+      labs(title = .y) +
+      theme(legend.position = "bottom"))
+```
+
+```{r fig.width=15, fig.height=10}
+volcanoplots_patients_clones_ind_MBL[paste0("P", c(1:13, "7dup", 24))] %>%
+  ggarrange(
+    plotlist = .,
+    ncol = 3,
+    nrow = 5,
+    common.legend = TRUE,
+    legend = "bottom"
+  )
+```
+
+
+
+```{r fig.width=20, fig.height=7}
+features <- bind_rows(clone_markers_downsampled_LC_MBL,
+  clone_markers_downsampled_HC_MBL,
+  clone_markers_downsampled_CLL,
+  .id = "comparison"
+) %>%
+  dplyr::mutate(
+    comparison = case_when(
+      comparison == "1" ~ "B_vs_LC-MBL",
+      comparison == "2" ~ "B_vs_HC-MBL",
+      comparison == "3" ~ "B_vs_CLL",
+      .default = comparison
+    ),
+    comparison = factor(comparison, levels = c(
+      "B_vs_LC-MBL",
+      "B_vs_HC-MBL",
+      "B_vs_CLL"
+    ))
+  ) %>%
+  dplyr::filter(!is.na(label)) %>%
+  arrange(comparison) %>%
+  dplyr::pull(label) %>%
+  unique()
+
+  
+features_ordered <- c("AL589693.1", "MTRNR2L8", "CDK14", "ARHGAP24", "KLF2","FOS", "FOSB", "NR4A1", "BANK1", "CD83", "CD69", "MYADM",   "EGR1",    "IER2")
+
+#make orig.ident factor to order and then assign colours again like below
+Idents(gex_scaled_all_noIG) <- "orig.ident" 
+
+levels(Idents(gex_scaled_all_noIG)) <- c("MBL13", "MBL12", "MBL11", "MBL15", "MBL14", "MBL10", "MBL6", "MBL1", "MBL7", "MBL7dup", "MBL3", "MBL8", "MBL2", "MBL9", "CLL6.1", "CLL1.1", "CLL7.1", "CLL2.1", "CLL5.1", "CLL8.1", "CLL4.1", "CLL10.1", "CLL9.1", "CLL3.1", "CLL6.2", "CLL1.2", "CLL7.2", "CLL2.2", "CLL5.2", "CLL8.2", "CLL4.2", "CLL10.2", "CLL9.2", "CLL3.2", "MBL4")
+```
+
+## Downsampled ordered
+```{r Patient_ordered_DEG_heatmap, fig.width=20, fig.height=7}
+heatmap_input_b_like <- FetchData(object = subset(x = gex_scaled_all_noIG, subset=My_annotation_B %in% c("B", "MBL B Cell", "CLL B Cell") & plotting_id %in% setdiff(unique(gex_scaled_all_noIG@meta.data$plotting_id), c("P9dup", "P17","P18"))), 
+                                  vars=features_ordered)
+
+heatmap_input_b_like_scaled <- t(scale(heatmap_input_b_like))
+
+# check how many cells are available for each celltype and per patient; all physiological B cells should be retained
+# CLL Cells	86435			--> 927
+# HC-MBL Cells	136052			--> 593
+# LC-MBL Cells	27991			--> 1494
+# Physiologic B Cells	20263 -->8364
+
+celltype_barcode_counts <- tibble(label_cellbarcode=rownames(heatmap_input_b_like)) %>% 
+  dplyr::left_join(tibble(label_cellbarcode=rownames(gex_scaled_all_noIG@meta.data),
+                          My_annotation_B=gex_scaled_all_noIG@meta.data$My_annotation_B ,
+                          MBL_CLL_subtype=gex_scaled_all_noIG@meta.data$MBL_CLL_subtype ,
+                          patient_id=gex_scaled_all_noIG@meta.data$patient_id )) %>% 
+  dplyr::mutate(B_like_annotation=case_when(My_annotation_B=="MBL B Cell" & MBL_CLL_subtype == "LC" ~ "LC-MBL Cells",
+                                           My_annotation_B=="MBL B Cell" & MBL_CLL_subtype == "HC" ~ "HC-MBL Cells", 
+                                           My_annotation_B=="CLL B Cell" & MBL_CLL_subtype == "CLL" ~ "CLL Cells",
+                                           My_annotation_B=="B" ~ "Physiologic B Cells",
+                                           .default=My_annotation_B)) %>% 
+  group_by(B_like_annotation, patient_id) %>% 
+  dplyr::summarise(celltype_count=n())
+
+barcodes <- tibble(label_cellbarcode=rownames(heatmap_input_b_like)) %>% 
+  dplyr::left_join(tibble(label_cellbarcode=rownames(gex_scaled_all_noIG@meta.data),
+                          My_annotation_B=gex_scaled_all_noIG@meta.data$My_annotation_B ,
+                          MBL_CLL_subtype=gex_scaled_all_noIG@meta.data$MBL_CLL_subtype ,
+                          patient_id=gex_scaled_all_noIG@meta.data$patient_id,
+                          label=gex_scaled_all_noIG@meta.data$orig.ident)) %>% 
+  dplyr::mutate(B_like_annotation=case_when(My_annotation_B=="MBL B Cell" & MBL_CLL_subtype == "LC" ~ "LC-MBL Cells",
+                                           My_annotation_B=="MBL B Cell" & MBL_CLL_subtype == "HC" ~ "HC-MBL Cells", 
+                                           My_annotation_B=="CLL B Cell" & MBL_CLL_subtype == "CLL" ~ "CLL Cells",
+                                           My_annotation_B=="B" ~ "Physiologic B Cells",
+                                           .default=My_annotation_B))
+
+celltype_barcodes <- map2(c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"), c(14440, 8959,8891,8364),
+        ~barcodes %>% 
+       dplyr::filter(B_like_annotation == .x) %>% 
+      downsample_cells(max_cells = .y)) %>% 
+  set_names(c("Physiologic B Cells", "LC-MBL Cells", "HC-MBL Cells", "CLL Cells"))
+
+hm_downsampled <- build_celltype_heatmap(bcs_per_celltype = celltype_barcodes,
+                                         data_matrix = heatmap_input_b_like_scaled, 
+                                         modality = "GEX", 
+                                         include_all_metadata = TRUE, 
+                                         show_heatmap_legend = TRUE, 
+                                         show_annotation_legend = TRUE, 
+                                         quantile_capping = 0.98, 
+                                         high_score_colour ="darkred", 
+                                         mid_score_colour = "white", 
+                                         low_score_colour = "midnightblue", 
+                                         heatmap_legend_name = "Expression")
+
+hm_downsampled$`Physiologic B Cells`+hm_downsampled$`LC-MBL Cells`+hm_downsampled$`HC-MBL Cells`+hm_downsampled$`CLL Cells`
+
+hm_downsampled_grob <- grid.grabExpr(draw(hm_downsampled$`Physiologic B Cells`+hm_downsampled$`LC-MBL Cells`+hm_downsampled$`HC-MBL Cells`+hm_downsampled$`CLL Cells`, heatmap_legend_side="right"))
+cowplot::plot_grid(hm_downsampled_grob) 
+
+## TODO check which object of these two
+
+  # saveRDS(hm_downsampled_grob, file.path(project_dir, "RDS_objects/expression_heatmaps_DEGs.RDS"))
+#saveRDS(hm_b_like_grob, file.path(RDS_dir, "DEG_gene_expresssion_heatmap_batch_effect.RDS"))
+```
+
+## Downsampled clustered
+```{r fig.width=8, fig.height=5}
+hm_downsampled_clustered <- build_clustered_heatmap(
+  bcs_cells_df = bind_rows(celltype_barcodes),
+  data_matrix = heatmap_input_b_like_scaled,
+  modality = "GEX",
+  include_all_metadata = TRUE,
+  show_heatmap_legend = TRUE,
+  show_annotation_legend = TRUE,
+  quantile_capping = 0.98,
+  high_score_colour = "darkred",
+  mid_score_colour = "white",
+  low_score_colour = "midnightblue",
+  heatmap_legend_name = "Expression"
+)
+hm_downsampled_clustered_grob <- grid.grabExpr(draw(hm_downsampled_clustered[[1]]))
+cowplot::plot_grid(hm_downsampled_clustered_grob) 
+```

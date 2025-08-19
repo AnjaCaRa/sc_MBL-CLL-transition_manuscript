@@ -1,0 +1,543 @@
+---
+title: "T_cells_MBL_CLL_Ctrls"
+author: "Anja_Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+GOAL: The aim is to quantify T cells in healthy patients and MBL/CLL samples and further sub-annonotate.
+
+# Load libraries
+```{r}
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(ggpubr)
+```
+
+# Set paths
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+script_dir <- file.path(project_dir, "scripts")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "T_cell_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_Objects")
+RDS_GEX_dir <- file.path(result_dir, "GEX_analysis/RDS_objects")
+```
+
+## Load data
+```{r}
+source(file.path(script_dir, "publication_theme.R"))
+```
+
+```{r}
+reference <- LoadH5Seurat(file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat"))
+
+gex_scaled_10X_seurat_all <- readRDS(file.path(RDS_GEX_dir, "gex_scaled_10X_seurat_all.RDS"))
+
+metadata_malignant <- read_tsv(file = file.path(data_dir, "20240723_Tidy_MBL_CLL_metadata_gex.tsv")) %>% 
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE)
+metadata_healthy <- read_tsv(file = file.path(data_dir, "20250205_Healthy_controls_scRNAseq.tsv"))
+metadata <- metadata_malignant %>% 
+  full_join(metadata_healthy)
+```
+
+
+```{r}
+label2plotting_id <- metadata %>% 
+  dplyr::select(label, plotting_id) %>% 
+  deframe()
+
+patient_id2plotting_id <- metadata %>% 
+  dplyr::select(patient_id, plotting_id) %>% 
+  unique() %>% 
+  deframe()
+
+```
+
+# Subset to T cells
+```{r}
+gex_scaled_10X_seurat_all$My_annotation_LC %>% unique()
+
+samples_T_cells <- gex_scaled_10X_seurat_all@meta.data %>% 
+  dplyr::filter(My_annotation_LC == "T" & predicted.celltype.l2 %in% c("CD4 CTL", "CD4 Naive", "CD4 Proliferating",
+                                                                        "CD4 TCM", "CD4 TEM", "CD8 Naive", "CD8 TCM", "CD8 TEM", "gdT", "MAIT", "Treg"),
+                orig.ident !="MBL7dup") %>% 
+  group_by(orig.ident, MBL_CLL_subtype, plotting_id) %>% 
+  dplyr::summarize(cell_counts=n()) %>% 
+  dplyr::filter(cell_counts > 100) %>% pull(orig.ident)
+
+gex_T_10X_seurat_all <- subset(gex_scaled_10X_seurat_all, My_annotation_LC == "T" & predicted.celltype.l2 %in% c("CD4 CTL", "CD4 Naive", #"CD4 Proliferating",
+                                                                        "CD4 TCM", "CD4 TEM", "CD8 Naive", "CD8 TCM", "CD8 TEM", "gdT", "MAIT", "Treg") & orig.ident %in% samples_T_cells)
+```
+
+# Integrate
+## Add metadata
+```{r}
+technology_annot <- tibble("label_cellbarcode" = WhichCells(gex_T_10X_seurat_all)) %>%
+ tidyr::separate(col = label_cellbarcode, into = c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+ dplyr::left_join(metadata %>% dplyr::select(label, technology) %>% unique()) %>%
+ dplyr::select(label_cellbarcode, technology) %>%
+ dplyr::filter(!is.na(technology)) %>%
+ deframe()
+
+gex_T_10X_seurat_all <- AddMetaData(object = gex_T_10X_seurat_all,
+                                           metadata = technology_annot,
+                                           col.name = "technology")
+
+patient_id_annot <- tibble("label_cellbarcode" = WhichCells(gex_T_10X_seurat_all)) %>%
+ tidyr::separate(col = label_cellbarcode, into = c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
+ dplyr::left_join(metadata %>% dplyr::select(label, patient_id) %>% unique()) %>%
+ dplyr::select(label_cellbarcode, patient_id) %>%
+ dplyr::filter(!is.na(patient_id)) %>%
+ deframe()
+
+gex_T_10X_seurat_all <- AddMetaData(object = gex_T_10X_seurat_all,
+                                           metadata = patient_id_annot,
+                                           col.name = "patient_id")
+```
+
+## Split by technology
+```{r}
+gex_T_10X_seurat_all_lst <- SplitObject(object = gex_T_10X_seurat_all,
+                                        split.by = "technology")
+
+gex_T_10X_seurat_all_lst <- lapply(X = gex_T_10X_seurat_all_lst, FUN = SCTransform)
+```
+
+## Label transfer
+```{r}
+# Integrate
+features <- SelectIntegrationFeatures(object.list = gex_T_10X_seurat_all_lst,
+                                      nfeatures = 3000)
+
+gex_T_10X_seurat_all_lst <- PrepSCTIntegration(object.list = gex_T_10X_seurat_all_lst,
+                                                        anchor.features = features)
+
+immune.anchors <- FindIntegrationAnchors(object.list = gex_T_10X_seurat_all_lst,
+                                         normalization.method = "SCT",
+                                         anchor.features = features)
+
+gex_integrated_T_10X_seurat_all <- IntegrateData(anchorset = immune.anchors,
+                                               normalization.method = "SCT")
+```
+
+## PCA
+```{r}
+gex_integrated_T_10X_seurat_all <- RunPCA(gex_integrated_T_10X_seurat_all,
+                                        verbose = TRUE)
+
+# Examine and visualize PCA results a few different ways
+print(gex_integrated_T_10X_seurat_all[["pca"]], 
+      dims = 1:5, 
+      nfeatures = 5)
+```
+
+```{r}
+dot_plot <- VizDimLoadings(gex_integrated_T_10X_seurat_all, 
+                           dims = 1:2, 
+                           reduction = "pca") +
+  theme_pub()
+
+dot_plot
+```
+
+```{r}
+Idents(gex_integrated_T_10X_seurat_all) <- "MBL_CLL_subtype"
+pca <- DimPlot(gex_integrated_T_10X_seurat_all, 
+               reduction = "pca", 
+               raster = FALSE) +
+  theme_pub()
+
+pca
+```
+
+```{r}
+PCA_heatmap <- DimHeatmap(gex_integrated_T_10X_seurat_all,
+                          dims = 1,
+                          cells = 500,
+                          balanced = TRUE) +
+  theme_pub()
+
+PCA_heatmap
+```
+
+```{r}
+DimHeatmap(gex_integrated_T_10X_seurat_all,
+           dims = 1:10,
+           cells = 500,
+           balanced = TRUE)
+```
+
+```{r}
+ElbowPlot(gex_integrated_T_10X_seurat_all)
+```
+
+## UMAP
+```{r}
+gex_integrated_T_10X_seurat_all <- RunUMAP(gex_integrated_T_10X_seurat_all,
+                                         reduction = "pca", 
+                                         dims=1:30)
+```
+
+## Clustering
+```{r}
+gex_integrated_T_10X_seurat_all <- gex_integrated_T_10X_seurat_all  %>%
+  FindNeighbors(reduction = "pca",
+                dims = 1:10)
+gex_integrated_T_10X_seurat_all <- FindClusters(gex_integrated_T_10X_seurat_all,
+                                                resolution = 0.5)
+
+
+color_palette <- colorRampPalette(brewer.pal(12, "Set3"))
+my_palette <- color_palette(11)
+
+umap_T_clusters <- DimPlot(gex_integrated_T_10X_seurat_all, 
+                         reduction = "umap", 
+                         raster = FALSE, 
+                         group.by = "integrated_snn_res.0.5", 
+                         cols=my_palette) +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    legend.position = "bottom"
+  )
+
+umap_T_clusters
+```
+
+```{r}
+# saveRDS(gex_integrated_T_10X_seurat_all, file.path(RDS_dir, "gex_integrated_T_10X_seurat_all.RDS"))
+```
+
+```{r}
+umap_integrated_patient_plot <- DimPlot(gex_integrated_T_10X_seurat_all,
+                                         reduction = "umap",
+                                         raster = FALSE,
+                                         group.by = "patient_id",
+                                         cols=c(my_paired_colours_named,
+                                                my_unpaired_colours_named,
+                                                control_colours_named)
+                                        )+
+  theme_pub()+
+  scale_colour_manual(values=c(my_paired_colours_named,
+                                                my_unpaired_colours_named,
+                                                control_colours_named), labels=patient_id2plotting_id)+
+  theme(aspect.ratio = 1,
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y=element_blank())
+
+umap_integrated_patient_plot
+```
+
+## Cell type subannotation
+
+### Label transfer
+
+Find transfer anchors
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = gex_integrated_T_10X_seurat_all,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+
+gex_integrated_T_10X_seurat_all <- MapQuery(
+  anchorset = anchors,
+  query = gex_integrated_T_10X_seurat_all,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+      celltype.l3 = "celltype.l3",
+    predicted_ADT = "ADT"),
+  reference.reduction = "spca",
+  reduction.model = "wnn.umap")
+gex_integrated_T_10X_seurat_all$predicted.celltype.l2 <- factor(gex_integrated_T_10X_seurat_all$predicted.celltype.l2,
+                                                                levels=c("gdT", "MAIT", "CD8 Naive", "CD8 TCM", "CD8 TEM", "CD4 Naive", "CD4 TCM", "CD4 TEM", "CD4 CTL","Treg", "B intermediate", "HSPC", "B naive", "B memory", "NK", "Plasmablast", "Platelet", "Eryth", "NK Proliferating", "NK_CD56bright"))
+
+T_cell_barcodes <- gex_integrated_T_10X_seurat_all@meta.data %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::filter(predicted.celltype.l2 %in% c("gdT", "MAIT", "CD8 Naive", "CD8 TCM", "CD8 TEM", "CD4 Naive", "CD4 TCM", "CD4 TEM", "CD4 CTL","Treg")) %>%
+  pull(label_cellbarcode)
+```
+
+```{r}
+saveRDS(gex_integrated_T_10X_seurat_all, file = file.path(RDS_dir, "gex_integrated_T_10X_seurat_all.RDS"))
+```
+
+## Visualisation
+
+### PBMC vs B cell sample
+```{r}
+cell_type_counts_barplot <- metadata %>% 
+  dplyr::mutate(MBL_CLL_subtype=if_else(is.na(MBL_CLL_subtype) & disease =="Healthy", "Healthy", MBL_CLL_subtype),
+                MBL_CLL_subtype=factor(MBL_CLL_subtype, levels=c("Healthy", "LC_MBL", "HC_MBL", "CLL"))) %>% 
+  dplyr::filter(data_type=="GEX") %>% 
+  group_by(MBL_CLL_subtype) %>% 
+  ggplot(aes(x=MBL_CLL_subtype, fill=cell_type))+
+  geom_bar(stat="count", position=position_dodge(preserve = "single"))+
+  scale_y_continuous(expand=expansion(c(0, 0.001)), limits=c(0,NA))+
+  scale_x_discrete(labels=c("Healthy"="Healthy", "LC_MBL"="LC-MBL", "HC_MBL"="HC-MBL"))+
+  scale_fill_manual(name="Cell type", values=c("B cells" = "darkred",
+                                               "PBMC" = "bisque3"))+
+  labs(y="Sample counts", x="")+
+  theme_pub()+
+  theme(axis.title.x=element_blank())
+```
+
+
+```{r}
+cell_type_heatmap <- metadata %>% 
+  dplyr::mutate(MBL_CLL_subtype=if_else(is.na(MBL_CLL_subtype) & disease =="Healthy", "Healthy", MBL_CLL_subtype),
+                MBL_CLL_subtype=factor(MBL_CLL_subtype, levels=rev(c("Healthy", "LC_MBL", "HC_MBL", "CLL")))) %>% 
+  dplyr::filter(data_type=="GEX", label!="MBL7dup") %>%
+  dplyr::mutate(plotting_id=factor(plotting_id, levels=c(paste0("H", 1:4), paste0("P", 1:24)))) %>% 
+  ggplot(aes(x=plotting_id, y=MBL_CLL_subtype, fill=cell_type))+
+  geom_tile()+
+  coord_fixed() +
+  scale_fill_manual(name="Cell type", values=c("B cells" = "darkred",
+                                               "PBMC" = "bisque3"),
+                    labels=c("B cells"="CD19+", "PBMC"="PBMC"))+
+  scale_y_discrete(labels=c("Healthy"="Healthy", "LC_MBL"="LC-MBL", "HC_MBL"="HC-MBL"))+
+  theme_pub()+
+  theme(legend.position="bottom",
+        legend.direction="horizontal",
+        axis.title=element_blank(),
+        axis.text.x=element_text(angle=45, hjust=1))
+```
+
+### Apparent T cell counts
+```{r}
+T_cell_counts <- gex_integrated_T_10X_seurat_all@meta.data %>%
+  rownames_to_column("label_cellbarcode") %>% 
+  dplyr::filter(label_cellbarcode %in% T_cell_barcodes) %>%  
+  dplyr::select(plotting_id, orig.ident, MBL_CLL_subtype) %>% 
+  rownames_to_column("label_cellbarcode") %>% 
+  as_tibble() %>% 
+  group_by(plotting_id, orig.ident, MBL_CLL_subtype) %>% 
+  dplyr::summarise(cell_counts=n()) %>% 
+  dplyr::full_join(metadata %>% dplyr::filter(!(label %in% c("MBL7dup", "pbmc1", "pbmc2"))) %>% 
+                     dplyr::select(label, plotting_id, MBL_CLL_subtype) %>%
+                     dplyr::mutate(MBL_CLL_subtype=case_when(label %in% c("pbmc3", "pbmc4")~ "Healthy", 
+                                                             MBL_CLL_subtype =="HC_MBL" ~"HC",
+                                                             MBL_CLL_subtype == "LC_MBL"~ "LC",
+                                                             .default=MBL_CLL_subtype)), 
+                   by = join_by(orig.ident==label, plotting_id==plotting_id, MBL_CLL_subtype==MBL_CLL_subtype)) %>% 
+  dplyr::mutate(MBL_CLL_subtype=factor(MBL_CLL_subtype, levels=c("Healthy", "LC", "HC", "CLL")))
+```
+
+```{r}
+T_cell_counts_per_sample <- T_cell_counts %>% 
+  dplyr::mutate(plotting_id=factor(plotting_id, levels=c(paste0("H", 1:4), paste0("P", 1:24)))) %>% 
+  dplyr::filter(!is.na(cell_counts)) %>% 
+  ggplot(aes(x=plotting_id, y=cell_counts, fill=MBL_CLL_subtype, label=cell_counts))+
+  geom_bar(stat="identity", position=position_dodge(preserve = "single"))+
+  geom_text(vjust=-1, hjust=0.3)+
+  scale_y_log10(expand = expansion(c(0, 0.1)))+
+  scale_x_discrete(expand=expansion(c(0.05, 0.01)))+
+  scale_fill_manual(values = c(my_MBL_CLL_colours_named, "Healthy"="darkgrey"),
+                    labels = c("Healthy"="Healthy", "LC"="LC-MBL", "HC"="HC-MBL", "CLL"="CLL"))+
+  labs(y="T cell counts", fill="Condition")+
+  theme_pub()+
+  theme(legend.position="none",
+        legend.direction="horizontal",
+        axis.text.x=element_text(angle=45, hjust=1),
+        axis.title.x=element_blank())
+
+saveRDS(T_cell_counts_per_sample, file.path(RDS_dir, "T_cell_counts_per_sample.RDS"))
+
+ggpubr::ggarrange(T_cell_counts_per_sample, cell_type_heatmap, nrow=2, ncol=1)
+```
+
+```{r}
+total_T_cell_counts_per_condition <- T_cell_counts %>%
+  dplyr::group_by(MBL_CLL_subtype) %>%
+  dplyr::summarise(total=sum(cell_counts, na.rm = TRUE))
+
+T_cell_counts_per_condition <- T_cell_counts %>%
+dplyr::mutate(plotting_id=factor(plotting_id, levels=c(paste0("P", 1:24), paste0("H", 1:2)))) %>%
+  dplyr::arrange(desc(orig.ident)) %>% 
+  dplyr::mutate(orig.ident=factor(orig.ident, orig.ident)) %>%
+  dplyr::filter(!is.na(cell_counts)) %>% 
+  ggplot(aes(x=MBL_CLL_subtype, y=cell_counts, fill=orig.ident))+
+  geom_bar(position="stack", stat="identity")+
+  geom_text(data=total_T_cell_counts_per_condition,aes(x=MBL_CLL_subtype,y=total,label=total,fill=NULL), vjust=-0.3)+
+  scale_y_continuous(expand = expansion(c(0, 0.1)), limits = c(0, 11250), breaks=seq(0, 10000, 2500))+
+  scale_x_discrete(expand = expansion(c(0.3, 0.2)))+
+  scale_fill_manual(values = c(my_paired_colours_named, control_colours_named, my_unpaired_colours_named),
+                    labels=(label2plotting_id))+
+  labs(y="T cell counts", fill="Patient")+
+  theme_pub()+
+  theme(axis.text.x=element_text(),
+        axis.title.x=element_blank(),
+        legend.position = "right",
+        legend.direction = "vertical",
+        legend.key.size = unit(0.3,"cm"))+
+  guides(fill=guide_legend(ncol=1,
+                             byrow=TRUE,
+                             override.aes = list(size=3)))+
+  annotate(geom = "text", x = c(1, 2, 3, 4), y = 11000, label = c("n=2", "n=1", "n=1", "n=4"))
+
+saveRDS(T_cell_counts_per_condition, file.path(RDS_dir, "T_cell_counts_per_condition.RDS"))
+
+T_cell_counts_per_condition # overall T cell count 17707
+```
+
+```{r}
+umap_T_types_lt_l2 <- DimPlot(gex_integrated_T_10X_seurat_all, 
+                              cells = T_cell_barcodes,
+                         reduction = "umap", 
+                         raster = FALSE, 
+                        na.value = "lightgrey",
+                         group.by = c("predicted.celltype.l2")) +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    legend.position = "right"
+  )+
+ scale_colour_manual(values = T_cell_annotation_colours_named)+
+  labs(x="UMAP1", y="UMAP2", title="Cell type")+
+  theme_pub()+
+  theme(aspect.ratio = 1,
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y=element_blank())
+
+umap_T_types_lt_l2
+```
+
+```{r}
+umap_clusters_lt_l2 <- DimPlot(gex_integrated_T_10X_seurat_all, 
+                              cells = T_cell_barcodes,
+                         reduction = "umap", 
+                         raster = FALSE, 
+                        na.value = "lightgrey", 
+                         group.by = c("integrated_snn_res.0.5")) +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    legend.position = "right"
+  )+
+  scale_colour_manual(values = my_palette)+
+  labs(x="UMAP1", y="UMAP2", title="Clusters")+
+  theme_pub()+
+  theme(aspect.ratio = 1,
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y=element_blank())
+
+umap_clusters_lt_l2
+```
+
+```{r}
+umap_patients_lt_l2 <- DimPlot(gex_integrated_T_10X_seurat_all, 
+                        cells = T_cell_barcodes, 
+                        reduction = "umap", 
+                        raster = TRUE,
+                        raster.dpi=c(150,150), 
+                        na.value = "lightgrey", 
+                        shuffle = TRUE,
+                         group.by = c("patient_id")) +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    legend.position = "right"
+  )+
+  scale_colour_manual(values = c(my_paired_colours_named, my_unpaired_colours_named, control_colours_named))+
+  labs(x="UMAP1", y="UMAP2", title="Patients")+
+  theme_pub()+
+  theme(legend.position="none",
+        aspect.ratio = 1,
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y=element_blank())
+
+saveRDS(umap_patients_lt_l2, file.path(RDS_dir, "umap_patients_lt_l2.RDS"))
+
+umap_patients_lt_l2
+```
+
+```{r}
+umap_T_types_lt_l2 <- DimPlot(gex_integrated_T_10X_seurat_all, 
+                              cells = T_cell_barcodes, 
+                         reduction = "umap", 
+                         raster = TRUE, 
+                        raster.dpi=c(150,150), 
+                        na.value = "lightgrey", 
+                        shuffle=TRUE,
+                         group.by = c("predicted.celltype.l2")) +
+  theme_pub() +
+  theme(
+    aspect.ratio = 1,
+    legend.position = "right"
+  )+
+  scale_colour_manual(values = T_cell_annotation_colours_named)+
+  labs(x="UMAP1", y="UMAP2", title="Cell type")+
+  theme_pub()+
+  theme(legend.direction="vertical",
+        legend.position="none",
+        aspect.ratio = 1,
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y=element_blank())
+
+saveRDS(umap_T_types_lt_l2, file.path(RDS_dir, "umap_T_types_lt_l2.RDS"))
+
+umap_T_types_lt_l2
+```
+
+```{r}
+quantification_l2_Tcells <- gex_integrated_T_10X_seurat_all@meta.data %>%
+  rownames_to_column("label_cellbarcode") %>% 
+  dplyr::filter(label_cellbarcode %in% T_cell_barcodes) %>% 
+  dplyr::select(orig.ident, predicted.celltype.l2, predicted.celltype.l2.score, 
+                patient_id, disease, MBL_CLL_subtype) %>% 
+  group_by(MBL_CLL_subtype, predicted.celltype.l2) %>% 
+  dplyr::summarise(counts = n(), .groups = "drop") %>%  
+  group_by(MBL_CLL_subtype) %>% 
+  dplyr::mutate(percentage = counts / sum(counts) * 100,
+                percentage_label=if_else(percentage >=2, floor(percentage), NA),
+                MBL_CLL_subtype=factor(MBL_CLL_subtype, levels=c("Healthy", "LC", "HC", "CLL"))
+                                       ) %>%  
+  ungroup()
+```
+
+
+```{r}
+quantification_plot_l2_Tcells <- quantification_l2_Tcells %>% 
+    ggplot(aes(x=MBL_CLL_subtype, y=percentage, fill=predicted.celltype.l2, label=percentage_label))+
+    geom_bar(stat = "identity")+
+    geom_text( position = position_stack(vjust = 0.5), colour="white", size=3)+
+    scale_y_continuous(expand=expansion(mult = c(0,0.01)))+
+    scale_x_discrete(labels=c("Healthy"="Healthy", "LC"="LC-MBL", "HC"="HC-MBL", "CLL"="CLL"))+
+    scale_fill_manual(name="", values=T_cell_annotation_colours_named)+
+    labs(x="", y="T cells [%]")+
+    theme_pub()+
+  theme(axis.text.x = element_text(angle=45, hjust=1))+
+  annotate(geom = "text", x = c(1, 2, 3, 4), y = 50, label = c("n=2", "n=1", "n=1", "n=4"))
+
+saveRDS(quantification_plot_l2_Tcells, file.path(RDS_dir, "quantification_plot_l2_Tcells.RDS"))
+
+quantification_plot_l2_Tcells
+```
+

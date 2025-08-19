@@ -1,0 +1,568 @@
+---
+title: "Surface markers from TotalSeqA"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+GOAL: The aim of this script is to investigate the surface marker expression of patients sequenced with ASAPseq.
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(ArchR)
+library(gplots)
+library(Seurat)
+library(RColorBrewer)
+library(ggpubr)
+```
+
+# Set paths
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir_ext, "kallisto_BUS_files")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "Surface_marker_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_Objects")
+
+ArchR_dir <- "ArchR_35_samples/ArchR_all_samples_subsetted"
+result_dir_summaries <- file.path(project_dir, "Summary_Plots")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r}
+CLLProj <- loadArchRProject(path = file.path(project_dir_ext, ArchR_dir))
+metadata <- read_tsv(file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv"))
+metadata_tsa <- read_tsv(file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata_tsa.tsv"))
+TSA_targets <- read_csv(file.path(data_dir, "TSA_barcodes/TSA_universal_cocktail_reference.csv"), col_names = FALSE)[, 1] %>% 
+  pull(X1)
+
+label2plotting_id <- metadata_tsa %>% 
+  dplyr::select(label, plotting_id) %>% 
+  deframe()
+```
+
+```{r}
+libraries <- metadata_tsa %>%
+  dplyr::filter(!(technology == "multiome kit")) %>%
+  select(pool, label) %>%
+  deframe()
+
+import_kite_counts <- function(dir) {
+  mtx <- readMM(file.path(dir, "featurecounts.mtx"))
+  colnames(mtx) <- readLines(file.path(dir, "featurecounts.genes.txt"))
+  rownames(mtx) <- readLines(file.path(dir, "featurecounts.barcodes.txt"))
+  return(t(mtx))
+}
+
+all_TSA_data <- list()
+for (lib in metadata_tsa %>%
+  dplyr::filter(!(technology == "multiome kit")) %>%
+  pull(pool)) {
+  print(libraries[lib])
+
+  TSA_raw <- import_kite_counts(file.path(data_dir, lib, "featurecounts"))
+
+  TSA_so <- CreateSeuratObject(TSA_raw, assay = "HTO")
+  TSA_so <- NormalizeData(TSA_so, assay = "HTO", normalization.method = "CLR")
+  TSA_so <- ScaleData(TSA_so, assay = "HTO")
+
+  TSA_values <- as_tibble(t(GetAssayData(TSA_so)), rownames = NA) %>%
+    rownames_to_column("cellbarcode") %>%
+    dplyr::mutate(cellbarcode = paste0(libraries[lib], "#", cellbarcode, "-1")) %>%
+    column_to_rownames("cellbarcode")
+
+  all_TSA_data[[libraries[lib]]] <- TSA_values
+}
+
+all_TSA_data <- bind_rows(all_TSA_data)
+```
+
+Add TSA values as metadata_tsa to ArchR project
+```{r}
+sample_cells <- rownames(all_TSA_data)
+for (ab in colnames(all_TSA_data)) {
+  CLLProj <- addCellColData(
+    ArchRProj = CLLProj,
+    data = all_TSA_data[, ab],
+    cells = sample_cells,
+    name = ab
+  )
+}
+```
+
+Visualise target proteins
+```{r}
+TSA_targets_filtered <- colnames(CLLProj@cellColData)[34:197]
+
+umap_coordinates <- CLLProj@embeddings@listData[["UMAP_IterativeLSI"]]@listData[["df"]] %>%
+  as_tibble(rownames = "label_cellbarcode") %>%
+  dplyr::left_join(as.data.frame(CLLProj@cellColData) %>%
+    dplyr::select(any_of(c(TSA_targets_filtered))) %>%
+    rownames_to_column("label_cellbarcode")) %>%
+  tidyr::separate(label_cellbarcode, c("label", NA), sep = "#", remove = FALSE) %>%
+  tidyr::separate(label, c("patient_id", "sample_id"), sep = "\\.", remove = FALSE) %>%
+  tidyr::pivot_longer(
+    cols = -c("label_cellbarcode", "label", "patient_id", "sample_id", "IterativeLSI#UMAP_Dimension_1", "IterativeLSI#UMAP_Dimension_2"),
+    names_to = "target",
+    values_to = "value"
+  ) %>%
+  dplyr::left_join(metadata %>% dplyr::filter(data_type == "GEX") %>%
+    dplyr::select(label, patient_id, disease))
+```
+
+UMAPs
+```{r}
+# TSA_umaps <- umap_coordinates %>%
+#   arrange(value) %>%
+#   dplyr::mutate(disease = factor(disease, levels = c("MBL", "CLL"))) %>%
+#   ggplot(aes(x = `IterativeLSI#UMAP_Dimension_1`, y = `IterativeLSI#UMAP_Dimension_2`, colour = value)) +
+#   geom_point(size = .1, stroke = NA) +
+#   coord_equal() +
+#   scale_colour_distiller(
+#     name = "",
+#     palette = "YlOrRd",
+#     na.value = "lightgrey",
+#     direction = 1,
+#     limits = c(0, 10),
+#     breaks = c(0, 2, 4, 6, 8, 10)
+#   ) +
+#   theme_pub() +
+#   theme(
+#     legend.position = "bottom",
+#     legend.direction = "horizontal",
+#     axis.ticks = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_blank(),
+#     axis.line = element_line(),
+#     aspect.ratio = 1,
+#     panel.grid = element_blank(),
+#     panel.border = element_blank()
+#   ) +
+#   labs(x = "UMAP1", y = "UMAP2") +
+#   facet_grid(cols = vars(disease), rows = vars(target))
+
+# ggsave(
+#   plot = TSA_umaps,
+#   path = plotting_dir,
+#   filename = "TSA_umaps.png",
+#   width = 5,
+#   height = 134,
+#   limitsize = FALSE
+# )
+```
+
+```{r}
+TSA_selected_umaps <- umap_coordinates %>%
+  dplyr::filter(target %in% c("CD79b", "CD19", "CD5", "IgM")) %>%
+  dplyr::mutate(disease = factor(disease, levels = c("MBL", "CLL"))) %>%
+  arrange(value) %>%
+  ggplot(aes(x = `IterativeLSI#UMAP_Dimension_1`, y = `IterativeLSI#UMAP_Dimension_2`, colour = value)) +
+  geom_point(size = .1, stroke = NA) +
+  coord_equal() +
+  scale_colour_distiller(
+    name = "",
+    palette = "YlOrRd",
+    na.value = "lightgrey",
+    direction = 1,
+    limits = c(0, 10),
+    breaks = c(0, 2, 4, 6, 8, 10)
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.line = element_line(),
+    aspect.ratio = 1,
+    panel.grid = element_blank(),
+    panel.border = element_blank()
+  ) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  facet_grid(rows = vars(disease), cols = vars(target))
+```
+
+Violinplots
+```{r, fig.width=25, fig.height=20}
+TSA_vplots <- umap_coordinates %>%
+  split(.$patient_id) %>%
+  # .[-c(2,3)] %>%
+  .[c(12, 13, 14, 15, 16, 17, 23)] %>%
+  map(~ dplyr::mutate(., disease = factor(disease, levels = c("MBL", "CLL"))) %>%
+    dplyr::filter(value != 0 & !is.na(value)) %>%
+    ggplot(aes(x = target, y = value, fill = disease)) +
+    geom_violin() +
+    coord_equal() +
+    scale_y_continuous(expand = expansion(mult = c(0, NA))) +
+    scale_fill_manual(
+      name = "Condition",
+      values = my_MBL_CLL_colours_named
+    ) +
+    theme_pub() +
+    theme(
+      legend.position = "bottom",
+      axis.text.x = element_text(angle = 45, vjust = 0.9, hjust = 1),
+      legend.direction = "horizontal"
+    ) +
+    labs(x = "", y = "Abundance"))
+
+TSA_vplots %>%
+  imap(~ ggsave(
+    plot = .,
+    path = plotting_dir,
+    filename = paste0("TSA_vplots_", .y, ".png"),
+    width = 100,
+    height = 3,
+    limitsize = FALSE
+  ))
+```
+
+## Differential surface marker expression healthy and premalignant B cells
+```{r}
+B_cell_barcodes <- tibble(
+  "label_cellbarcode" = CLLProj$cellNames,
+  "label" = CLLProj$Sample,
+  "My_annotation" = CLLProj$My_annotation
+) %>%
+  dplyr::left_join(metadata %>%
+    dplyr::filter(data_type == "ATAC") %>%
+    dplyr::select(label, MBL_subtype)) %>%
+  dplyr::filter(
+    MBL_subtype == "LC",
+    My_annotation == "B"
+  ) %>%
+  pull(label_cellbarcode)
+
+premalignant_barcodes <- tibble(
+  "label_cellbarcode" = CLLProj$cellNames,
+  "label" = CLLProj$Sample,
+  "My_annotation" = CLLProj$My_annotation
+) %>%
+  dplyr::left_join(metadata %>%
+    dplyr::filter(data_type == "ATAC") %>%
+    dplyr::select(label, MBL_subtype)) %>%
+  dplyr::filter(
+    MBL_subtype == "LC",
+    My_annotation == "MBL_B_Cells"
+  ) %>%
+  pull(label_cellbarcode)
+```
+
+```{r}
+fc_expression_pp <- all_TSA_data %>%
+  rownames_to_column("label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, into = c("label", NA), sep = "#", remove = FALSE) %>%
+  dplyr::filter(label_cellbarcode %in% c(B_cell_barcodes, premalignant_barcodes)) %>%
+  dplyr::mutate(celltype = case_when(
+    label_cellbarcode %in% B_cell_barcodes ~ "B",
+    label_cellbarcode %in% premalignant_barcodes ~ "LC-MBL"
+  )) %>%
+  tidyr::pivot_longer(-c(label_cellbarcode, label, celltype), names_to = "surface_protein", values_to = "value") %>%
+  dplyr::group_by(surface_protein, label, celltype) %>%
+  dplyr::summarise_at(vars(value), list(`Mean expression` = mean)) %>%
+  tidyr::pivot_wider(names_from = celltype, values_from = `Mean expression`) %>%
+  dplyr::mutate(fold_change = `LC-MBL` / `B`)
+
+fc_expression <- all_TSA_data %>%
+  rownames_to_column("label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, into = c("label", NA), sep = "#", remove = FALSE) %>%
+  dplyr::filter(label_cellbarcode %in% c(B_cell_barcodes, premalignant_barcodes)) %>%
+  dplyr::mutate(celltype = case_when(
+    label_cellbarcode %in% B_cell_barcodes ~ "B",
+    label_cellbarcode %in% premalignant_barcodes ~ "LC-MBL"
+  )) %>%
+  tidyr::pivot_longer(-c(label_cellbarcode, label, celltype), names_to = "surface_protein", values_to = "value") %>%
+  dplyr::group_by(surface_protein, celltype) %>%
+  dplyr::summarise_at(vars(value), list(`Mean expression` = mean)) %>%
+  tidyr::pivot_wider(names_from = celltype, values_from = `Mean expression`) %>%
+  dplyr::mutate(fold_change = `LC-MBL` / `B`)
+
+# Calculate p-values between LC-MBL and B cell surface marker expression
+p_values_expression_surface_marker_pp <- all_TSA_data %>%
+  rownames_to_column("label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, into = c("label", NA), sep = "#", remove = FALSE) %>%
+  dplyr::filter(label_cellbarcode %in% c(B_cell_barcodes, premalignant_barcodes)) %>%
+  dplyr::mutate(celltype = case_when(
+    label_cellbarcode %in% B_cell_barcodes ~ "B",
+    label_cellbarcode %in% premalignant_barcodes ~ "LC-MBL"
+  )) %>%
+  tidyr::pivot_longer(-c(label_cellbarcode, label, celltype), names_to = "surface_protein", values_to = "value") %>%
+  dplyr::group_by(label, surface_protein) %>%
+  do(p_value = wilcox.test(dplyr::filter(., celltype == "LC-MBL") %>% pull(value),
+    dplyr::filter(., celltype == "B") %>% pull(value),
+    paired = FALSE
+  )$p.value) %>%
+  dplyr::mutate(
+    p_value = unlist(p_value)
+  ) %>%
+  dplyr::mutate("p_adjust" = p.adjust(p_value, method = "BH", n = length(.$p_value)))
+
+p_values_expression_surface_marker <- all_TSA_data %>%
+  rownames_to_column("label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, into = c("label", NA), sep = "#", remove = FALSE) %>%
+  dplyr::filter(label_cellbarcode %in% c(B_cell_barcodes, premalignant_barcodes)) %>%
+  dplyr::mutate(celltype = case_when(
+    label_cellbarcode %in% B_cell_barcodes ~ "B",
+    label_cellbarcode %in% premalignant_barcodes ~ "LC-MBL"
+  )) %>%
+  tidyr::pivot_longer(-c(label_cellbarcode, label, celltype), names_to = "surface_protein", values_to = "value") %>%
+  dplyr::group_by(surface_protein) %>%
+  do(p_value = wilcox.test(dplyr::filter(., celltype == "LC-MBL") %>% pull(value),
+    dplyr::filter(., celltype == "B") %>% pull(value),
+    paired = FALSE
+  )$p.value) %>%
+  dplyr::mutate(
+    p_value = unlist(p_value)
+  ) %>%
+  dplyr::mutate("p_adjust" = p.adjust(p_value, method = "BH", n = length(.$p_value)))
+
+statistics_tsa_surface_markers <- fc_expression %>%
+  left_join(p_values_expression_surface_marker, by = join_by(surface_protein)) %>%
+  dplyr::mutate(
+    significance = case_when(p_adjust <= 1e-100 & log2(fold_change) >= 0.5~ "LC-MBL",
+                             p_adjust <= 1e-100 & log2(fold_change) <= -0.5 ~ "B",
+                             .default = "not significant"),
+    surface_marker_label = case_when(significance != "not significant" ~ surface_protein, .default = NA)
+  )
+
+statistics_tsa_surface_markers_pp <- fc_expression_pp %>%
+  left_join(p_values_expression_surface_marker_pp, by = join_by(label, surface_protein)) %>%
+  dplyr::mutate(
+    significance = case_when(p_adjust <= 1e-100 & log2(fold_change) >= 0.5 ~ "LC-MBL",
+                             p_adjust <= 1e-100 & log2(fold_change) <= -0.5 ~ "B",
+                             .default = "not significant"
+    ),
+    surface_marker_label = case_when(significance != "not significant" ~ surface_protein, .default = NA)
+  )
+```
+
+```{r}
+volcanoplot_summary_TSA_pp <- statistics_tsa_surface_markers_pp %>%
+  dplyr::left_join(metadata %>%
+    dplyr::filter(data_type == "ATAC") %>%
+    dplyr::select(label, plotting_id) %>% unique()) %>%
+  dplyr::mutate(surface_marker_label=case_when(!is.na(surface_marker_label) ~ paste(surface_marker_label, "_", plotting_id), .default = NA)) %>% 
+  ggplot(aes(x = log2(fold_change), y = -log10(p_adjust), colour = significance, label = surface_marker_label)) +
+  geom_vline(xintercept = c(-0.5, 0.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = -log10(1e-100), color = "grey", linetype = "dashed") +
+  geom_point() +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 200,
+    colour = "black"
+  ) +
+  scale_x_continuous("Median difference",
+  oob = scales::squish_infinite,
+  limits = c(-2.5, 2.5)
+  ) +
+  scale_y_continuous("-log10(FDR)",
+    limits = c(0, 330),
+    oob = scales::squish_infinite,
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  scale_colour_manual(
+    name = "Differentially expressed cell surface marker",
+    values = c("B" = "darkred", "LC-MBL" = "#fcbda4", "not significant" = "#D3D3D3")
+  ) +
+  theme_pub() +
+  theme(legend.position = "bottom")
+
+volcanoplot_summary_TSA <- statistics_tsa_surface_markers %>%
+  # dplyr::mutate(surface_marker_label=case_when(!is.na(surface_marker_label) ~ paste(surface_marker_label), .default = NA)) %>% 
+  ggplot(aes(x = log2(fold_change), y = -log10(p_adjust), colour = significance, label = surface_marker_label)) +
+  geom_vline(xintercept = c(-0.5, 0.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(-log10(1e-100)), color = "grey", linetype = "dashed") +
+  geom_point(size=1) +
+  ggrepel::geom_label_repel(
+    size = 2.5,
+    label.size = NA,
+    label.padding = 0.1,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 200,
+    colour = "black"
+  ) +
+  scale_x_continuous("log2(Fold change)",
+     oob = scales::squish_infinite,
+    limits = c(-2.5, 2.5),
+    breaks=c(-4,-2,0,2,4)
+  ) +
+  scale_y_continuous("-log10(FDR)",
+    limits = c(0, 330),
+    oob = scales::squish_infinite,
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  scale_colour_manual(
+    name = "Differentially expressed cell surface marker",
+    values = c("B" = "darkred", "LC-MBL" = "#fcbda4", "not significant" = "#D3D3D3"),
+    labels=c("B"="Physiologic B Cells", "LC-MBL"="LC-MBL Cells")
+  ) +
+  labs(title="B vs. LC-MBL")+
+  theme_pub() +
+  theme(legend.position = "bottom",
+        aspect.ratio = 1,
+        plot.title = element_text(face="plain"))
+
+volcanoplot_summary_TSA
+volcanoplot_summary_TSA_pp
+
+ggsave(volcanoplot_summary_TSA_pp,
+       filename=file.path(plotting_dir, "TSA_volcanoplots.png"),
+       width = 10, 
+       height = 4,
+       unit="in")
+```
+
+```{r}
+saveRDS(volcanoplot_summary_TSA, file.path(RDS_dir, "volcanoplot_TSA_LC_MBL_B.RDS"))
+```
+
+## Surface marker expression for DEPs across all patients
+```{r}
+DEPs <- statistics_tsa_surface_markers %>% 
+  dplyr::filter((p_adjust<=1e-100 & log2(fold_change) >=0.5) | (p_adjust <= 1e-100 & log2(fold_change) <= -0.5 )) %>% 
+  dplyr::pull(surface_marker_label) %>% 
+  unique()
+
+#range of values -2.1715	0.4178442
+#FDR range 1 3.20e-114       1
+```
+
+```{r, fig.width=5.5, fig.height=4}
+dotplot_surfacemarker <- statistics_tsa_surface_markers_pp %>% 
+  dplyr::filter(surface_protein %in% DEPs | surface_protein %in% c( "CD19")) %>% 
+  dplyr::select(surface_protein, label, fold_change, p_adjust) %>% 
+  ungroup() %>% 
+  dplyr::arrange(fold_change, p_adjust) %>% 
+  dplyr::filter(fold_change != "NaN") %>% 
+  dplyr::mutate(surface_protein=factor(surface_protein, unique(surface_protein))) %>% 
+  ggplot(aes(x=surface_protein, y=label, colour= log2(fold_change), size=-log10(`p_adjust`)))+
+  geom_point()+
+  scale_color_gradient2(name="Expression",
+                        high="darkmagenta",
+                        mid="white",
+                        low=  "darkolivegreen",
+                        midpoint=0,
+                        breaks=c(-3, -1.5, 0,1.5,3),
+                        limits=c(-3.1,3.1),
+                        oob=scales::squish_infinite)+
+  scale_y_discrete(labels=label2plotting_id)+
+  scale_size_area(name="-log10(FDR)",
+                  max_size=3,
+                  limits=c(NA,10),
+                  oob=scales::squish,
+                  labels=c("0.0", "2.5", "5.0", "7.5", "≥ 10")
+                  )+
+  labs(y="", x="")+
+  theme_pub()+
+  theme(axis.text.x = element_text(angle=45, hjust=1, vjust=1),
+        panel.background = element_rect(fill="white"),
+        plot.title = element_text(hjust=0.5),
+        legend.position = c(0.5, 0.5))
+
+saveRDS(dotplot_surfacemarker, file.path(RDS_dir, "Dotplot_surfacemarker.RDS"))
+# 
+# ggsave(plot = dotplot_surfacemarker, 
+#        file=file.path(plotting_dir, "Dotplot_surfacemarker.png"), 
+#        width = 5.5, 
+#        height = 4)
+```
+
+```{r fig.width=10, fig.height=4}
+cowplot::plot_grid(volcanoplot_summary_TSA+
+                     theme(legend.position = "bottom"), 
+                   dotplot_surfacemarker,
+                   rel_widths = c(1,2)) %>% 
+  ggsave(.,
+       file=file.path(plotting_dir, "Surfacemarker_figure.png"), 
+       width = 10, 
+       height = 4, 
+       dpi = "print")
+```
+
+## Celltype quantification
+```{r}
+cell_annotation <- all_TSA_data %>%
+  rownames_to_column("label_cellbarcode") %>%
+  tidyr::separate(label_cellbarcode, into = c("label", NA), sep = "#", remove = FALSE) %>%
+  dplyr::filter(label_cellbarcode %in% c(B_cell_barcodes, premalignant_barcodes)) %>%
+  dplyr::mutate(celltype = case_when(
+    label_cellbarcode %in% B_cell_barcodes ~ "B",
+    label_cellbarcode %in% premalignant_barcodes ~ "LC-MBL"
+  )) %>% 
+  dplyr::select(label_cellbarcode, celltype)
+
+
+cell_type_counts <- cell_annotation %>% 
+  tidyr::separate(label_cellbarcode, into=c("label", "cellbarcode"), remove = FALSE, sep="#") %>% 
+  dplyr::left_join(metadata_tsa %>% dplyr::select(MBL_subtype, label)) %>% 
+  group_by(label, celltype) %>% 
+  dplyr::summarize(counts=n())
+```
+
+```{r, fig.height=4, fig.width=4}
+cell_type_counts_plot <- cell_type_counts%>%
+  pivot_wider(id_cols = label, names_from = celltype, values_from = counts, values_fill = NA) %>%
+  tidyr::pivot_longer(-label, names_to = "celltype", values_to = "counts") %>%
+  dplyr::left_join(metadata_tsa %>% dplyr::select(label, plotting_id, disease, MBL_subtype)) %>%
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%
+  dplyr::mutate(MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL")),
+    MBL_CLL_subtype = factor(MBL_CLL_subtype, levels = c("LC_MBL", "HC_MBL", "CLL")),
+    celltype = case_when(celltype == "LC-MBL" & MBL_CLL_subtype == "LC_MBL" ~ "LC_MBL_B_Cells",
+    .default = celltype),
+    counts = if_else(celltype == "B", -counts, counts),
+    celltype = factor(celltype, levels = c("B", "LC_MBL_B_Cells")),
+    plotting_id = factor(plotting_id, levels=rev(paste0("P", 1:24))),
+    label=if_else(counts < 0, counts*-1, counts)) %>%
+  ggplot(aes(y = plotting_id, x = counts, fill = celltype)) +
+  geom_bar(position = "stack", stat = "identity", width = 0.7) +
+  geom_text(aes(label=label), hjust=0)+
+  scale_x_continuous(
+     breaks = c(-2000, 0, 2000, 4000, 6000, 8000),
+     labels = c("2000", "0", "2000", "4000", "6000", "8000"),
+     limits = c(-2000, 8000)
+  ) +
+  scale_fill_manual(
+    name = "Cell type", values = annotation_colours_named,
+    labels = c("B" = "B cells", "LC_MBL_B_Cells" = "LC-MBL cells")
+  ) +
+  labs(x = "cell counts", title = "") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    axis.text.x = element_text(angle=45, hjust=1, vjust=1),
+    axis.title.y = element_blank(),
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_text(angle = 0),
+    plot.title = element_text(margin = margin(t = 8, b = -20))
+  ) 
+
+ggsave(plot = cell_type_counts_plot, 
+       file.path(plotting_dir, "Celltype_counts_TSA.pdf"),
+       width=4, 
+       height=4, 
+       units = "in", 
+       bg = "white")
+```
+

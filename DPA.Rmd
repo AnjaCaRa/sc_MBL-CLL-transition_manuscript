@@ -1,0 +1,210 @@
+---
+title: "Differential Peak Analysis Patients Full Cohort"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL
+The aim of this script is to find out in which peaks patients can be distinguished.
+
+# Load libraries
+
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(ArchR)
+library(readxl)
+library(hexbin)
+library(ggrepel)
+library(ggallin)
+library(tidyverse)
+library(glue)
+library(ggpubr)
+library(SeuratDisk)
+library(Seurat)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(Cairo)
+library(scales)
+library(harmony)
+library(chromVAR)
+library(patchwork)
+library(BiocParallel)
+library(circlize)
+library(ComplexHeatmap)
+library(magick)
+register(MulticoreParam(8))
+```
+
+```{r Run_parameters}
+set.seed(1)
+addArchRThreads(threads = 8)
+addArchRGenome("hg38")
+```
+
+# Set paths
+
+```{r }
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+library_path <- file.path(data_dir, "ATAC")
+result_dir <- file.path(project_dir, "results")
+result_dir_ext <- file.path(project_dir_ext, "ArchR_35_samples")
+analysis_dir <- file.path(result_dir, "DPA_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+tsv_dir <- file.path(analysis_dir, "tsv_data") 
+
+ArchR_project_subset <- file.path("ArchR_all_samples_subsetted")
+ArchR_project_patients <- file.path("ArchR_all_patients_peaks")
+
+ArchR_dir_subset <- file.path(result_dir_ext, ArchR_project_subset)
+ArchR_dir_patients <- file.path(result_dir_ext, ArchR_project_patients)
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+source(file.path(project_dir, "scripts/my_plotMarkerHeatmap.R"))
+```
+
+```{r }
+metadata <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv"))%>% 
+  tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE)
+
+patient_id2plotting_id <- metadata %>%
+  dplyr::select(patient_id, plotting_id) %>%
+  unique() %>%
+  deframe()
+```
+
+```{r}
+CLLProj <- loadArchRProject(path = ArchR_dir_subset)
+
+CLLProj_all_patients <- subsetArchRProject(
+  ArchRProj = CLLProj,
+  cells = CLLProj$cellNames,
+  outputDirectory = ArchR_dir_patients
+  )
+rm(CLLProj)
+```
+
+# Analysis
+
+## Add pseudobulk replicates
+
+```{r}
+CLLProj_all_patients <- addGroupCoverages(
+  ArchRProj = CLLProj_all_patients,
+  groupBy = "patient_id"
+)
+```
+
+## Peak calling
+
+```{r}
+CLLProj_all_patients <- addReproduciblePeakSet(
+  ArchRProj = CLLProj_all_patients,
+  groupBy = "patient_id",
+  pathToMacs2 = pathToMacs3)
+
+saveArchRProject(ArchRProj = CLLProj_all_patients, 
+                 outputDirectory = ArchR_dir_patients, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+```
+
+```{r}
+CLLProj_all_patients <- addPeakMatrix(CLLProj_all_patients)
+
+saveArchRProject(ArchRProj = CLLProj_all_patients, 
+                 outputDirectory = ArchR_dir_patients, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+
+getAvailableMatrices(CLLProj_all_patients)
+```
+
+## Marker peaks
+```{r}
+CLLProj_all_patients <- loadArchRProject(path = ArchR_dir_patients)
+
+markerPeaks <- getMarkerFeatures(
+    ArchRProj = CLLProj_all_patients,
+    useMatrix = "PeakMatrix",
+    groupBy = "patient_id",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon")
+
+saveRDS(markerPeaks, file.path(RDS_dir, "markerPeaks.RDS"))
+```
+
+## Plotting
+```{r}
+markerPeaks <- readRDS(file.path(RDS_dir, "markerPeaks.RDS"))
+
+patient_order <- metadata %>%
+  dplyr::filter(data_type=="ATAC") %>%  
+  dplyr::filter(patient_id !="MBL7dup") %>% 
+  dplyr::select(patient_id, plotting_id) %>% 
+  unique %>% 
+  dplyr::mutate(plotting_id=factor(plotting_id, levels=paste0("P", 1:24))) %>% 
+  arrange(plotting_id) %>% 
+  pull(patient_id)
+
+markerPeaks_oi <- markerPeaks[,patient_order]
+
+patient_condition <- metadata %>% 
+  dplyr::filter(data_type=="ATAC") %>%
+  dplyr::select(patient_id, MBL_CLL_subtype) %>%
+  tidyr::pivot_wider(id_cols = patient_id, names_from=MBL_CLL_subtype, values_from = MBL_CLL_subtype) %>%
+  unique() %>%
+  dplyr::mutate(Condition=
+                 case_when(!is.na(LC_MBL) ~ "LC-MBL",
+                           !is.na(HC_MBL) & !is.na(CLL) ~ "CLL",
+                            is.na(HC_MBL) & !is.na(CLL) ~ "CLL",
+                           !is.na(HC_MBL) & is.na(CLL) ~ "HC-MBL",
+                           .default=NA)) %>%
+  dplyr::select(patient_id, Condition) %>% 
+  deframe()
+
+patient2condition <- my_MBL_CLL_colours_named[patient_condition]
+names(patient2condition) <- names(patient_condition)
+
+# Create a column annotation
+top_annotation_col_anno <- HeatmapAnnotation(
+  Condition= anno_simple(patient_order, col=patient2condition, border=TRUE),
+  Patient = anno_simple(colnames(markerPeaks_oi), col=c(my_unpaired_colours_named, my_paired_colours_named),
+  border = TRUE),
+  annotation_height = unit(4, "mm"),
+  gap = unit(0.5, "mm"),
+  annotation_name_side = "left",
+  annotation_name_gp = gpar(fontsize = 10,
+                            fontfamily ="Arial"))
+
+heatmapPeaks <- my_plotMarkerHeatmap(
+  seMarker = markerPeaks_oi, 
+  clusterCols=FALSE,
+  cutOff = "FDR <= 0.1 & Log2FC >= 0.5",
+  transpose = FALSE,
+  labelRows = FALSE, 
+  labelMarkers = NULL,
+  annotationBar=top_annotation_col_anno)
+```
+
+```{r, fig.height=4, fig.width=3}
+heatmapPeaks_grob <- grid.grabExpr(draw(heatmapPeaks,
+     heatmap_legend_side = "bot", 
+     annotation_legend_side = "bot"))
+
+cowplot::plot_grid(heatmapPeaks_grob, nrow=1, ncol=1)
+saveRDS(heatmapPeaks_grob, file.path(RDS_dir, "Differential_peaks_patients_heatmap.RDS"))
+```
+

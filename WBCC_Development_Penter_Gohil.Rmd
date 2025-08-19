@@ -1,0 +1,85 @@
+---
+title: "White blood cell counts"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL
+The aim of this script is to visualize the coarse of WBCCs in selected patients.
+
+# Load libraries
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(readxl)
+```
+
+# Set paths
+
+```{r}
+source(config_paths.R)
+data_dir <- file.path(project_dir, "data")
+script_dir <- file.path(project_dir, "scripts")
+result_dir <- file.path(project_dir, "results")
+plotting_dir <- file.path(project_dir, "Summary_Plots/WBCC")
+RDS_dir <- file.path(project_dir, "RDS_Objects")
+```
+
+# Load data
+
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r}
+WBCC_data <- list("CLL101"=read_xlsx(path= file.path(data_dir, "20250204_WBC_counts.xlsx"), sheet = "CLL1 from Penter&Gohil et al."))
+```
+
+# Analysis
+
+## Line plots
+
+```{r}
+rect_data <- list("CLL101"=tibble(
+  xmin = c(0,0,2.3189596,4.9034908,5.5304586, 9.0403833),
+  xmax = c(0,2.3189596,4.9034908, 5.5304586 ,9.0403833 ,12.1998631),
+  ymin = rep(0, 6),
+  ymax = rep(500, 6)))
+
+WBCC_CLL101_plot <- WBCC_data %>% 
+  map2(rect_data, 
+       ~mutate(., Label=if_else(!(Label %in% c("WW1", "preFCR", "relapse")), NA, Label),
+                Label=case_when(Label == "WW1" ~ "diagnosis",
+                                Label =="preFCR" ~ "pre therapy",.default = Label),
+                Years = time_length(difftime(Date, min(Date), units = "days"), "years")) %>% 
+  ggplot(aes(x=Years, y=WBC, label=Label))+
+  geom_rect(
+    data = .y,
+    mapping = aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    alpha = 0.2,
+    fill = c("white", "rosybrown1", "rosybrown3", "indianred4", "paleturquoise3", "indianred"),
+    inherit.aes = FALSE
+  ) +
+  geom_line() +
+  geom_label(aes(label = Label, colour = Label), label.size = NA,vjust = -1, hjust=0) + 
+  scale_x_continuous(expand=expansion(c(0,0.05)))+
+  scale_y_continuous(expand=expansion(c(0, 0.1)))+
+  scale_colour_manual(values = c("WW1"="rosybrown1", "WW2"="rosybrown3", "preFCR"="indianred4", "remission"="paleturquoise3", "relapse"="indianred")) +
+  labs(y="WBC count [cells/ml]", x="Time since sampling [years]")+
+  theme_pub()+
+  theme(legend.position = "none"))
+
+saveRDS(WBCC_CLL101_plot, file = file.path(RDS_dir, "WBCC_CLL101_plot.RDS"))
+```
+

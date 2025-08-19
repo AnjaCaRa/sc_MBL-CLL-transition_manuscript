@@ -1,0 +1,573 @@
+---
+title: "Annotation_Healthy_Clustering_wo_Mulitome"
+output: html_document
+date: "2025-01-28"
+---
+
+GOAL: The aim of this script is to subset only healthy cells and annotate them
+
+# Load libraries
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(readxl)
+library(dplyr)
+library(ggrepel)
+library(glue)
+library(ggpubr)
+library(SeuratDisk)
+library(Seurat)
+library(SeuratObject)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(Cairo)
+library(harmony)
+library(patchwork)
+library(BiocParallel)
+library(circlize)
+library(magick)
+library(ArchR)
+```
+
+```{r Run_parameters}
+set.seed(1)
+addArchRThreads(threads = 1)
+addArchRGenome("hg38")
+```
+
+# Set paths
+
+```{r }
+source("config_paths.R")
+results_dir <- file.path(project_dir_remote, "results")
+analysis_dir <- file.path(results_dir, "ArchR_analysis")
+
+ArchR_proj <- file.path("ArchR_Healthy_35_samples")
+ArchR_proj_ndb <- file.path("ArchR_Healthy_35_samples_no_doublets")
+ArchR_proj_healthy_3 <- file.path("ArchR_Healthy_3")
+
+ArchR_dir_healthy_35 <- file.path(analysis_dir, ArchR_proj)
+ArchR_dir_healthy_35_no_doublets <- file.path(analysis_dir, ArchR_proj_ndb)
+ArchR_dir_healthy_3 <- file.path(analysis_dir, ArchR_proj_healthy_3)
+```
+
+# Load data
+```{r}
+source(file.path(scripts_dir_remote, "publication_theme.R"))
+```
+
+```{r}
+CLLProj_Healthy_no_db <- loadArchRProject(path = file.path(ArchR_dir_healthy_35_no_doublets))
+Hao_seRNA <- readRDS(file.path(project_dir_remote, "data/reference_genomes/Hao_and_Hao_et_al_2021_PBMC/Hao_seRNA.RDS"))
+```
+
+```{r}
+HealthyProj <- loadArchRProject(path = file.path(ArchR_dir_healthy_3))
+```
+
+# Analysis
+## Iterative LSI
+```{r LSI_0.2_and_0.4}
+setwd(analysis_dir)
+
+HealthyProj <- addIterativeLSI(
+  ArchRProj = HealthyProj,
+  useMatrix = "TileMatrix",
+  name = "Subset_IterativeLSI",
+  iterations = 2,
+  clusterParams = list(
+    resolution = c(0.2),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30
+)
+
+HealthyProj <- addIterativeLSI(
+  ArchRProj = HealthyProj,
+  useMatrix = "TileMatrix",
+  name = "Subset_IterativeLSI_0.4",
+  iterations = 2,
+  clusterParams = list(
+    resolution = c(0.4),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30
+)
+
+saveArchRProject(ArchRProj = HealthyProj, 
+                 outputDirectory = ArchR_dir_healthy_3, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+```
+
+## Batch correction
+```{r}
+setwd(analysis_dir)
+
+HealthyProj <- addHarmony(
+  ArchRProj = HealthyProj,
+  reducedDims = "Subset_IterativeLSI",
+  name = "Harmony_Subset_IterativeLSI",
+  groupBy = "Sample",
+  verbose = TRUE
+)
+
+HealthyProj <- addHarmony(
+  ArchRProj = HealthyProj,
+  reducedDims = "Subset_IterativeLSI_0.4",
+  name = "Harmony_Subset_IterativeLSI_0.4",
+  groupBy = "Sample",
+  verbose = TRUE
+)
+
+saveArchRProject(ArchRProj = HealthyProj,
+                 outputDirectory = ArchR_dir_healthy_3,
+                 load = FALSE,
+                 overwrite = TRUE)
+```
+
+
+## Clusters
+```{r Clustering_0.2_to_0.6}
+# Try combinations between different LSI resolutions and clustering resolutions
+param_combinations_subset <- tidyr::expand_grid(
+  dimred = c("Subset_IterativeLSI", "Subset_IterativeLSI_0.4", 
+    "Harmony_Subset_IterativeLSI", "Harmony_Subset_IterativeLSI_0.4"),
+  resolution = c(0.2, 0.3, 0.4, 0.6)
+)
+
+for (row in 1:nrow(param_combinations_subset)) {
+  resolution <- param_combinations_subset$resolution[[row]]
+  dimred <- param_combinations_subset$dimred[[row]]
+
+  HealthyProj <- addClusters(
+    input = HealthyProj,
+    reducedDims = dimred,
+    method = "Seurat",
+    name = glue("Subset_Clusters_{resolution}_{dimred}"),
+    resolution = resolution
+  )
+}
+
+saveArchRProject(ArchRProj = HealthyProj, 
+                 outputDirectory = ArchR_dir_healthy_3, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+```
+
+## UMAP
+```{r UMAP}
+for (row in 1:length(param_combinations_subset$dimred %>% unique)) {
+  dimred <- unique(param_combinations_subset$dimred)[[row]]
+
+  HealthyProj <- addUMAP(
+    ArchRProj = HealthyProj,
+    reducedDims = dimred,
+    name = glue("Subset_UMAP_{dimred}"),
+    nNeighbors = 30,
+    minDist = 0.5,
+    metric = "cosine")
+}
+
+saveArchRProject(ArchRProj = HealthyProj, 
+                 outputDirectory = ArchR_dir_healthy_3, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+```
+
+## Visualise results
+### Samples
+```{r}
+sample_IterativeLSI <- plotEmbedding(
+  plotAs = "points",
+  size = 0.5,
+  embedding = "Subset_UMAP_Subset_IterativeLSI",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Sample",
+  pal = c(my_paired_colours_named, my_unpaired_colours_named, control_colours_named)
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+sample_IterativeLSI_0.4 <- plotEmbedding(
+  plotAs = "points",
+  size = 0.5,
+  embedding = "Subset_UMAP_Subset_IterativeLSI_0.4",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Sample",
+  pal = c(my_paired_colours_named, my_unpaired_colours_named, control_colours_named)
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+sample_Harmony_IterativeLSI <-plotEmbedding(
+  plotAs = "points",
+  size = 0.5,
+  embedding = "Subset_UMAP_Harmony_Subset_IterativeLSI",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Sample",
+  pal = c(my_paired_colours_named, my_unpaired_colours_named, control_colours_named)
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+sample_Harmony_IterativeLSI_0.4 <- plotEmbedding(
+  plotAs = "points",
+  size = 0.5,
+  embedding = "Subset_UMAP_Harmony_Subset_IterativeLSI_0.4",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Sample",
+  pal = c(my_paired_colours_named, my_unpaired_colours_named, control_colours_named)
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+```
+
+### Clusters
+```{r Plot_clusterings, fig.width=30, fig.height=12}
+all_cluster_plots <- list()
+
+for (row in 1:nrow(param_combinations_subset)) {
+  resolution <- param_combinations_subset$resolution[[row]]
+  dimred <- param_combinations_subset$dimred[[row]]
+  print(resolution)
+  print(dimred)
+
+  cluster_plots <- plotEmbedding(
+    ArchRProj = HealthyProj,
+    colorBy = "cellColData",
+    name = glue("Subset_Clusters_{resolution}_{dimred}"),
+    embedding = glue("Subset_UMAP_{dimred}"),
+    plotAs = "points",
+    size = 3
+  ) +
+    labs(x = "UMAP1", y = "UMAP2") +
+    theme_pub() +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+  # print(cluster_plots)
+  all_cluster_plots[[row]] <- cluster_plots
+}
+
+cowplot::plot_grid(ggarrange(sample_IterativeLSI, sample_IterativeLSI_0.4, sample_Harmony_IterativeLSI, Harmony_sample_IterativeLSI_0.4, nrow = 4), 
+                   ggarrange(plotlist = all_cluster_plots, nrow = 4, ncol = 4), 
+                   ncol = 2, rel_widths = c(1, 4))
+
+cowplot::plot_grid(ggarrange(sample_IterativeLSI, sample_IterativeLSI_0.4, sample_Harmony_IterativeLSI, sample_Harmony_IterativeLSI_0.4, nrow = 4), 
+                   ggarrange(plotlist = all_cluster_plots, nrow = 4, ncol = 4), 
+                   ncol = 2, rel_widths = c(1, 4)) %>%
+  ggsave(plot = .,
+         filename = file.path(ArchR_dir_healthy_3, "Plots/UMAP_Healthy_Clusters_Res_0.2-0.6.png"),
+         width = 90,
+         height = 60,
+         unit = "cm")
+
+```
+
+## Label transfer
+```{r Bridge_Integration_Subset}
+HealthyProj <- addGeneIntegrationMatrix(
+  ArchRProj = HealthyProj,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "Subset_GeneIntegrationMatrix_IterativeLSI",
+  reducedDims = "Subset_IterativeLSI",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "Subset_predictedCell_Un_Hao_IterativeLSI_,",
+  nameGroup = "Subset_predictedGroup_Un_Hao_IterativeLSI",
+  nameScore = "Subset_predictedScore_Un_Hao_IterativeLSI",
+  threads = 1, 
+  force=TRUE
+)
+
+HealthyProj <- addGeneIntegrationMatrix(
+  ArchRProj = HealthyProj,
+  useMatrix = "GeneScoreMatrix",
+  matrixName = "Subset_GeneIntegrationMatrix_IterativeLSI_0.4",
+  reducedDims = "Subset_IterativeLSI_0.4",
+  seRNA = Hao_seRNA,
+  addToArrow = TRUE,
+  groupRNA = "celltype.l1",
+  nameCell = "Subset_predictedCell_Un_Hao_IterativeLSI_0.4,",
+  nameGroup = "Subset_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  nameScore = "Subset_predictedScore_Un_Hao_IterativeLSI_0.4",
+  threads = 1, 
+  force=TRUE
+)
+
+saveArchRProject(ArchRProj = HealthyProj, 
+                 outputDirectory = ArchR_dir_healthy_3, 
+                 load = FALSE, 
+                 overwrite = TRUE)
+```
+
+## Visualise results
+### Predicted celltype
+```{r Plot_annotion_LSI_0.2, fig.height=8, fig.width=20}
+annotation_IterativeLSI_subset <- plotEmbedding(
+  plotAs = "points",
+  size = 2,
+  embedding = "Subset_UMAP_Subset_IterativeLSI",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI",
+  pal = annotation_colours_named
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal")
+
+predictionscore_IterativeLSI_subset <- plotEmbedding(
+  plotAs = "points",
+  size = 2,
+  embedding = "Subset_UMAP_Subset_IterativeLSI",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Subset_predictedScore_Un_Hao_IterativeLSI",
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal")
+
+ggAlignPlots(sample_IterativeLSI, all_cluster_plots[[1]], predictionscore_IterativeLSI_subset, annotation_IterativeLSI_subset, type = "h")
+```
+
+```{r Plot_annotation_LSI_0.4, fig.height=8, fig.width=20}
+annotation_IterativeLSI_0.4_subset <- plotEmbedding(
+  plotAs = "points",
+  size = 2,
+  embedding = "Subset_UMAP_Subset_IterativeLSI_0.4",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  pal = annotation_colours_named
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+predictionscore_IterativeLSI_0.4_subset <- plotEmbedding(
+  plotAs = "points",
+  size = 2,
+  embedding = "Subset_UMAP_Subset_IterativeLSI_0.4",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Subset_predictedScore_Un_Hao_IterativeLSI_0.4") +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+```
+```{r Plot_annotation_LSI_0.4, fig.height=8, fig.width=20}
+ggAlignPlots(sample_IterativeLSI_0.4, all_cluster_plots[[6]], predictionscore_IterativeLSI_0.4_subset, annotation_IterativeLSI_0.4_subset, type = "h")
+```
+
+```{r}
+annotation_Harmony_IterativeLSI_subset <- plotEmbedding(
+  plotAs = "points",
+  size = 2,
+  embedding = "Subset_UMAP_Harmony_Subset_IterativeLSI",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI",
+  pal = annotation_colours_named
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal")
+
+predictionscore_Harmony_IterativeLSI_subset <- plotEmbedding(
+  plotAs = "points",
+  size = 2,
+  embedding = "Subset_UMAP_Harmony_Subset_IterativeLSI",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Subset_predictedScore_Un_Hao_IterativeLSI",
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal")
+
+ggAlignPlots(sample_Harmony_IterativeLSI, all_cluster_plots[[10]], predictionscore_Harmony_IterativeLSI_subset, annotation_Harmony_IterativeLSI_subset, type = "h")
+```
+
+
+```{r}
+annotation_Harmony_IterativeLSI_0.4_subset <- plotEmbedding(
+  plotAs = "points",
+  size = 2,
+  embedding = "Subset_UMAP_Harmony_Subset_IterativeLSI_0.4",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Subset_predictedGroup_Un_Hao_IterativeLSI_0.4",
+  pal = annotation_colours_named
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal")
+
+predictionscore_Harmony_IterativeLSI_0.4_subset <- plotEmbedding(
+  plotAs = "points",
+  size = 2,
+  embedding = "Subset_UMAP_Harmony_Subset_IterativeLSI_0.4",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "Subset_predictedScore_Un_Hao_IterativeLSI",
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal")
+
+ggAlignPlots(sample_Harmony_IterativeLSI_0.4, all_cluster_plots[[13]], predictionscore_Harmony_IterativeLSI_0.4_subset, annotation_Harmony_IterativeLSI_0.4_subset, type = "h")
+```
+
+```{r, Compare_LSI_resolutions_fig.width=70, fig.height=15}
+cowplot::plot_grid(ggarrange(sample_IterativeLSI, all_cluster_plots[[2]], predictionscore_IterativeLSI_subset, annotation_IterativeLSI_subset, ncol = 4),
+  ggarrange(sample_IterativeLSI_0.4, all_cluster_plots[[6]], predictionscore_IterativeLSI_0.4_subset, annotation_IterativeLSI_0.4_subset, ncol = 4),
+  ggarrange(sample_Harmony_IterativeLSI, all_cluster_plots[[10]], predictionscore_Harmony_IterativeLSI_subset, annotation_Harmony_IterativeLSI_subset, ncol = 4),
+  ggarrange(sample_Harmony_IterativeLSI_0.4, all_cluster_plots[[13]], predictionscore_Harmony_IterativeLSI_0.4_subset, annotation_Harmony_IterativeLSI_0.4_subset, ncol = 4),
+  nrow = 4
+)
+
+cowplot::plot_grid(ggarrange(sample_IterativeLSI, all_cluster_plots[[2]], predictionscore_IterativeLSI_subset, annotation_IterativeLSI_subset, ncol = 4),
+  ggarrange(sample_IterativeLSI_0.4, all_cluster_plots[[6]], predictionscore_IterativeLSI_0.4_subset, annotation_IterativeLSI_0.4_subset, ncol = 4),
+  ggarrange(sample_Harmony_IterativeLSI, all_cluster_plots[[10]], predictionscore_Harmony_IterativeLSI_subset, annotation_Harmony_IterativeLSI_subset, ncol = 4),
+  ggarrange(sample_Harmony_IterativeLSI_0.4, all_cluster_plots[[14]], predictionscore_Harmony_IterativeLSI_0.4_subset, annotation_Harmony_IterativeLSI_0.4_subset, ncol = 4),
+  nrow = 4
+)%>%
+  ggsave(plot = ., filename = file.path(ArchR_dir_healthy_3, "Plots/UMAP_Healthy_Cells_Clustering_Annotation.png"), 
+         width = 60, 
+         height = 60, 
+         unit = "cm")
+```
+
+### Marker genes
+```{r}
+HealthyProj <- addImputeWeights(HealthyProj)
+
+markerGenes <- c(
+  "CD34", # Early Progenitor
+  "GATA1", # Erythroid
+  "PAX5", "MS4A1", "EBF1", "MME", # B-Cell Trajectory
+  "CCR7", # Naïve B cells
+  "CD27", "CD80", # Memory B cells
+  "CD38", "PRDM1", "XBP1", "SLAMF7", # Plasma cells
+  "CD40", "CD86", "HLA-DRA", "HLA-DRB1", # B cell activation markers
+  "CD14", "CEBPB", "MPO", "S100A8", "S100A9", "SPI1", "LYZ",   "IRF8", # Monocytes
+  "IL7R", "CD3D", "CD3E", "CD3G", # General T cell markers
+  "CD4", # CD4+ T cells
+  "CD8A", "CD8B", # CD8+ T cells
+  "FOXP3", "IL2RA", # Tregs
+  "CCR7", "SELL", # Memory/naïve T cells
+  "CD69", "IFNG", "IL2", # T cell Activation markers
+  "TBX21", "GATA3", "RORC", "CTLA4", # T subset-specific markers
+  "CD19", "CD5", "FCER2", "CD79b", # CLL B-Cell Marker
+  "GNLY", "NKG7", "NCAM1", "KLRD1", "PRF1", "KLRK1", "KLRC1", "FCGR3A", "ZBTB16", "IL2RB" # NK cells
+)
+
+UMAP_marker_genes <- plotEmbedding(
+    ArchRProj = HealthyProj, 
+    colorBy = "GeneScoreMatrix", 
+    name = markerGenes, 
+    embedding = "Subset_UMAP_Harmony_Subset_IterativeLSI",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = getImputeWeights(HealthyProj),
+    plotAs = "points"
+)
+
+UMAP_marker_genes_figure <- lapply(UMAP_marker_genes, function(x){
+    x + guides(color = FALSE, fill = FALSE) + 
+    theme_ArchR(baseSize = 6.5) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+cowplot::plot_grid(plotlist=UMAP_marker_genes_figure, ncol = 4)
+
+cowplot::plot_grid(plotlist=UMAP_marker_genes_figure, ncol = 4) %>% 
+  ggsave(filename = file.path(ArchR_dir_healthy_3, "Plots/UMAP_healthy_marker_genes_figure.png"), 
+                              units="in",
+                  width = 8,
+                  height = 18)
+```
+
+## Add final celltype annotation
+```{r}
+# Relabeling as NK cells
+# Healthy_annotation <- tibble("label_cellbarcode"=HealthyProj$cellNames,
+# "Subset_Clusters_0.3_Harmony_Subset_IterativeLSI"=HealthyProj@cellColData$Subset_Clusters_0.3_Harmony_Subset_IterativeLSI,
+# "Subset_predictedGroup_Un_Hao_IterativeLSI"=HealthyProj@cellColData$Subset_predictedGroup_Un_Hao_IterativeLSI) %>%
+# dplyr::mutate(My_annotation_healthy=if_else(Subset_Clusters_0.3_Harmony_Subset_IterativeLSI %in% c("C10", "C11", "C12"), "NK",
+#                 Subset_predictedGroup_Un_Hao_IterativeLSI))
+
+Healthy_annotation <- tibble("label_cellbarcode"=HealthyProj$cellNames,
+"Subset_Clusters_0.3_Harmony_Subset_IterativeLSI"=HealthyProj@cellColData$Subset_Clusters_0.3_Harmony_Subset_IterativeLSI,
+"Subset_predictedGroup_Un_Hao_IterativeLSI"=HealthyProj@cellColData$Subset_predictedGroup_Un_Hao_IterativeLSI) %>%
+dplyr::mutate(My_annotation_healthy=Subset_predictedGroup_Un_Hao_IterativeLSI,
+              My_annotation_healthy=if_else(condition=My_annotation_healthy %in% c("CD4 T", "CD8 T", "other T"), true="T", false=My_annotation_healthy))
+
+HealthyProj <- addCellColData(ArchRProj = HealthyProj,
+              data=Healthy_annotation %>% pull(My_annotation_healthy),
+              cells=Healthy_annotation %>% pull(label_cellbarcode),
+              name="My_annotation_healthy", force = T)
+
+healthy_annotation_IterativeLSI_subset <- plotEmbedding(
+  plotAs = "points",
+  size = 1,
+  embedding = "Subset_UMAP_Harmony_Subset_IterativeLSI",
+  HealthyProj,
+  colorBy = "cellColData",
+  name = "My_annotation_healthy",
+  pal = annotation_colours_named
+) +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_pub() +
+  theme(legend.position = "bottom",
+    legend.direction = "horizontal")
+```
+
+
+## Save ArchR project
+```{r}
+setwd(analysis_dir)
+ 
+saveArchRProject(
+  ArchRProj = HealthyProj,
+  outputDirectory = ArchR_dir_healthy_3,
+  load = FALSE,
+  overwrite = TRUE)
+```
