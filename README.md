@@ -6,9 +6,9 @@ This repository contains all code to reproduce the analysis from [Rathgeber *et 
 ## Main Figures
 To view the assembled figures and their respective code for assembly, first view:
 
-[Publication Figures](Panel_Scripts/Publication_Figures.md)\
+[Publication Figures](Panel_Scripts/Publication_Figures.md)
 
-To view the figure's input of the individual panels, view:\
+To view the figure's input of the individual panels, view:
 
 Figure 1 ( [A](Panel_Scripts/Cohort_Characterisation_Metadata.Rmd) | [B left](Panel_Scripts/mtDNA_Mutation_Statistics.Rmd) [ right](Panel_Scripts/mtDNA_Mutation_Statistics.Rmd) | [C](Panel_Scripts/ATAC_Healthy_Clustering.Rmd) | [D left](Panel_Scripts/ATAC_Healthy_Clustering.Rmd) [ right](Panel_Scripts/DCA.Rmd) | [E](Panel_Scripts/DPA.Rmd) | [F](Panel_Scripts/GEX_Healthy_Clustering.Rmd) | [G left](Panel_Scripts/GEX_Healthy_Clustering.Rmd) [ right](Panel_Scripts/DEGA.Rmd) | [H](Panel_Scripts/DEGA_Patients.Rmd) ) \
 Figure 2 ( A | [B](Panel_Scripts/Analyse_mtDNA_mutations.Rmd) | [C left](Panel_Scripts/WBCC_Development_Penter_Gohil.Rmd) [ rigth](Panel_Scripts/Heteroplasmy_Distributions_Penter_Gohil.Rmd) | [D left](Panel_Scripts/WBCC_Development.Rmd) [ right](Panel_Scripts/Heteroplasmy_Distributions.Rmd) | [E](Panel_Scripts/Heteroplasmy_Distributions.Rmd) )\
@@ -18,11 +18,11 @@ Figure 5 ( A | [B](Panel_Scripts/VDJ_BCR_Profiling.Rmd) | [C](Panel_Scripts/VDJ_
 
 
 ## Supplementary Figures
-To view the assembled supplementary figures and their respective code for assembly, first view:\
+To view the assembled supplementary figures and their respective code for assembly, first view:
 
-[Supplementary Figures](Panel_Scripts/Supplementary_Figures.md)\
+[Supplementary Figures](Panel_Scripts/Supplementary_Figures.md)
 
-To view the supplement figure's input of the individual panels, view:\
+To view the supplement figure's input of the individual panels, view:
 
 Supplementary Figure 1 ( [A](Panel_Scripts/Cohort_Characterisation_Metadata.Rmd) | [B](Panel_Scripts/mtDNA_Mutation_Statistics.Rmd) | [C](Panel_Scripts/mtDNA_Mutation_Statistics.Rmd) )\
 Supplementary Figure 2 ( [A](Panel_Scripts/DCA.Rmd) | [B](Panel_Scripts/DCA.Rmd) | [C](Panel_Scripts/DCA.Rmd) )\
@@ -41,5 +41,5 @@ Supplementary Figure 14 ( [A]() | [B]() | [C]() | [D]() | [E]() )\
 Supplementary Figure 15 ( [here](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) [ and there](Panel_Scripts/Alternative_Clonotype_Definition.Rmd) )
 
 ## Data availability
-Raw data has been made accessible on NCBI GEO (GSE295489, GSE295490, GSE295491; reviewer access tokens: ).\
+Raw data has been made accessible on NCBI GEO (GSE295489, GSE295490, GSE295491).\
 Nanoranger data can be found 
