@@ -14,7 +14,7 @@ Figure 1 ( [A](Cohort_Characterisation_Metadata.Rmd) | [B left](mtDNA_Mutation_S
 Figure 2 ( A | [B](Analyse_mtDNA_mutations.Rmd) | [C left](WBCC_Development_Penter_Gohil.Rmd) [ rigth](Heteroplasmy_Distributions_Penter_Gohil.Rmd) | [D left](WBCC_Development.Rmd) [ right](Heteroplasmy_Distributions.Rmd) | [E](Heteroplasmy_Distributions.Rmd) )\
 Figure 3 ( A | [B left](DCA_Batches.Rmd) [ right](Pseudobolk_DESeq2.Rmd) | [C](DCA_Batches.Rmd) | [D](DCA_Batches.Rmd) | [E](Pseudobulk_DESeq2.Rmd) | [F](Pseudobulk_DESeq2.Rmd) )\
 Figure 4 ( [A](Compare_BCR_mtDNA_Clones.Rmd) | [B](Compare_BCR_mtDNA_Clones.Rmd) | [C](Analyse_mtDNA_Mutations.Rmd) | D | [E](Compare_BCR_mtDNA_Clones_Nanoranger.Rmd) | [F](Analyse_mtDNA_Mutations.Rmd) | [G](Analyse_mtDNA_Mutations.Rmd) | H )\
-Figure 5 ( A | [B](VDJ_BCR_Profiling.Rmd) | [C](VDJ_BCR_Profiling.Rmd) | [D top](VDJ_BCR_Profiling.Rmd) [ bottom](FACS_Data.Rmd) | [E](Alternative_Clonotype_Definition.Rmd) | [F](Alternative_Clonotype_Definition.Rmd) | [G](Alternative_Clonotype_Definition.Rmd) )\
+Figure 5 ( A | [B](VDJ_BCR_Profiling.Rmd) | [C](VDJ_BCR_Profiling.Rmd) | [D top](VDJ_BCR_Profiling.Rmd) [ bottom](FACS_Data.Rmd) | [E](Alternative_Clonotype_Definition.Rmd) | [F](Alternative_Clonotype_Definition.Rmd) | [G](Alternative_Clonotype_Definition.Rmd) )
 
 
 ## Supplementary Figures
@@ -38,8 +38,8 @@ Supplementary Figure 11 ( [A](Compare_BCR_mtDNA_Clones.Rmd) | [B](Analyse_mtDNA_
 Supplementary Figure 12 ( [A](Analyse_mtDNA_Mutations.Rmd) )\
 Supplementary Figure 13 ( [A](Compare_BCR_mtDNA_Clones_Nanoranger.Rmd) )\
 Supplementary Figure 14 ( [A]() | [B]() | [C]() | [D]() | [E]() )\
-Supplementary Figure 15 ( [here](Analyse_mtDNA_Mutations.Rmd) [ and there](Alternative_Clonotype_Definition.Rmd) )\
+Supplementary Figure 15 ( [here](Analyse_mtDNA_Mutations.Rmd) [ and there](Alternative_Clonotype_Definition.Rmd) )
 
 ## Data availability
-Raw data has been made accessible on NCBI GEO (GSE295489, GSE295490, GSE295491; reviewer access tokens: snahciumhdmrxsx, cbydisaatfibhaz, avyxaiqordgbhwn).\
-Nanoranger data can be found ##ADD SRA location.
+Raw data has been made accessible on NCBI GEO (GSE295489, GSE295490, GSE295491).\
+Nanoranger data can be found 
