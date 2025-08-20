@@ -6,7 +6,7 @@ This repository contains all code to reproduce the analysis from [Rathgeber *et 
 ## Main Figures
 To view the assembled figures and their respective code for assembly, first view:
 
-[Publication Figures](Panel_Scripts/Publication_Figures.md)
+[Publication Figures](Publication_Figures.md)
 
 To view the figure's input of the individual panels, view:
 
@@ -20,7 +20,7 @@ Figure 5 ( A | [B](Panel_Scripts/VDJ_BCR_Profiling.Rmd) | [C](Panel_Scripts/VDJ_
 ## Supplementary Figures
 To view the assembled supplementary figures and their respective code for assembly, first view:
 
-[Supplementary Figures](Panel_Scripts/Supplementary_Figures.md)
+[Supplementary Figures](Supplementary_Figures.md)
 
 To view the supplement figure's input of the individual panels, view:
 
