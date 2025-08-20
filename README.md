@@ -1,5 +1,5 @@
 # Single cell epigenetic and transcriptomic states across the MBL/CLL continuum
-This repository contains all code to reproduce the analysis from [Rathgeber *et al.* (2024)](https://) (Manuscript in preparation).
+This repository contains all code to reproduce the analysis from [Rathgeber *et al.* (2025)](https://) (Manuscript in preparation).
 
 
 
