@@ -42,4 +42,4 @@ Supplementary Figure 15 ( [here](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) [ an
 
 ## Data availability
 Raw data has been made accessible on NCBI GEO (GSE295489, GSE295490, GSE295491).\
-Nanoranger data can be found 
+Nanoranger data can be found on SRA (PRJNA1254962)

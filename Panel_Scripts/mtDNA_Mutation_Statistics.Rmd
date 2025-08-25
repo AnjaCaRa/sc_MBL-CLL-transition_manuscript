@@ -348,7 +348,7 @@ hm <- Heatmap(matrix = percentage_malignant_cells[mutation_order, patient_order]
                 show_column_names = FALSE,
                 
                 #row parameters
-                row_title = "678 mtDNA mutations",
+                row_title = "677 mtDNA mutations",
                 row_title_gp = gpar(fontsize = 10),
                 show_row_names = FALSE,
                 heatmap_legend_param = list(

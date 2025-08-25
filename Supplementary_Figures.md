@@ -1,7 +1,7 @@
 Supplementary Publication Figures
 ================
 Anja Rathgeber
-19 August, 2025
+25 August, 2025
 
 - [GOAL](#goal)
 - [Load Libraries](#load-libraries)
@@ -1568,24 +1568,14 @@ subsupp7
 
 ``` r
 subsupp8 <- ggarrange(
-  ggarrange(WBCC_CLL101_plot$CLL101 + labs(y = "WBC/nl"),
-    hetplasmy_dist_plot(`density_distributions_CLL101_9144C>A`) +
-      theme(
-        legend.direction = "vertical",
-        legend.background = element_blank()
-      ),
-    NULL,
-    hetplasmy_dist_plot(`density_distributions_CLL101_7053G>A`),
-    nrow = 2,
-    ncol = 2
-  ),
-  ggarrange(
+    ggarrange(
     WBCC_scatter +
       theme(aspect.ratio = 1),
     duration_scatter +
       theme(aspect.ratio = 1) + labs(y = "Fold change heteroplasmyn\n(CLL/MBL)"),
     nrow = 1, ncol = 2
   ),
+  NULL,
   density_distributions,
   qqplots,
   ncol = 2,
@@ -1595,7 +1585,7 @@ subsupp8 <- ggarrange(
 )
 
 ggsave(
-  filename = file.path(project_dir, "Summary_Plots/20250818_Submission_Supplement8.pdf"),
+  filename = file.path(project_dir, "Summary_Plots/20250825_Submission_Supplement8.pdf"),
   plot = subsupp8,
   height = 11,
   width = 8.5,

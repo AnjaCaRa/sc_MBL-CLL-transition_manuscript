@@ -1,7 +1,7 @@
 Publication Main Figures
 ================
 Anja Rathgeber
-19 August, 2025
+25 August, 2025
 
 - [GOAL](#goal)
 - [Load Libraries](#load-libraries)
@@ -634,7 +634,7 @@ subpub_f1 <- plot_grid(
 
 ggsave(subpub_f1,
   device = cairo_pdf,
-  file = file.path(project_dir, "Summary_Plots/20250818_Submission_Figure1.pdf"),
+  file = file.path(project_dir, "Summary_Plots/20250825_Submission_Figure1.pdf"),
   width = 11,
   height = 8.5,
   units = "in",
