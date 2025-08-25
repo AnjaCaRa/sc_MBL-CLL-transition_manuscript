@@ -33,7 +33,7 @@ Supplementary Figure 6 ( [A](Panel_Scripts/Surface_Markers.Rmd) | [B](Panel_Scri
 Supplementary Figure 7 ( [A](Panel_Scripts/CVA.Rmd) | [B](Panel_Scripts/CVA_RNA.Rmd) )\
 Supplementary Figure 8 ( [A](Panel_Scripts/Heteroplasmy_Distributions.Rmd) | B | [C](Panel_Scripts/Heteroplasmy_Distributions.Rmd) | [D](Panel_Scripts/Heteroplasmy_Distributions.Rmd) )\
 Supplementary Figure 9 ( [A](Panel_Scripts/DCA_Batches.Rmd) | [B](Panel_Scripts/DCA_Batches.Rmd) )\
-Supplementary Figure 10 ( [A](Panel_Scripts/Pseudobulk_GeneSetEnrichments.Rmd) | [B](Panel_Scripts/Pseudobulk_DESeq2.Rmd) )\
+Supplementary Figure 10 ( [A](Panel_Scripts/Pseudobulk_GeneSetEnrichment.Rmd) | [B](Panel_Scripts/Pseudobulk_DESeq2.Rmd) )\
 Supplementary Figure 11 ( [A](Panel_Scripts/Compare_BCR_mtDNA_Clones.Rmd) | [B](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) | [C](Panel_Scripts/Compare_BCR_mtDNA_Clones_Nanoranger.Rmd) | [D](Panel_Scripts/Compare_BCR_mtDNA_Clones_Nanoranger.Rmd) | [E](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) | [F](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) )\
 Supplementary Figure 12 ( [A](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) )\
 Supplementary Figure 13 ( [A](Panel_Scripts/Compare_BCR_mtDNA_Clones_Nanoranger.Rmd) )\
