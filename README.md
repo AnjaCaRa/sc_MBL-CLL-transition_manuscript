@@ -41,7 +41,7 @@ Supplementary Figure 14 ( [A](Panel_Scripts/Compare_BCR_mtDNA_Clones.Rmd) | [B](
 Supplementary Figure 15 ( [A](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) )\
 Supplementary Figure 16 ( [A](Panel_Scripts/Compare_BCR_mtDNA_Clones_Nanoranger.Rmd) )\
 Supplementary Figure 17 ( [A](Panel_Scripts/VDJseq_BCR_Profiling.Rmd) | [B](Panel_Scripts/VDJseq_BCR_Profiling.Rmd) | [C](Panel_Scripts/FACS_Data.Rmd) | [D](Panel_Scripts/Alternative_Clonotype_Definition.Rmd) | [E](Panel_Scripts/Alternative_Clonotype_Definition.Rmd) | [F](Panel_Scripts/Alternative_Clonotype_Definition.Rmd))\
-Supplementary Figure 18 ( [here](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) [ and there](Panel_Scripts/Alternative_Clonotype_Definition.Rmd) )
+Supplementary Figure 18 ( [here](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) [ and there](Panel_Scripts/Alternative_Clonotype_Definition.Rmd))\
 Supplementary Figure 19 ( [A](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [B](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [C](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [D](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [E](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd))\
 
 ## Data availability
