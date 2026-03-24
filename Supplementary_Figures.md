@@ -1908,7 +1908,7 @@ ggsave(
 subsupp1
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure1-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure1-1.png)<!-- -->
 
 ## Supp. 2 TF Motifs and Gene Scores ATAC
 
@@ -1952,7 +1952,7 @@ ggsave(
 subsupp2
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure2-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure2-1.png)<!-- -->
 
 ## Supp. 3 Marker Gene Expression RNA
 
@@ -1996,7 +1996,7 @@ ggsave(
 subsupp3
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure3-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure3-1.png)<!-- -->
 
 ## Supp. 4 Chromatin Tracks
 
@@ -2019,7 +2019,7 @@ ggsave(
 subsupp4
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure4-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure4-1.png)<!-- -->
 
 ## Supp. 5 Residual physiologic B cells
 
@@ -2062,7 +2062,7 @@ ggsave(
 subsupp5
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure5-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure5-1.png)<!-- -->
 
 ## Supp. 6 T cell subsets
 
@@ -2113,7 +2113,7 @@ ggsave(
 subsupp6
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure6-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure6-1.png)<!-- -->
 
 ## Supp. 7 Cell Surface Markers
 
@@ -2177,7 +2177,7 @@ ggsave(
 subsupp7
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure7-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure7-1.png)<!-- -->
 
 ## Supp. 8 CNVs
 
@@ -2203,7 +2203,7 @@ ggsave(
 subsupp8
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure8-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure8-1.png)<!-- -->
 
 ## Supp. 9 Heteroplasmy Analysis
 
@@ -2247,7 +2247,7 @@ ggsave(
 subsupp9
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure9-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure9-1.png)<!-- -->
 
 ## Supp. 10 Differential ATAC Analysis
 
@@ -2277,7 +2277,7 @@ ggsave(
 subsupp10
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure10-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure10-1.png)<!-- -->
 
 ## Supp. 11 TF Activity Analysis
 
@@ -2308,7 +2308,7 @@ ggsave(
 subsupp11
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure11-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure11-1.png)<!-- -->
 
 ## Supp. 12 CLLMap Comparison
 
@@ -2336,7 +2336,7 @@ ggsave(
 subsupp12
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure12-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure12-1.png)<!-- -->
 
 ## Supp. 13 Differential GEX Analysis
 
@@ -2381,7 +2381,7 @@ ggsave(
 subsupp13
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure13-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure13-1.png)<!-- -->
 
 ## Supp. 14 Nanoranger Analysis
 
@@ -2433,7 +2433,7 @@ ggsave(
 subsupp14
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure14-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure14-1.png)<!-- -->
 
 ## Supp. 15 Heteroplasmy of mtDNA Mutation from mtscATAC-seq with CNVs
 
@@ -2471,7 +2471,7 @@ ggsave(
 subsupp15
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure15-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure15-1.png)<!-- -->
 
 ## Supp. 16 Heteroplasmy of mtRNA Clones from Nanoranger
 
@@ -2493,7 +2493,7 @@ ggsave(
 subsupp16
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure16-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure16-1.png)<!-- -->
 
 ## Supp. 17 Clonotypes
 
@@ -2544,7 +2544,7 @@ ggsave(
 subsupp17
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure17-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure17-1.png)<!-- -->
 
 ## Supp. 18 Heteroplasmy of mtDNA Clones from mtscATAC-seq
 
@@ -2580,13 +2580,13 @@ ggsave(
 subsupp18.1
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure18-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure18-1.png)<!-- -->
 
 ``` r
 subsupp18.2
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure18-2.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure18-2.png)<!-- -->
 
 ## Supp. 19 HC-MBL Progression
 
@@ -2665,4 +2665,4 @@ ggsave(
 subsupp19
 ```
 
-![](Supplementary_Figures_files/figure-gfm/SupplementaryFigure19-1.png)<!-- -->
+![](Supplementary_Figures_files/SupplementaryFigure19-1.png)<!-- -->

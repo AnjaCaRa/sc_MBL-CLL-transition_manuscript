@@ -489,7 +489,7 @@ ggsave(subpub_f1,
 subpub_f1
 ```
 
-![](Publication_Figures_files/figure-gfm/Figure1-1.png)<!-- -->
+![](Publication_Figures_files/Figure1-1.png)<!-- -->
 
 ## Fig.2 Cell type annotation
 
@@ -611,7 +611,7 @@ ggsave(subpub_f2,
 subpub_f2
 ```
 
-![](Publication_Figures_files/figure-gfm/Figure2-1.png)<!-- -->
+![](Publication_Figures_files/Figure2-1.png)<!-- -->
 
 ## Fig.3 Heteroplasmy Analysis
 
@@ -691,7 +691,7 @@ ggsave(subpub_f3,
 subpub_f3
 ```
 
-![](Publication_Figures_files/figure-gfm/Figure3-1.png)<!-- -->
+![](Publication_Figures_files/Figure3-1.png)<!-- -->
 
 ## Fig.4 Pseudobulk Differential Analysis
 
@@ -795,7 +795,7 @@ ggsave(subpub_f4,
 subpub_f4
 ```
 
-![](Publication_Figures_files/figure-gfm/Figure4-1.png)<!-- -->
+![](Publication_Figures_files/Figure4-1.png)<!-- -->
 
 ## Fig.5 Cross Validation mtDNA mtRNA Variants
 
@@ -869,7 +869,7 @@ ggsave(subpub_5,
 subpub_5
 ```
 
-![](Publication_Figures_files/figure-gfm/Figure5-1.png)<!-- -->
+![](Publication_Figures_files/Figure5-1.png)<!-- -->
 
 ## Fig.6 Clonal Dynamics
 
@@ -946,4 +946,4 @@ ggsave(subpub_f6,
 subpub_f6
 ```
 
-![](Publication_Figures_files/figure-gfm/Figure6-1.png)<!-- -->
+![](Publication_Figures_files/Figure6-1.png)<!-- -->
