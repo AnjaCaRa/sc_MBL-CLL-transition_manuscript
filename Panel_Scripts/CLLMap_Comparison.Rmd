@@ -1,0 +1,735 @@
+---
+title: "CLL_map_comparison"
+author: "Anja_Rathgeber"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# GOAL
+The aim of this script is to validate the differentially expressed genes from our cohort between residual B cells and (pre-)malignant cells in a larger CLL bulk cohort. As no MBL samples are included we also compare U-CLL with M-CLL and assess FFS.
+
+# Load libraries
+```{r}
+library(readr)
+library(tidyverse)
+library(Seurat)
+library(ggpubr)
+library(survival)
+library(survminer)
+```
+
+# Set paths
+```{r}
+source("config_paths.R")
+source(file.path(project_dir, "scripts/publication_theme.R"))
+
+data_dir <- file.path(project_dir, "data")
+result_dir <-file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "GEX_analysis")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+plotting_dir <- file.path(analysis_dir, "Plots")
+DESeq2_analysis_tsv_dir <- file.path(result_dir, "DESeq2_analysis")
+```
+
+
+# Load data
+```{r Kniesbacher_cohort}
+TPM_values <- read_tsv(file.path(project_dir, "data/CLL_map/cllmap_rnaseq_tpms_603samps_deseqLog10_batchcorr.tsv"))
+participants <- read_tsv(file.path(project_dir, "data/CLL_map/participants.n2npc.tsv"))
+samples <- read_tsv(file.path(project_dir, "data/CLL_map/samples.edmjnn.tsv"))
+patient_metadata <- samples %>%
+  dplyr::left_join(participants) %>%
+  dplyr::filter(experimental_strategy == "RNAseq") %>%
+  dplyr::filter(participant_id %in% colnames(TPM_values)[-c(1:2)])
+```
+
+```{r My_DGEA_MBL_vs_CLL_data}
+metadata_all <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata.tsv"))
+
+gex_scaled <- readRDS(file.path(RDS_dir, "gex_scaled.RDS"))
+# Per patient
+common_DEGs <- readRDS(file.path(project_dir, "RDS_Objects/common_DEGs.RDS")) %>%
+  dplyr::filter(DEG_in_patients > 3) %>%
+  pull(gene)
+
+common_DEGs_patients <- readRDS(file.path(project_dir, "RDS_Objects/common_DEGs_patients.RDS"))
+
+common_DEGs_expression_patients <- imap(common_DEGs_patients, ~ FetchData(object = subset(gex_scaled,
+  subset = patient_id %in% .x[["patient_id"]] & My_annotation %in% c("MBL B Cell", "CLL B Cell")
+), vars = .y) %>%
+  dplyr::rename("expression" = 1)) %>%
+  list_rbind(names_to = "DEG")
+
+# Pseudobulk
+disease_markers_downsampled_pb <- readRDS(file.path(RDS_dir, "disease_markers_downsampled.RDS")) %>%
+  dplyr::filter(significance == "significant" & !str_starts(label, "IG") & abs(avg_log2FC) >= 2) %>%
+  pull(gene)
+
+DEGs_downsampled_expression_pb <- FetchData(object = subset(readRDS(file.path(RDS_dir, "gex_scaled.RDS")), My_annotation %in% c("MBL B Cell", "CLL B Cell")), vars = c(disease_markers_downsampled_pb)) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_") %>%
+  separate(label, c("patient_id", "sample"), sep = "\\.") %>%
+  dplyr::mutate(disease = case_when(`sample` == 1 ~ "MBL",
+    `sample` == 2 ~ "CLL",
+    `patient_id` == "MBL3" ~ "CLL",
+    `patient_id` == "MBL4" ~ "CLL",
+    .default = "MBL"
+  )) %>%
+  dplyr::mutate(disease = factor(disease, levels = c("MBL", "CLL"))) %>%
+  tidyr::pivot_longer(-c(patient_id, sample, cellbarcode, disease), names_to = "DEG", values_to = "expression")
+
+# DESeq2
+DEGs_statistics <- read_tsv(file.path(DESeq2_analysis_tsv_dir, "/tsv_data/statistics_DEGS_comparisons.tsv"))
+```
+
+## Expression Value Analysis
+
+### Per patient results
+```{r, fig.width=20, fig.height=10}
+patient_DEG_plot <- common_DEGs_expression_patients %>%
+  tibble::rownames_to_column("label_cellbarcode") %>%
+  group_by(DEG) %>%
+  tidyr::separate("label_cellbarcode", into = c("label", "cellbarcode"), sep = "_") %>%
+  tidyr::separate(label, c("patient_id", "sample"), sep = "\\.") %>%
+  dplyr::mutate(
+    disease = if_else(`sample` == 1, "MBL", "CLL"),
+    patient_id = factor(patient_id, levels = c(paste0("CLL", 1:10)))
+  ) %>%
+  dplyr::mutate(disease = factor(disease, levels = c("MBL", "CLL"))) %>%
+  group_by(disease) %>%
+  ggplot(aes(x = patient_id, y = expression)) +
+  geom_violin(aes(fill = disease), trim = FALSE, position = position_dodge(0.9)) +
+  geom_boxplot(aes(fill = disease), width = 0.05, position = position_dodge(0.9)) +
+  # stat_compare_means(aes(label = ..p.signif..),
+  #                   label.x = 3, label.y = 3.5)+
+  scale_y_continuous(expand = expansion(mult = c(0, NA))) +
+  scale_fill_manual(name = "Disease", values = my_MBL_CLL_colours_named) +
+  labs(x = "", fill = "Disease", y = "Expression") +
+  theme_pub() +
+  theme(legend.position = "none") +
+  facet_wrap(~DEG, nrow = 2, scales = "free_x")
+
+patient_DEG_plot
+```
+
+```{r Expression_IGHV_status, fig.width=10, fig.height=4}
+TPM_annotated_patients <- TPM_values %>%
+  dplyr::filter(Description %in% names(common_DEGs_patients)) %>%
+  tidyr::pivot_longer(-c(Name, Description), names_to = "participant_id", values_to = "TPM_value") %>%
+  dplyr::left_join(patient_metadata) %>%
+  dplyr::filter(!is.na(sample_id))
+
+IGHVmut_patients_plot <- TPM_annotated_patients %>%
+  dplyr::filter(!is.na(tumor_molecular_subtype)) %>%
+  dplyr::mutate(tumor_molecular_subtype = factor(tumor_molecular_subtype, levels = c("U-CLL", "M-CLL"))) %>%
+  ggplot(aes(y = TPM_value, x = tumor_molecular_subtype, fill = tumor_molecular_subtype)) +
+  geom_violin(position = position_dodge(0.9)) +
+  geom_boxplot(width = 0.2, position = position_dodge(0.9)) +
+  stat_compare_means(aes(label = ..p.signif..),
+    label.x = 1.5, label.y = 3
+  ) +
+  theme_pub() +
+  labs(x = "", y = "TPM value") +
+  scale_fill_manual(name = "Tumor molecular subtype", values = c("M-CLL" = "midnightblue", "U-CLL" = "lightblue")) +
+  theme(
+    axis.text.x = element_text(hjust = 0.5),
+    legend.position = "none",
+    legend.direction = "horizontal"
+  ) +
+  facet_wrap(~Description, nrow = 1)
+
+IGHVmut_patients_plot
+saveRDS(IGHVmut_patients_plot, file.path(project_dir, "RDS_Objects/IGHVmut_patients_plot.RDS"))
+```
+
+```{r Expression_epitypes, fig.width=10, fig.height=4}
+# including naive-like CLL (n-CLL; predominantly U-CLL), intermediate CLL (i-CLL; mix of M-CLL and U-CLL) and memory-like CLL (m-CLL; predominantly M-CLL)
+epitype_patients_plot <- TPM_annotated_patients %>%
+  dplyr::filter(!is.na(cll_epitype), cll_epitype != "unclassified") %>%
+  dplyr::mutate(cll_epitype = factor(cll_epitype,
+    levels = c("n-CLL", "i-CLL", "m-CLL")
+  )) %>%
+  ggplot(aes(y = TPM_value, x = cll_epitype, fill = cll_epitype)) +
+  geom_violin(position = position_dodge(0.9)) +
+  geom_boxplot(width = 0.2, position = position_dodge(0.9)) +
+  stat_compare_means(aes(label = ..p.signif..),
+    label.x = 2, label.y = 3
+  ) +
+  theme_pub() +
+  labs(x = "", y = "TPM value") +
+  scale_fill_manual(name = "CLL epitype", values = c("n-CLL" = "lightblue", "i-CLL" = "lightblue4", "m-CLL" = "midnightblue")) +
+  theme(
+    axis.text.x = element_text(hjust = 0.5),
+    legend.position = "none",
+    legend.direction = "horizontal"
+  ) +
+  facet_wrap(~Description, nrow = 1)
+epitype_patients_plot
+saveRDS(epitype_patients_plot, file.path(project_dir, "RDS_Objects/epitype_patients_plot.RDS"))
+```
+
+```{r}
+CLL_map_expression_patient_figure <- cowplot::plot_grid(patient_DEG_plot,
+  cowplot::plot_grid(IGHVmut_patients_plot, epitype_patients_plot, nrow = 1, ncol = 2, labels = c("B", "C")),
+  ncol = 1,
+  nrow = 2,
+  labels = "A",
+  rel_heights = c(2, 1)
+)
+
+CLL_map_expression_patient_figure %>%
+  ggsave(
+    filename = file.path(project_dir, "Summary_Plots/CLL_map_comparison_patient.png"),
+    width = 20,
+    height = 7.5
+  )
+```
+
+```{r}
+#check direction of change
+common_DEGs_expression_patients %>% 
+tibble::rownames_to_column("label_cellbarcode") %>%
+  group_by(DEG) %>%
+  tidyr::separate("label_cellbarcode", into = c("label", "cellbarcode"), sep = "_") %>%
+  tidyr::separate(label, c("patient_id", "sample"), sep = "\\.") %>%
+  dplyr::mutate(
+    disease = if_else(`sample` == 1, "MBL", "CLL"),
+    patient_id = factor(patient_id, levels = c(paste0("CLL", 1:10)))
+  ) %>%
+  dplyr::mutate(disease = factor(disease, levels = c("MBL", "CLL"))) %>%
+  group_by(disease, DEG) %>% 
+  summarise(mean_expression=mean(expression)) %>% 
+  pivot_wider(id_cols = DEG, values_from =mean_expression, names_from = disease)
+```
+
+### Pseudobulk
+
+```{r, fig.width=15, fig.height=6}
+DEGS_downsampled_plot <- DEGs_downsampled_expression_pb %>%
+  dplyr::mutate(disease = factor(disease, levels = c("MBL", "CLL"))) %>%
+  ggplot(aes(x = disease, y = expression, fill = disease)) +
+  geom_violin(aes(fill = disease), trim = FALSE, position = position_dodge(0.9)) +
+  geom_boxplot(aes(fill = disease), width = 0.05, position = position_dodge(0.9)) +
+  stat_compare_means(aes(label = ..p.signif..),
+    label.x = 1.5, label.y = 2.5
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, NA))) +
+  scale_fill_manual(name = "Disease", values = my_MBL_CLL_colours_named) +
+  labs(x = "", fill = "Disease", y = "Expression") +
+  theme_pub() +
+  theme(legend.position = "none") +
+  facet_wrap(~DEG, nrow = 1)
+
+DEGS_downsampled_plot
+```
+
+```{r}
+TPM_annotated_pb <- TPM_values %>%
+  dplyr::filter(Description %in% disease_markers_downsampled_pb) %>%
+  tidyr::pivot_longer(-c(Name, Description), names_to = "participant_id", values_to = "TPM_value") %>%
+  dplyr::left_join(patient_metadata) %>%
+  dplyr::filter(!is.na(sample_id))
+```
+
+```{r Expression_IGHV_status, fig.width=3.2, fig.height=4}
+IGHVmut_pb_plot <- TPM_annotated_pb %>%
+  dplyr::filter(!is.na(tumor_molecular_subtype)) %>%
+  dplyr::mutate(tumor_molecular_subtype = factor(tumor_molecular_subtype, levels = c("U-CLL", "M-CLL"))) %>%
+  ggplot(aes(y = TPM_value, x = tumor_molecular_subtype, fill = tumor_molecular_subtype)) +
+  geom_violin(position = position_dodge(0.9)) +
+  geom_boxplot(width = 0.2, position = position_dodge(0.9)) +
+  stat_compare_means(aes(label = ..p.signif..),
+    label.x = 1.5, label.y = 2.2
+  ) +
+  theme_pub() +
+  lims(y = c(0, 2.5)) +
+  labs(x = "", y = "TPM value") +
+  scale_fill_manual(name = "Tumor molecular subtype", values = c("M-CLL" = "midnightblue", "U-CLL" = "lightblue")) +
+  theme(
+    axis.text.x = element_text(hjust = 0.5),
+    legend.position = "none",
+    legend.direction = "horizontal"
+  ) +
+  facet_wrap(~Description, nrow = 1)
+
+IGHVmut_pb_plot
+saveRDS(IGHVmut_pb_plot, file.path(project_dir, "RDS_Objects/IGHVmut_pb_plot.RDS"))
+```
+
+```{r Expression_epitypes, fig.width=10, fig.height=4}
+# including naive-like CLL (n-CLL; predominantly U-CLL), intermediate CLL (i-CLL; mix of M-CLL and U-CLL) and memory-like CLL (m-CLL; predominantly M-CLL)
+epitype_pb_plot <- TPM_annotated_pb %>%
+  dplyr::filter(!is.na(cll_epitype), cll_epitype != "unclassified") %>%
+  dplyr::mutate(cll_epitype = factor(cll_epitype,
+    levels = c("n-CLL", "i-CLL", "m-CLL")
+  )) %>%
+  ggplot(aes(y = TPM_value, x = cll_epitype, fill = cll_epitype)) +
+  geom_violin(position = position_dodge(0.9)) +
+  geom_boxplot(width = 0.2, position = position_dodge(0.9)) +
+  stat_compare_means(aes(label = ..p.signif..),
+    label.x = 2, label.y = 2.2
+  ) +
+  theme_pub() +
+  lims(y = c(0, 2.5)) +
+  labs(x = "", y = "TPM value") +
+  scale_fill_manual(name = "CLL epitype", values = c("n-CLL" = "lightblue", "i-CLL" = "lightblue4", "m-CLL" = "midnightblue")) +
+  theme(
+    axis.text.x = element_text(hjust = 0.5),
+    legend.position = "none",
+    legend.direction = "horizontal"
+  ) +
+  facet_wrap(~Description, nrow = 1)
+
+epitype_pb_plot
+saveRDS(epitype_pb_plot, file.path(project_dir, "RDS_Objects/epitype_pb_plot.RDS"))
+```
+
+```{r}
+CLL_map_expression_pb_figure <- cowplot::plot_grid(DEGS_downsampled_plot,
+  cowplot::plot_grid(IGHVmut_pb_plot, epitype_pb_plot, nrow = 1, ncol = 2, labels = c("B", "C")),
+  ncol = 1,
+  nrow = 2,
+  labels = "A"
+)
+
+CLL_map_expression_pb_figure %>%
+  ggsave(
+    filename = file.path(project_dir, "Summary_Plots/CLL_map_comparison_pseudobulk.png"),
+    width = 8,
+    height = 5
+  )
+```
+
+
+```{r}
+#check direction of change
+DEGs_downsampled_expression_pb %>% 
+  group_by(disease, DEG) %>% 
+  summarise(mean_expression=mean(expression)) %>% 
+  pivot_wider(id_cols = DEG, values_from =mean_expression, names_from = disease)
+```
+
+## Survival Analysis
+
+```{r}
+DEG_status <- common_DEGs_patients %>%
+  map(~ dplyr::select(., gene, patient_id)) %>%
+  bind_rows() %>%
+  dplyr::mutate(value = 1) %>%
+  pivot_wider(id_cols = patient_id, names_from = gene, values_fill = 0, values_from = value)
+
+metadata_survival <- metadata_all %>%
+  dplyr::filter(data_type == "ATAC", str_starts(label, "CLL")) %>%
+  dplyr::select(patient_id, date_of_MBL_diagnosis, date_of_CLL_diagnosis) %>%
+  dplyr::mutate(
+    progression_duration = lubridate::time_length(difftime(date_of_CLL_diagnosis, date_of_MBL_diagnosis), "days"),
+    status = 1
+  ) %>%
+  unique()
+
+metadata_survival <- metadata_survival %>%
+  left_join(DEG_status) %>%
+  replace(is.na(.), 0)
+```
+
+```{r fig.width=30, fig.height=6}
+km_plot_AC007952.4 <- survfit(Surv(progression_duration, status) ~ AC007952.4, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_AC007952.4$plot <- km_plot_AC007952.4$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "AC007952.4")
+
+km_plot_AC007952.4$table <- km_plot_AC007952.4$table +
+  labs(y = "AC007952.4", x = "Time [days]")
+
+km_plot_AC007952.4
+
+km_plot_ATP6V0A1 <- survfit(Surv(progression_duration, status) ~ ATP6V0A1, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_ATP6V0A1$plot <- km_plot_ATP6V0A1$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "ATP6V0A1")
+
+km_plot_ATP6V0A1$table <- km_plot_ATP6V0A1$table +
+  labs(y = "ATP6V0A1", x = "Time [days]")
+
+km_plot_ATP6V0A1
+
+km_plot_BCL2A1 <- survfit(Surv(progression_duration, status) ~ BCL2A1, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_BCL2A1$plot <- km_plot_BCL2A1$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "BCL2A1")
+
+km_plot_BCL2A1$table <- km_plot_BCL2A1$table +
+  labs(y = "BCL2A1", x = "Time [days]")
+
+km_plot_BCL2A1
+
+km_plot_EBF1 <- survfit(Surv(progression_duration, status) ~ EBF1, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+
+km_plot_EBF1$plot <- km_plot_EBF1$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "EBF1")
+
+km_plot_EBF1$table <- km_plot_EBF1$table +
+  labs(y = "EBF1", x = "Time [days]")
+
+km_plot_EBF1
+
+km_plot_EGR1 <- survfit(Surv(progression_duration, status) ~ EGR1, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_EGR1$plot <- km_plot_EGR1$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "EGR1")
+
+km_plot_EGR1$table <- km_plot_EGR1$table +
+  labs(y = "EGR1", x = "Time [days]")
+
+km_plot_EGR1
+
+km_plot_ITGA4 <- survfit(Surv(progression_duration, status) ~ ITGA4, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_ITGA4$plot <- km_plot_ITGA4$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "ITGA4")
+
+km_plot_ITGA4$table <- km_plot_ITGA4$table +
+  labs(y = "ITGA4", x = "Time [days]")
+
+km_plot_ITGA4
+
+km_plot_LINC01781 <- survfit(Surv(progression_duration, status) ~ LINC01781, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_LINC01781$plot <- km_plot_LINC01781$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "LINC01781")
+
+km_plot_LINC01781$table <- km_plot_LINC01781$table +
+  labs(y = "LINC01781", x = "Time [days]")
+
+km_plot_LINC01781
+
+km_plot_MYADM <- survfit(Surv(progression_duration, status) ~ MYADM, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_MYADM$plot <- km_plot_MYADM$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "MYADM")
+
+km_plot_MYADM$table <- km_plot_MYADM$table +
+  labs(y = "MYADM", x = "Time [days]")
+
+km_plot_MYADM
+
+km_plot_PDE4D <- survfit(Surv(progression_duration, status) ~ PDE4D, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_PDE4D$plot <- km_plot_PDE4D$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "PDE4D")
+
+km_plot_PDE4D$table <- km_plot_PDE4D$table +
+  labs(y = "PDE4D", x = "Time [days]")
+
+km_plot_PDE4D
+
+km_plot_PMEPA1 <- survfit(Surv(progression_duration, status) ~ PMEPA1, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_PMEPA1$plot <- km_plot_PMEPA1$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "PMEPA1")
+
+km_plot_PMEPA1$table <- km_plot_PMEPA1$table +
+  labs(y = "PMEPA1", x = "Time [days]")
+
+km_plot_PDE4D
+
+km_plot_SNX22 <- survfit(Surv(progression_duration, status) ~ SNX22, data = metadata_survival) %>%
+  ggsurvplot(
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE, # Add risk table
+    risk.table.col = "strata", # Change risk table color by groups
+    surv.median.line = "hv", # Specify median survival
+    ggtheme = theme_pub(), # Change ggplot2 theme
+    legend.labs = c("DEG", "No DEG"),
+    palette = c("darkred", "lightgrey")
+  )
+
+km_plot_SNX22$plot <- km_plot_SNX22$plot +
+  theme(legend.position = "right") +
+  scale_colour_manual(values = c("darkred", "lightgrey")) +
+  scale_fill_manual(values = c("darkred", "lightgrey")) +
+  labs(x = "Time [days]", y = "MBL stability probability", title = "SNX22")
+
+km_plot_SNX22$table <- km_plot_SNX22$table +
+  labs(y = "SNX22", x = "Time [days]")
+
+km_plot_SNX22
+
+survival_figure <- ggarrange(
+  plotlist = list(km_plot_AC007952.4$plot, km_plot_ATP6V0A1$plot, km_plot_BCL2A1$plot, km_plot_EBF1$plot, km_plot_EGR1$plot, km_plot_ITGA4$plot, km_plot_LINC01781$plot, km_plot_MYADM$plot, km_plot_PDE4D$plot, km_plot_PMEPA1$plot, km_plot_SNX22$plot),
+  nrow = 2,
+  ncol = 6,
+  common.legend = TRUE,
+  legend = "bottom"
+)
+
+  ggsave(survival_figure,
+    filename = file.path(project_dir, "Summary_Plots/Survival_plots.png"),
+    width = 30,
+    height = 6, bg="white"
+  )
+  
+saveRDS(list(km_plot_AC007952.4$plot, km_plot_ATP6V0A1$plot, km_plot_BCL2A1$plot, km_plot_EBF1$plot, km_plot_EGR1$plot, km_plot_ITGA4$plot, km_plot_LINC01781$plot, km_plot_MYADM$plot, km_plot_PDE4D$plot, km_plot_PMEPA1$plot, km_plot_SNX22$plot), file.path(project_dir, "RDS_Objects/survival_plots_patients.RDS"))
+```
+
+# DESeq results
+
+```{r fig.width=10}
+DEGs <- DEGs_statistics$Gene %>% unique()
+DEGs_noIG <- DEGs[str_starts(string = DEGs, pattern = "IGH|IGL|IGK", negate = TRUE)]
+
+DEG_expression_IGHV <- TPM_values %>% 
+  dplyr::filter(Description %in%DEGs_noIG
+                ) %>% 
+  tidyr::pivot_longer(-c(Name, Description), names_to = "participant_id", values_to = "TPM_value") %>%
+  dplyr::left_join(patient_metadata) %>%
+  dplyr::filter(!is.na(sample_id),
+                !is.na(tumor_molecular_subtype))%>%
+  dplyr::mutate(tumor_molecular_subtype = factor(tumor_molecular_subtype, levels = c("M-CLL", "U-CLL")),
+                Description=factor(Description, levels=c("ITGA4", "CD5", "LEF1", "PTPN22", "CD22", "MS4A1", "FCER2"))
+                ) %>%
+  dplyr::group_by(Description) %>% 
+  ggplot(aes(x=Description, y=TPM_value, fill=tumor_molecular_subtype))+
+  geom_boxplot(outlier.size = .1)+
+  stat_compare_means(method = "wilcox",label="p.signif", label.y = 3.5)+
+  scale_y_continuous(name="TPM", limits=c(0,4), breaks=seq(0,4,1), expand=c(0,NA))+
+  scale_fill_manual(name="Subtype", values=c("M-CLL" = "steelblue", "U-CLL" = "orange"))+
+  theme_pub()+
+  theme(axis.text.x = element_text(face = "italic"),
+        axis.title.x = element_blank())
+
+saveRDS(DEG_expression_IGHV, file = file.path(RDS_dir, "DEG_expression_IGHV.RDS"))
+ggsave(plot = DEG_expression_IGHV,filename = file.path(plotting_dir, "CLLMap_DEG_expression_IGHV.png"), width = 5, height = 3, dpi = 200)
+ggsave(plot = DEG_expression_IGHV,filename = file.path(plotting_dir, "CLLMap_DEG_expression_IGHV.pdf"), width = 5, height = 3)
+```
+
+## Survival analysis
+
+```{r}
+patient_metadata %>% 
+  dplyr::select(participant_id, tumor_molecular_subtype, ffs_days, ffs) %>% 
+  group_by(tumor_molecular_subtype)
+
+median_TPM_values <- TPM_values %>% 
+  dplyr::filter(Description %in%DEGs_noIG) %>% 
+  tidyr::pivot_longer(-c(Name, Description), names_to = "participant_id", values_to = "TPM_value") %>% 
+  group_by(Description) %>% 
+  dplyr::summarize(median_TPM=median(TPM_value),
+                   min_TPM_min=min(TPM_value),
+                   max_TPM=max(TPM_value)
+                   ) %>% 
+  dplyr::select(Description, median_TPM) %>% deframe()
+
+TPM_values_categorized <- TPM_values %>% 
+  dplyr::filter(Description %in%DEGs_noIG) %>% 
+  tidyr::pivot_longer(-c(Name, Description), names_to = "participant_id", values_to = "TPM_value") %>% 
+  dplyr::mutate(Expression_category=if_else(condition = TPM_value<= median_TPM_values[Description], true="low", false="high"),
+                Expression_category=factor(Expression_category, levels=c("low", "high"))) %>% 
+  dplyr::left_join(dplyr::select(patient_metadata, participant_id, tumor_molecular_subtype, ffs_days, ffs), by = join_by(participant_id)) %>% 
+  dplyr::filter(!is.na(tumor_molecular_subtype)) %>% 
+  tidyr::unite("Tumor_molecular_subtype_expression_category", c(tumor_molecular_subtype, Expression_category ), sep = "_", remove = FALSE)
+```
+
+```{r}
+TPM_values_categorized %>% 
+     ggplot(aes(x=TPM_value, colour=tumor_molecular_subtype))+
+     geom_density()+
+     theme_pub()+
+     facet_wrap(~Description)
+```
+
+```{r fig.width=15, fig.height=5}
+# all_surv_objects <- list()
+all_surv_objects_U <- list()
+all_surv_objects_M <- list()
+all_km_plots_U <- list()
+all_km_plots_M <- list()
+
+for (gene in (unique(TPM_values_categorized$Description))){
+  
+  TPMs_U <- TPM_values_categorized %>% 
+    dplyr::filter(Description==gene,
+                  tumor_molecular_subtype=="U-CLL")
+  
+  TPMs_M <- TPM_values_categorized %>% 
+    dplyr::filter(Description==gene,
+                  tumor_molecular_subtype=="M-CLL")
+  
+  all_surv_objects_U[[gene]] <- Surv(time = TPMs_U$ffs_days,
+                   event = TPMs_U$ffs)
+  all_surv_objects_M[[gene]] <- Surv(time = TPMs_M$ffs_days,
+                   event = TPMs_M$ffs)
+  
+  all_km_plots_U[[gene]] <- survfit(all_surv_objects_U[[gene]] ~ Expression_category, data = TPMs_U) %>% 
+    ggsurvplot(pval = TRUE,
+      pval.method = TRUE,
+      conf.int = TRUE,
+      risk.table = TRUE, 
+      risk.table.col = "strata", 
+      surv.median.line = "hv",
+      surv.scale="percent",
+      ggtheme = theme_pub(), pval.size=3,
+      legend.labs = c("low", "high"),
+      legend.title="Gene expression in U-CLL",
+      legend="bottom",
+      palette = c("low"="darkgoldenrod1", "high"="darkgoldenrod4")
+    )+
+  labs(x = "Time [days]", y = "Failure-free survival probability", title = gene)
+  
+    all_km_plots_M[[gene]] <- survfit(all_surv_objects_M[[gene]] ~ Expression_category, data = TPMs_M) %>% 
+    ggsurvplot(pval = TRUE,
+      pval.method = TRUE,
+      conf.int = TRUE,
+      risk.table = TRUE, 
+      risk.table.col = "strata", 
+      surv.median.line = "hv",
+      surv.scale="percent",
+      ggtheme = theme_pub(), pval.size=3,
+      legend.labs = c("low", "high"),
+      legend.title="Gene expression in M-CLL",
+      legend="bottom",
+      palette = c("low"="lightblue","high"="steelblue4")
+    )+
+   labs(x = "Time [days]", y = "Failure-free survival probability", title = gene)
+
+}
+saveRDS(all_km_plots_U, file = file.path(RDS_dir, "all_km_plots_U.RDS"))
+saveRDS(all_km_plots_M, file = file.path(RDS_dir, "all_km_plots_M.RDS"))
+
+ggarrange(plotlist = map(all_km_plots_U, ~.x$plot), nrow=2, ncol=4, common.legend = TRUE, legend = "bottom") %>% 
+  ggsave(plot = ., file.path(plotting_dir, "U-CLL_survivalplots.png"), width=15, height=5, dpi=200, bg="white")
+ggarrange(plotlist = map(all_km_plots_M, ~.x$plot), nrow=2, ncol=4, common.legend = TRUE, legend = "bottom") %>% 
+  ggsave(plot = ., file.path(plotting_dir, "M-CLL_survivalplots.png"), width=15, height=5, dpi=200, bg="white")
+```

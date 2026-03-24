@@ -45,6 +45,9 @@ library_dir <- file.path(project_dir_remote, "scratch/ATAC")
 results_dir <- file.path(project_dir_remote, "results")
 analysis_dir <- file.path(results_dir, "ArchR_analysis")
 
+IGHV_analysis_dir <- file.path(results_dir, "IGHV_analysis")
+IGHV_analysis_tsv_dir <- file.path(IGHV_analysis_dir, "tsv_data")
+
 ArchR_proj <- file.path("ArchR_Healthy_35_samples")
 ArchR_proj_ndb <- file.path("ArchR_Healthy_35_samples_no_doublets")
 ArchR_proj_healthy_3 <- file.path("ArchR_Healthy_3")
@@ -75,6 +78,9 @@ patient_id2plotting_id <- metadata %>%
   select(patient_id, plotting_id) %>%
   unique() %>%
   deframe
+
+label2IGHV_inferred <- read_tsv(file.path(IGHV_analysis_tsv_dir, "20251010_IGHV_status_inferred.tsv")) %>% 
+  dplyr::select(label, IGHV_inferred) %>% unique() %>% deframe()
 
 My_annotation <- read_tsv(file.path(analysis_dir, "CLLProj_35_samples_subsetted_My_annotation.tsv")) %>% 
   dplyr::mutate(My_annotation_LC=case_when(str_starts(label_cellbarcode, "MBL10|MBL11|MBL12|MBL13|MBL14|MBL15")                      & My_annotation =="MBL_B_Cells" ~ "LC_MBL_B_Cells",
@@ -448,9 +454,10 @@ umap_samples
 annotation <- tibble("label_cellbarcode"=CLLProj_Healthy_no_db$cellNames,
                      "label"=CLLProj_Healthy_no_db$Sample) %>%
   left_join(metadata %>% dplyr::filter(data_type=="ATAC") %>% 
-              dplyr::select(label, patient_id, technology, sequencing_date))%>% 
+              dplyr::select(label, patient_id, technology, sequencing_date, IGHV))%>% 
   left_join(My_annotation) %>% 
-  dplyr::mutate(My_annotation_LC=if_else(condition=is.na(My_annotation_LC), true=NA, false=My_annotation_LC))
+  dplyr::mutate(My_annotation_LC=if_else(condition=is.na(My_annotation_LC), true=NA, false=My_annotation_LC)) %>% 
+  dplyr::mutate(IGHV_inferred=if_else(is.na(IGHV), label2IGHV_inferred[label], IGHV))
 
 
 CLLProj_Healthy_no_db <- addCellColData(
@@ -758,6 +765,39 @@ ggsave(umap_seqdate, filename = file.path(ArchR_dir_healthy_35_no_doublets, "Plo
                               units="in",
                   width = 4,
                   height = 4)
+```
+
+### IGHV mutational status inferred
+
+```{r}
+CLLProj_Healthy_no_db <- addCellColData(
+  ArchRProj = CLLProj_Healthy_no_db,
+  data = annotation %>%
+    dplyr::mutate(IGHV_inferred=as.character(IGHV_inferred)) %>%
+    pull(IGHV_inferred),
+  cells = annotation %>% pull(label_cellbarcode),
+  name = "IGHV_inferred",
+)
+
+IGHV_inferred <- plotEmbedding(
+  ArchRProj = CLLProj_Healthy_no_db,
+  colorBy = "cellColData",
+  pal = IGHV_colours,
+  name = "IGHV_inferred",
+  embedding = "UMAP_IterativeLSI",
+  plotAs = "points") +
+  labs(title="IGHV mutational status", x = "UMAP1", y = "UMAP2", colour="IGHV") +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    legend.position = "right",
+    legend.direction = "vertical"
+  )
+cowplot::plot_grid(patient_annotation_umap+theme(legend.position = "none"), IGHV_inferred+theme(legend.position="none"), nrow=1, ncol=2)
+
+write_tsv(IGHV_inferred$data, file.path(DCA_analysis_tsv_dir, "ATAC_healthy_IGHV_inferred_data.tsv"))
 ```
 
 ### GeneScores
@@ -1123,5 +1163,119 @@ saveArchRProject(
   outputDirectory = ArchR_dir_healthy_35_no_doublets,
   load = FALSE,
   overwrite = TRUE)
+```
+
+## Quantify distance between B and (pre-)malignant cells
+### Bulk
+```{r}
+# Retrieve LSI matrix
+IterativeLSI <- getReducedDims(ArchRProj = CLLProj_Healthy_no_db, reducedDims = "IterativeLSI")
+
+# Get all cellbarcodes of interest
+Blike_bcs <- annotation %>% 
+  dplyr::filter(My_annotation_LC %in% c("LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells", "B"),
+                !str_starts(label, "lareau|mimitou")) %>% dplyr::pull(label_cellbarcode)
+CLLProj_Healthy_no_db <- addCellColData(
+  ArchRProj = CLLProj_Healthy_no_db,
+  data = annotation %>% pull(patient_id),
+  cells = annotation %>% pull(label_cellbarcode),
+  name = "patient_id", force=TRUE
+)
+B_bcs <- annotation %>% 
+  dplyr::filter(My_annotation_LC %in% c("B"),
+                !str_starts(label, "lareau|mimitou")) %>% 
+  pull(label_cellbarcode)
+
+LC_MBL_bcs <- annotation %>% 
+  dplyr::filter(My_annotation_LC %in% c("LC_MBL_B_Cells"),
+                !str_starts(label, "lareau|mimitou")) %>% 
+  pull(label_cellbarcode)
+
+HC_MBL_bcs <- annotation %>% 
+  dplyr::filter(My_annotation_LC %in% c("HC_MBL_B_Cells"),
+                !str_starts(label, "lareau|mimitou")) %>% 
+  pull(label_cellbarcode)
+
+CLL_bcs <- annotation %>% 
+  dplyr::filter(My_annotation_LC %in% c("CLL_B_Cells"),
+                !str_starts(label, "lareau|mimitou")) %>% 
+  pull(label_cellbarcode)
+```
+
+
+```{r}
+# Subset LSI to only cells of interest and compute distances
+compute_min_distance <- function(reduced_dims, bcs_celltype_from, bcs_celltype_to){
+  min_dist<- proxy::dist(reduced_dims[bcs_celltype_from,],reduced_dims[bcs_celltype_to,]) %>% 
+    apply(1, min)
+  return(min_dist)
+}
+
+min_distances <- list("LC-MBL"=LC_MBL_bcs,
+  "HC-MBL"=HC_MBL_bcs,
+  "CLL"=CLL_bcs) %>% 
+  map(~compute_min_distance(IterativeLSI, .x, B_bcs))
+```
+
+```{r}
+min_distances <- map_dfr(min_distances, ~enframe(.x, name = "label_cellbarcode", value="dist_to_B"), .id="My_annotation_LC")
+write_tsv(min_distances, file.path(DCA_analysis_tsv_dir, "min_distances.tsv"))
+min_distances <- read_tsv(file.path(DCA_analysis_tsv_dir, "min_distances.tsv"))
+
+comp <- list( c("LC-MBL", "HC-MBL"), 
+              #c("HC_MBL", "CLL"), 
+              c("LC-MBL", "CLL") )
+
+distance_quantification <- min_distances %>% 
+  dplyr::mutate(My_annotation_LC=factor(My_annotation_LC, levels=c("LC-MBL", "HC-MBL", "CLL"))) %>% 
+  ggplot(aes(x=My_annotation_LC, y=dist_to_B, fill=My_annotation_LC))+
+  geom_violin()+
+  geom_boxplot(outlier.shape = NA, width=0.2, fill="white")+
+  stat_compare_means(comparisons = comp, method = "wilcox", size=3)+
+  scale_x_discrete(name="Cell type", expand=c(0,0))+
+  scale_y_continuous(name="Distance to\nclosest B cell", expand=expansion(mult=c(0,0.05)), limits=c(0,7),oob = squish_infinite)+
+  scale_fill_manual(name="Cell type", values = my_MBL_CLL_colours_named)+
+  theme_pub()
+distance_quantification
+
+ggsave(plot=distance_quantification, filename=file.path(DCA_analysis_plotting_dir, "distance_quantification.pdf"), width=7, height=4, dpi=600)
+write_tsv(distance_quantification$data, file.path(DCA_analysis_tsv_dir, "distance_quantification.tsv"))
+```
+
+### Per patient
+
+```{r fig.width=3.14, fig.height=1.944}
+#sorted by size of largest clone based on CD5
+patient_order <- metadata %>% 
+  dplyr::filter(data_type=="ATAC") %>% 
+  dplyr::select(patient_id, `CD5/CD19%`) %>% 
+  dplyr::filter(patient_id %in% c("MBL11", "MBL10","MBL12", "MBL15", "MBL13", "MBL14")) %>% 
+  arrange(`CD5/CD19%`) %>% 
+  pull(patient_id)
+
+patient_id2_cd19cd5 <- metadata %>% 
+  dplyr::filter(data_type=="ATAC") %>% 
+  dplyr::select(patient_id, `CD5/CD19%`) %>% 
+  dplyr::filter(patient_id %in% c("MBL11", "MBL10","MBL12", "MBL15", "MBL13", "MBL14")) %>% 
+  arrange(`CD5/CD19%`) %>% dplyr::select(patient_id, `CD5/CD19%`) %>% deframe()
+
+distance_LC_quantification <- min_distances %>% 
+  dplyr::filter(My_annotation_LC =="LC-MBL") %>% 
+  tidyr::separate(col = label_cellbarcode, into = c("label", "cellbarcode"), sep = "#") %>% 
+  dplyr::mutate(label=factor(label, levels=patient_order)) %>% 
+  ggplot(aes(x=label, y=dist_to_B, fill=My_annotation_LC, group = label))+
+  geom_violin()+
+  scale_x_discrete(name="Cell type", expand=c(0,0),
+                   labels=label2plotting_id[c("MBL11", "MBL10","MBL12", "MBL15", "MBL13", "MBL14")])+
+  scale_y_continuous(name="Distance to\nclosest B cell", expand=expansion(mult=c(0,0.05)), limits=c(0,5),oob = squish_infinite, breaks=seq(0,5,1))+
+  scale_fill_manual(values = my_MBL_CLL_colours_named)+
+  theme_pub()+
+  theme(axis.text.x = element_text(angle=45, hjust=1),
+        axis.title.x=element_blank(),
+        legend.position = "none")
+distance_LC_quantification
+ggsave(plot = distance_LC_quantification, filename = file.path(DCA_analysis_plotting_dir, "20260204_distance_LC_quantification_figure.png"), dpi=200, width=3.14, height= 1.944, bg="white")
+ggsave(plot = distance_LC_quantification, filename = file.path(DCA_analysis_plotting_dir, "20260204_distance_LC_quantification_figure.pdf"), width=3.14, height= 1.944, bg="white")
+write_tsv(distance_LC_quantification$data, file.path(DCA_analysis_tsv_dir, "distance_LC_quantification.tsv"))
 ```
 

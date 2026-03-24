@@ -1013,4 +1013,36 @@ mt_clones_expansion_data_plot <- umap_mtDNA_clones_expansion$data %>%
 mt_clones_expansion_data_plot
 ```
 
+### Sankey diagrams
+```{r fig.width=24, fig.height=5}
+# set.seed(125)
+sankey_diagrams <- clonotypes_filtered[names(clonotypes_filtered) %in% paste0("CLL", c(1,3,7,8))] %>% 
+  imap(~as_tibble(.x, rownames="label_cellbarcode") %>% 
+  dplyr::rename("mtDNA_clone"="value") %>% 
+  dplyr::left_join(my_annotation_df) %>% 
+  dplyr::mutate(disease=disease_annotation[label_cellbarcode],
+                disease=if_else(disease=="MBL", 0, 1),
+                disease=as.numeric(disease)) %>% 
+  dplyr::filter(My_annotation %in% c("MBL_B_Cells", "CLL_B_Cells")) %>% 
+  dplyr::group_by(mtDNA_clone, disease) %>% 
+  dplyr::summarize(counts=n()) %>% 
+  dplyr::group_by(disease) %>% 
+  dplyr::mutate(percentage=counts/sum(counts)*100) %>% 
+  ggplot(aes(x=disease, y=percentage, fill=mtDNA_clone))+
+  geom_area(alpha=0.6)+
+  geom_col(colour="black", width=0.3 )+
+  labs(y="Frequency [%]", fill="mtDNA clone", title=patient_id2plotting_id[.y])+
+  scale_y_continuous(expand = c(0,0))+
+  scale_x_continuous(expand = c(0,0), breaks=c(0,1), labels=c("MBL", "CLL"))+
+  scale_fill_manual(values = mt_colours[[.y]]) +
+  theme_pub()+
+  theme(axis.title.x = element_blank(),
+        legend.position = "none"))
 
+sankey_diagrams%>%
+  plot_grid(plotlist = ., nrow=1, ncol=4)
+
+sankey_diagrams %>%
+  imap(~.x$data %>%
+  write_tsv(file.path(tsv_dir, paste0(.y, "_alternative_clonotypes_sankey_diagram_data.tsv"))))
+```

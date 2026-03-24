@@ -1,0 +1,292 @@
+---
+title: "Phylogenetic_trees_MBL_CLL"
+author: "Anja_Rathgeber"
+date: "`r Sys.Date()`"
+output: html_document
+output:
+  html_document:
+    toc: yes
+    toc_depth: 4
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+# GOAL
+The aim of this script is to investigate which different B-cell subtypes we have present in our data set.
+ 
+# Load libraries
+
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(Seurat)
+library(redeemR)
+library(RColorBrewer)
+library(cowplot)
+library(tidyverse)
+library(Matrix)
+library(ggtree)
+library(ggtreeExtra)
+library(ggplot2)
+library(tidytree)
+library(phangorn)
+library(ggnewscale)
+```
+
+# Set paths
+
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+result_dir <-file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "mtDNA_mutation_analysis")
+plotting_dir <- file.path(analysis_dir, "plots")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+
+ArchR_dir_Annotation <- file.path(project_dir_ext, "ArchR_Projects_4_Annotation")
+ArchR_dir1 <- "ArchR_Subset1"
+ArchR_dir2 <- "ArchR_Subset2"
+ArchR_dir3 <- "ArchR_Subset3"
+ArchR_dir4 <- "ArchR_Subset4"
+result_dir_subset1 <- file.path(ArchR_dir_Annotation, ArchR_dir1)
+result_dir_subset2 <- file.path(ArchR_dir_Annotation, ArchR_dir2)
+result_dir_subset3 <- file.path(ArchR_dir_Annotation, ArchR_dir3)
+result_dir_subset4 <- file.path(ArchR_dir_Annotation, ArchR_dir4)
+ArchR_dir <- paste0("ArchR_Subset", 1:4) %>% as.list()
+result_dir_subsets <- file.path(ArchR_dir_Annotation, ArchR_dir) %>% 
+  setNames(paste0("Subset", 1:4))
+RDS_dir_subsets <- file.path(result_dir_subsets, "RDS_objects") %>% 
+  setNames(paste0("Subset", 1:4))
+```
+
+# Load data
+
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r}
+metadata_all <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata.tsv")) %>% 
+  dplyr::mutate(MBL_CLL_subtype=case_when(is.na(MBL_subtype)~ "CLL",
+                                                                                                                                             .default = MBL_subtype))
+
+patient_id2plotting_id <- metadata_all %>%
+  dplyr::select(patient_id, plotting_id) %>%
+  unique() %>% 
+  deframe()
+
+label2plotting_id <- metadata_all %>%
+  dplyr::select(label, plotting_id) %>%
+  unique() %>% 
+  deframe()
+```
+
+```{r}
+VAF_values_all_paired <- list(
+readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/umap_embedding_mito_cln.RDS")),
+readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset2/RDS_objects/umap_embedding_mito_cln.RDS")),
+readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset3/RDS_objects/umap_embedding_mito_cln.RDS"))) %>%
+bind_rows() %>% 
+  dplyr::select(patient_id, variant_id, label, cell_barcode, VAF) %>% 
+  dplyr::filter(!(patient_id %in% c("MBL7dup", "CLL6")),
+                variant_id != "310T>C",
+                # VAFs filtered for alternative clonotype definition
+                !(patient_id == "CLL3" & variant_id == "11711G>A"|
+                patient_id == "MBL15" & variant_id == "13886T>C"|
+                patient_id == "CLL1" & variant_id == "2857T>C"|
+                patient_id == "CLL7" & variant_id == "11435G>A"|
+                patient_id == "CLL8" & variant_id == "16519T>C")) %>%
+  split(f = .$patient_id ) %>% 
+  purrr::map(~as_tibble(.))
+
+class(VAF_values_all_paired) <- class(vctrs::list_of(!!!VAF_values_all_paired))
+
+VAF_values_all_unpaired <- list(readRDS(file.path(ArchR_dir_Annotation, "ArchR_Subset1/RDS_objects/umap_embedding_mito_cln_MBL.RDS")),
+                               readRDS(file.path(ArchR_dir_Annotation,"ArchR_Subset2/RDS_objects/umap_embedding_mito_cln_MBL.RDS")),
+                               readRDS(file.path(ArchR_dir_Annotation,"ArchR_Subset3/RDS_objects/umap_embedding_mito_cln_MBL.RDS")),    
+                               readRDS(file.path(ArchR_dir_Annotation,"ArchR_Subset4/RDS_objects/umap_embedding_mito_cln_MBL.RDS"))) %>%
+  bind_rows() %>% 
+  dplyr::filter(!(patient_id %in% c("MBL7dup", "CLL6")),
+                variant_id != "310T>C",
+                # VAFs filtered for alternative clonotype definition
+                !(patient_id == "CLL3" & variant_id == "11711G>A"|
+                patient_id == "MBL15" & variant_id == "13886T>C"|
+                patient_id == "CLL1" & variant_id == "2857T>C"|
+                patient_id == "CLL7" & variant_id == "11435G>A"|
+                patient_id == "CLL8" & variant_id == "16519T>C")) %>%
+  split(.$patient_id)
+
+ATAC_celltype_annotation_healthy <- read_tsv(file.path(result_dir, "20250129_ATAC_celltype_annotation_healthy.tsv"))
+
+VAF_values_Blike <- c(VAF_values_all_paired, VAF_values_all_unpaired) %>% 
+  map(~tidyr::unite(.x, col = "label_cellbarcode", c(label, cell_barcode),  sep = "#", remove=FALSE) %>% 
+  dplyr::left_join(ATAC_celltype_annotation_healthy %>% 
+                     dplyr::select(label_cellbarcode, My_annotation_healthy)) %>% 
+    dplyr::filter(My_annotation_healthy %in% c("B","LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")) %>% 
+    dplyr::select(label_cellbarcode, variant_id, VAF) %>% 
+    tidyr::pivot_wider(id_cols = label_cellbarcode, names_from = variant_id, values_from = VAF) %>% 
+    column_to_rownames("label_cellbarcode") %>% 
+    dplyr::filter(rowSums(across(everything())) != 0) %>% 
+    dplyr::select(where(~ sum(.x) != 0)) %>% 
+    as.matrix)
+
+rm(VAF_values_all_unpaired, VAF_values_LC)
+
+clonotypes <- c(unlist(file.path(RDS_dir_subsets[1:3], "clonotypes.RDS") %>% 
+  map(~readRDS(.x))), unlist(file.path(RDS_dir_subsets[1:4], "clonotypes_MBL.RDS") %>% 
+  map(~readRDS(.x)))) %>% 
+  map(~ .@meta.data %>%
+    rownames_to_column("label_cellbarcode") %>%
+    dplyr::select(label_cellbarcode, seurat_clusters) %>% 
+    dplyr::rename(mtDNA_clone=seurat_clusters) %>% deframe)
+
+clonotypes_filtered <- readRDS(file.path(RDS_dir, "clonotypes_filtered.RDS")) %>% 
+  map(~ .@meta.data %>%
+    rownames_to_column("label_cellbarcode") %>%
+    dplyr::select(label_cellbarcode, seurat_clusters) %>% 
+    dplyr::rename(mtDNA_clone=seurat_clusters) %>% deframe)
+
+# use alternative clonotype definition instead
+clonotypes <- c(clonotypes[!names(clonotypes) %in% c(names(clonotypes_filtered), "MBL7dup", "CLL6")], clonotypes_filtered)
+
+# UMAP all patients incl. healthy
+ATAC_celltype_annotation_healthy <- read_tsv(file.path(result_dir, "20250129_ATAC_celltype_annotation_healthy.tsv"))
+
+clonotype_annotation <- clonotypes %>% 
+  imap(~as_tibble(.x, rownames="label_cellbarcode") %>% 
+  dplyr::rename("mtDNA_clone"="value") %>% 
+  dplyr::left_join(ATAC_celltype_annotation_healthy %>% dplyr::select(label_cellbarcode, My_annotation_healthy)) %>% 
+  dplyr::filter(My_annotation_healthy %in% c("B","LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")))
+
+# replace mtDNA clone colours with alternative clone colour-annotation
+mtDNAcloneColours <- read_tsv(file.path(tsv_dir, "mtDNAclone_colours.tsv")) %>% dplyr::filter(!(patient_id %in% c("CLL3", "MBL15", "CLL1", "CLL7", "CLL8") ))
+alternative_mtDNAclone_colours <- read_tsv(file.path(tsv_dir, "alternative_mtDNAclone_colours.tsv"))
+mtDNAcloneColours <- bind_rows(mtDNAcloneColours, alternative_mtDNAclone_colours)
+```
+
+# Build trees per paired-patient sample
+
+```{r}
+VAF_values_all_paired_ps <- VAF_values_all_paired %>% 
+  map(~tidyr::unite(.x, col = "label_cellbarcode", c(label, cell_barcode),  sep = "#", remove=FALSE) %>% 
+  dplyr::left_join(ATAC_celltype_annotation_healthy %>% 
+                     dplyr::select(label_cellbarcode, My_annotation_healthy)) %>% 
+    dplyr::filter(My_annotation_healthy %in% c("B","LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")) %>% 
+    dplyr::select(label_cellbarcode, label, variant_id, VAF) %>% 
+    tidyr::pivot_wider(id_cols = c(label_cellbarcode, label), names_from = variant_id, values_from = VAF) %>% 
+    base::split(.$label)) %>% 
+    list_flatten(name_spec = "{inner}") %>% 
+    map(~column_to_rownames(.x, "label_cellbarcode") %>%
+          dplyr::select(-label) %>% 
+    dplyr::filter(rowSums(across(everything())) != 0) %>% 
+    dplyr::select(where(~ sum(.x) != 0)) %>% 
+    as.matrix)
+
+clonotype_annotation_ps <- clonotype_annotation %>% 
+  map(~separate(.x ,col = label_cellbarcode, into = c("label", NA), sep="#", remove=FALSE) %>% 
+        split(.$label)) %>% 
+  list_flatten(name_spec = "{inner}") %>% 
+  map(~dplyr::select(.x, -label))
+
+tree_objects_ps <- list()
+matched_clones_objects_ps <- list()
+for (idx in (c(1:18))){
+  print(idx)
+
+  # Calculate distance
+  d.3WJaccard<-BinaryDist(VAF_values_all_paired_ps[[idx]], method="3WJaccard")
+  print("Calculated Jaccard distance")
+  
+  # Generate mutual KNN graph
+  # my_igraph_ps<-FromDist2Graph(d.3WJaccard)
+  # plot(my_igraphs_ps, vertex.size = 5,vertex.label = NA, edge.label = NA) 
+  
+  nn<-MakeNN(d.3WJaccard)
+  knn.matrix<-NN2M(nn)
+  knn.igraph<-igraph::graph_from_adjacency_matrix(knn.matrix,
+                                                  diag = F,
+                                                  mode = "undirected")
+  print("Generated MKNN graph")
+  # head(nn$idx,n=2)
+  # head(nn$dist,n=2)   
+  
+  # Neighbour joining tree
+  treedata_ps<-as.treedata(nj(d.3WJaccard))
+  
+  TREEobject<-new("TREE",
+                  phylo=nj(d.3WJaccard),
+                  treedata=treedata_ps,
+                  records=paste(d.3WJaccard, "nj", sep="-"))
+  
+  tree_objects_ps[[names(VAF_values_all_paired_ps[idx])]] <- TREEobject
+
+  print("Built neighbour joining tree")
+  
+  matched_clones_ps <- TREEobject@treedata@phylo[["tip.label"]] %>% 
+    as_tibble() %>% 
+    rename("label_cellbarcode"="value") %>% 
+    left_join(clonotype_annotation_ps[[names(VAF_values_all_paired_ps[idx])]] %>% 
+                dplyr::select(label_cellbarcode, mtDNA_clone, My_annotation_healthy), b=join_by(label_cellbarcode))
+  
+  matched_clones_objects_ps[[names(VAF_values_all_paired_ps[idx])]] <- matched_clones_ps
+}
+saveRDS(tree_objects_ps, file.path(RDS_dir, "tree_objects_ps.RDS"))
+saveRDS(matched_clones_objects_ps, file.path(RDS_dir, "matched_clones_objects_ps.RDS"))
+```
+
+## Plot trees
+
+```{r fig.width=13, fig.height=43.27}
+paired_circular_mtDNA_clone_trees <- list()
+for (idx in (c(1:18))){
+  print(idx)
+  
+  # Plot tree  
+  print("Plotting tree visualisation")      
+  mtDNA_clone_colours <- mtDNAcloneColours %>% 
+    dplyr::filter(patient_id ==str_remove(names(VAF_values_all_paired_ps[idx]),pattern = "\\.1|\\.2")) %>% 
+    dplyr::select(mtDNAclone, colour) %>% 
+    deframe()
+  
+  paired_circular_mtDNA_clone_tree <- ggtree(tree_objects_ps[[idx]]@treedata, layout="circular", branch.length='none', size=0.1)+
+
+      geom_fruit(data=matched_clones_objects_ps[[idx]], aes(y=label_cellbarcode,x=2, fill=mtDNA_clone),
+               geom=geom_tile,
+               width=0.02*nrow(matched_clones_objects_ps[[idx]]),
+               offset=0.05, show.legend = FALSE)+
+    scale_fill_manual(values=mtDNA_clone_colours, 
+                      name= "mtDNA clone")+
+    guides(fill = guide_legend(nrow=10,
+    keywidth = 0.5,
+    keyheight = 0.5,
+    override.aes = list(size = 3)
+  ))+
+    new_scale_fill()+
+    geom_fruit(data=matched_clones_objects_ps[[idx]], aes(y=label_cellbarcode, x=2, fill=My_annotation_healthy),
+               geom=geom_tile,
+               width=0.02*nrow(matched_clones_objects_ps[[idx]]),
+               offset=0.08)+
+    scale_fill_manual(values=annotation_colours_named, 
+                      name= "Cell type", 
+                      labels=c("LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL"))+
+    labs(title=names(VAF_values_all_paired_ps[idx]))+
+    theme(plot.title = element_text(hjust = 0.5, 
+                                             size = 10,
+                                             face = "plain", 
+                                             colour="black"))+
+  guides(fill = guide_legend(nrow=3,
+    keywidth = 0.5,
+    keyheight = 0.5,
+    override.aes = list(size = 3)
+   ))
+  
+  print("Saving tree visualisation")
+  paired_circular_mtDNA_clone_trees[[names(VAF_values_all_paired_ps[idx])]] <- paired_circular_mtDNA_clone_tree
+}
+
+saveRDS(paired_circular_mtDNA_clone_trees, file.path(RDS_dir, "paired_circular_mtDNA_clone_trees.RDS"))
+```
+
+

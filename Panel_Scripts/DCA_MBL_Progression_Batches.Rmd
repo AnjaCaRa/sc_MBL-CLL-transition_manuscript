@@ -1,0 +1,382 @@
+---
+title: "Differential Chromatin Accessibility Analysis Progression Analysis per batch"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL
+The aim of this script is to find out if there are recurrent differentially accessible chromatin regions between 5-year stable HC-MBL samples and patients which progressed to CLL before. Analysis was conducted across patients with respect to their sequencing batches (batcheffect was found). 
+
+# Load libraries
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(ArchR)
+library(readxl)
+library(ggrepel)
+library(tidyverse)
+library(glue)
+library(ggpubr)
+library(SeuratDisk)
+library(Seurat)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(Cairo)
+library(sva)
+library(scales)
+library(chromVAR)
+library(patchwork)
+library(circlize)
+library(ComplexHeatmap)
+library(magick)
+register(MulticoreParam(8))
+```
+
+```{r Run_parameters}
+set.seed(1)
+addArchRThreads(threads = 8)
+addArchRGenome("hg38")
+```
+
+## Set paths
+
+```{r }
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "DCA_analysis")
+
+plotting_dir <- file.path(analysis_dir, "Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+
+DESeq2_analysis_dir <- file.path(result_dir, "DESeq2_analysis")
+
+ArchR_project_Blike <- "ArchR_35_samples/ArchR_Blike"
+ArchR_dir_Blike <- file.path(result_dir, ArchR_project_Blike)
+
+ArchR_project_MBL_Progression <- "ArchR_MBL_Progression"
+ArchR_dir_MBL_Progression <- file.path(project_dir_ext, ArchR_project_MBL_Progression)
+```
+
+```{r}
+# local
+source(file.path(project_dir, "scripts/publication_theme.R"))
+source(file.path(project_dir, "scripts/heatmap_plotting_functions.R"))
+```
+
+## Metadata
+
+```{r }
+metadata <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata.tsv"))
+cohort_overview <- read_tsv(file.path(DESeq2_analysis_dir, "tsv_data/20251017_MBL_progression_cohort_overview.tsv"))
+
+patient_id2plotting_id <- metadata %>%
+  dplyr::select(patient_id, plotting_id) %>%
+  unique() %>%
+  deframe()
+
+label2plotting_id <- metadata %>%
+  dplyr::filter(data_type == "ATAC") %>%
+  dplyr::select(label, plotting_id) %>%
+  deframe()
+
+label2IGHV_inferred <- metadata %>% 
+    dplyr::filter(data_type == "ATAC") %>%
+  dplyr::select(label, IGHV_inferred) %>% 
+  deframe()
+```
+
+## Load ArchRproj to subset from
+```{r}
+CLLProj_Blike <- loadArchRProject(ArchR_dir_Blike)
+```
+
+## Subset ArchR project by batch
+```{r}
+# Add sequencing date annotation
+five_year_MBL_stability_annotation <- tibble("label_cellbarcode" = CLLProj_Blike$cellNames) %>%
+  tidyr::separate(label_cellbarcode, into = c("label", "cellbarcode"), sep = "#", remove = F) %>%
+  tidyr::separate(label, into = c("patient_id", NA), sep = "\\.", remove = F) %>%
+    dplyr::left_join(cohort_overview %>%
+                     dplyr::select(patient_id, five_year_MBL_stability)) %>%
+  dplyr::select(label_cellbarcode, five_year_MBL_stability) %>%
+  deframe()
+
+CLLProj_Blike <- addCellColData(
+  ArchRProj = CLLProj_Blike,
+  data = five_year_MBL_stability_annotation,
+  cells = names(five_year_MBL_stability_annotation),
+  name = "five_year_MBL_stability"
+)
+
+# Add sequencing date annotation
+seqdate_annotation <- tibble("label_cellbarcode" = CLLProj_Blike$cellNames) %>%
+  tidyr::separate(label_cellbarcode, into = c("label", "cellbarcode"), sep = "#", remove = F) %>%
+  dplyr::left_join(metadata %>% dplyr::filter(data_type == "ATAC") %>% dplyr::select(label, sequencing_date)) %>%
+  dplyr::mutate(sequencing_date = as.numeric(as.factor(sequencing_date))) %>%
+  dplyr::select(label_cellbarcode, sequencing_date) %>%
+  deframe()
+
+CLLProj_Blike <- addCellColData(
+  ArchRProj = CLLProj_Blike,
+  data = seqdate_annotation,
+  cells = names(seqdate_annotation),
+  name = "sequencing_date")
+
+# to include all patients from the scRNA pseudobulk analysis would result in two seperate batch comparisons with 2 vs 3 and 3 vs 6 samples, which is why I will only use samples from the second batch
+idxBatch_MBL_Progression <- BiocGenerics::which(CLLProj_Blike@cellColData$sequencing_date == 2 & CLLProj_Blike@cellColData$patient_id %in% cohort_overview$patient_id & CLLProj_Blike@cellColData$B_like_annotation =="HC_MBL_B_Cells")
+
+cellsSample_MBL_Progression <- CLLProj_Blike$cellNames[idxBatch_MBL_Progression]
+
+CLLProj_MBL_Progression <-subsetArchRProject(
+  ArchRProj = CLLProj_Blike,
+  cells = cellsSample_MBL_Progression,
+  outputDirectory = ArchR_dir_MBL_Progression,
+  dropCells = TRUE)
+
+CLLProj_MBL_Progression <- loadArchRProject(ArchR_dir_MBL_Progression)
+```
+
+### Add pseudobulk replicates
+
+```{r}
+CLLProj_MBL_Progression <-addGroupCoverages(
+    ArchRProj = CLLProj_MBL_Progression,
+    groupBy = "five_year_MBL_stability" )
+```
+
+### Peak calling
+
+```{r}
+CLLProj_MBL_Progression <- addReproduciblePeakSet(
+    ArchRProj = CLLProj_MBL_Progression,
+    groupBy = "five_year_MBL_stability",
+    pathToMacs2 = pathToMacs3,
+  )
+
+saveArchRProject(
+      ArchRProj = CLLProj_MBL_Progression,
+      outputDirectory = ArchR_dir_MBL_Progression,
+      load = FALSE,
+      overwrite = TRUE)
+```
+
+```{r}
+CLLProj_MBL_Progression <- addPeakMatrix(CLLProj_MBL_Progression)
+
+saveArchRProject(
+      ArchRProj = CLLProj_MBL_Progression,
+      outputDirectory = ArchR_dir_MBL_Progression,
+      load = FALSE,
+      overwrite = TRUE)
+
+getAvailableMatrices(CLLProj_MBL_Progression)
+```
+
+### Pairwise peaks
+
+```{r }
+markerTest_MBL_Progression <- getMarkerFeatures(
+    ArchRProj = CLLProj_MBL_Progression,
+    useMatrix = "PeakMatrix",
+    groupBy = "five_year_MBL_stability",
+    testMethod = "wilcoxon",
+    bias = c("TSSEnrichment", "log10(nFrags)"),
+    useGroups = "progressive",
+    bgdGroups = "unprogressive"
+  )
+```
+
+### Volcano plots Pairwise testing
+
+```{r}
+volcanoplot_peaks <- plotMarkers(
+    seMarker = markerTest_MBL_Progression,
+    name = "progressive",
+    cutOff = "FDR <= 0.1 & abs(Log2FC) >= 1",
+    plotAs = "Volcano",
+    rastr = TRUE
+  ) +
+    geom_vline(xintercept = c(-1, 1), color = "grey", linetype = "dashed") +
+    geom_hline(yintercept = c(-log10(0.1)), color = "grey", linetype = "dashed") +
+    geom_point(size = 1) +
+    scale_y_continuous(
+      name = "-Log10(FDR)",
+      breaks = seq(0, 5, 1),
+      limits = c(0, 5),
+      oob = scales::oob_squish_infinite) +
+    scale_colour_manual(
+      name = "Differentially accessible peaks",
+      values = c("Down-Regulated" = "slategray3", 
+                 "Up-Regulated" = "lightpink3", 
+                 "Not-Differential" = "#D3D3D3"),
+      labels = c(
+        "Down-Regulated" = "unprogressive HC-MBL",
+        "Up-Regulated" = "progressive HC-MBL",
+        "Not-Differential" = "not significant")) +
+    theme_pub()+
+  theme(plot.title = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "vertical")
+
+volcanoplot_peaks
+
+write_tsv(volcanoplot_peaks$data, file.path(tsv_dir, "Peaks_MBL_Progression_Volcanoplot.tsv"))
+```
+
+### Add TF Mofif Annotations
+
+```{r}
+CLLProj_MBL_Progression <- addMotifAnnotations(
+    ArchRProj = CLLProj_MBL_Progression,
+    motifSet = "cisbp",
+    annoName = "Motif")
+```
+
+```{r}
+# background peaks added
+CLLProj_MBL_Progression <- addBgdPeaks(CLLProj_MBL_Progression, 
+                                      method = "chromVAR")
+```
+
+```{r}
+# motif deviation matrix added
+CLLProj_MBL_Progression <- addDeviationsMatrix(
+    ArchRProj = CLLProj_MBL_Progression,
+    bgdPeaks = getBgdPeaks(CLLProj_MBL_Progression,
+                           method = "chromVAR"),
+    peakAnnotation = "Motif", 
+    force = TRUE)
+```
+
+```{r}
+plotVarDev <- getVarDeviations(CLLProj_MBL_Progression,
+    name = "MotifMatrix",
+    plot = TRUE)
+
+plotVarDev
+```
+
+### Get Matrix from project
+
+```{r}
+MotifMatrix_tmp_MBL_Progression <-getMatrixFromProject(
+    ArchRProj = CLLProj_MBL_Progression,
+    useMatrix = "MotifMatrix",
+    useSeqnames = NULL,
+    verbose = TRUE,
+    binarize = FALSE)
+
+zscore_matrix_MBL_Progression <-as.matrix(assays(MotifMatrix_tmp_MBL_Progression)$z) %>%
+    as.data.frame()
+```
+
+```{r}
+condition <- tibble(
+  "label_cellbarcode" = CLLProj_MBL_Progression$cellNames,
+  "five_year_MBL_stability" = CLLProj_MBL_Progression$five_year_MBL_stability
+)
+
+progressive_cells <- dplyr::filter(condition, five_year_MBL_stability == "progressive") %>%
+  pull(label_cellbarcode)
+
+unprogressive_cells <- dplyr::filter(condition, five_year_MBL_stability == "unprogressive") %>%
+  pull(label_cellbarcode)
+
+# # calculate data for volcano plot
+input_zscore_matrix <- zscore_matrix_MBL_Progression
+
+# If no NA values are found in zcore matrix calculate statistics
+condition1 <- unprogressive_cells
+condition2 <- progressive_cells
+
+volcano.data <- data.frame()
+i <- 0
+for (TF in rownames(input_zscore_matrix)) {
+  i <- i + 1
+  print(i)
+  print(TF)
+  if (length(which(is.na(input_zscore_matrix[TF, ]))) == 0) {
+    p.value <- wilcox.test(as.numeric(input_zscore_matrix[TF, condition2]), as.numeric(input_zscore_matrix[TF, condition1]))$p.value
+    diff.accessibility <- median(as.numeric(input_zscore_matrix[TF, condition2])) - median(as.numeric(input_zscore_matrix[TF, condition1]))
+    volcano.data <- rbind(volcano.data, data.frame(TF = TF, p.value = p.value, diff.accessibility = diff.accessibility))
+  }
+}
+
+volcano.data$p.adj <- p.adjust(volcano.data$p.value)
+volcano.data$p.adj[which(volcano.data$p.adj == 0)] <- min(volcano.data$p.adj[which(volcano.data$p.adj != 0)])
+
+volcano.data$diff.accessibility <- as.numeric(volcano.data$diff.accessibility)
+volcano.data$p.adj <- as.numeric(volcano.data$p.adj)
+
+
+volcano.data$significant <- ifelse(abs(volcano.data$diff.accessibility) > 1.5 & volcano.data$p.adj <= 0.05, "significant", "not significant")
+volcano.data <- volcano.data %>%
+  dplyr::mutate(
+    "significant" = case_when(
+      p.adj >= 0.05 ~ "not significant",
+      abs(diff.accessibility) < 1.5 ~ "not significant",
+      diff.accessibility > 1.5 & p.adj < 0.05 ~ "MBL",
+      diff.accessibility < -1.5 & p.adj < 0.05 ~ "B"
+    ),
+    "label" = if_else(significant != "not significant", stringr::str_split_fixed(TF, pattern = "_", n = 2)[, 1], NA)
+  )
+
+
+
+saveRDS(volcano.data, file = file.path(RDS_dir, "volcano.data_MBL_Progression.RDS"))
+```
+
+### Volcanoplots Differential TF enrichment
+
+```{r}
+volcanoplot_MBL_Progression <- volcano.data %>%
+  ggplot(aes(x = diff.accessibility, y = -log10(p.adj), colour = significant, label = label)) +
+  geom_vline(xintercept = c(-1.5, 1.5), color = "grey", linetype = "dashed") +
+  geom_hline(yintercept = c(0.05), color = "grey", linetype = "dashed") +
+  geom_point(size = 1) +
+  geom_text_repel(
+    size = 2.5,
+    segment.size = 0.25,
+    segment.colour = "grey",
+    min.segment.length = 0.1,
+    max.overlaps = 40,
+    colour = "black"
+  ) +
+  scale_x_continuous(
+    name = "Difference median z-score",
+    breaks = seq(-8, 8, 4),
+    limits = c(-8, 8)
+  ) +
+  scale_y_continuous(
+    name = "-log10(FDR)",
+    limits = c(0, 300),
+    expand = expansion(mult = c(0, 0.1)),
+    oob = squish_infinite
+  ) +
+  scale_colour_manual(
+    name = "Differential TF motif enrichment",
+    values = c("upregulated" = "lightpink3", "downregulated" = "slategray3", "not significant" = "lightgrey"),
+    labels = c("upregulated" = "progressive", "downregulated" = "unprogressive")
+  ) +
+  theme_pub() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "vertical"
+  )
+
+write_tsv(volcanoplot_MBL_Progression$data, file.path(tsv_dir, "volcanoplot_MBL_Progression_data.tsv"))
+```
+
+```{r, fig.width=10, fig.height=5}
+ggarrange(volcanoplot_peaks+labs(title="Peaks"), volcanoplot_MBL_Progression+labs(title="TF motif enrichment"),nrow=1, ncol=2, labels = "AUTO")
+```
+

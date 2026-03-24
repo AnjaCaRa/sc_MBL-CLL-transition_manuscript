@@ -33,8 +33,11 @@ result_dir <- file.path(project_dir, "results")
 analysis_dir <- file.path(result_dir, "Surface_marker_analysis")
 plotting_dir <- file.path(analysis_dir, "Plots")
 RDS_dir <- file.path(analysis_dir, "RDS_Objects")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+DCA_tsv_dir <- file.path(result_dir, "DCA_analysis/tsv_data")
 
 ArchR_dir <- "ArchR_35_samples/ArchR_all_samples_subsetted"
+ArchR_dir_ADT <- file.path(result_dir, "ArchR_ADT")
 result_dir_summaries <- file.path(project_dir, "Summary_Plots")
 ```
 
@@ -45,8 +48,8 @@ source(file.path(project_dir, "scripts/publication_theme.R"))
 
 ```{r}
 CLLProj <- loadArchRProject(path = file.path(project_dir_ext, ArchR_dir))
-metadata <- read_tsv(file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv"))
-metadata_tsa <- read_tsv(file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata_tsa.tsv"))
+metadata <- read_tsv(file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata.tsv"))
+metadata_tsa <- read_tsv(file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata_tsa.tsv"))
 TSA_targets <- read_csv(file.path(data_dir, "TSA_barcodes/TSA_universal_cocktail_reference.csv"), col_names = FALSE)[, 1] %>% 
   pull(X1)
 
@@ -76,9 +79,9 @@ for (lib in metadata_tsa %>%
 
   TSA_raw <- import_kite_counts(file.path(data_dir, lib, "featurecounts"))
 
-  TSA_so <- CreateSeuratObject(TSA_raw, assay = "HTO")
-  TSA_so <- NormalizeData(TSA_so, assay = "HTO", normalization.method = "CLR")
-  TSA_so <- ScaleData(TSA_so, assay = "HTO")
+  TSA_so <- CreateSeuratObject(TSA_raw, assay = "ADT")
+  TSA_so <- NormalizeData(TSA_so, assay = "ADT", normalization.method = "CLR")
+  TSA_so <- ScaleData(TSA_so, assay = "ADT")
 
   TSA_values <- as_tibble(t(GetAssayData(TSA_so)), rownames = NA) %>%
     rownames_to_column("cellbarcode") %>%
@@ -232,7 +235,7 @@ TSA_vplots %>%
   ))
 ```
 
-## Differential surface marker expression healthy and premalignant B cells
+## Differential surface marker expression healthy and premalignant B cells across patients
 ```{r}
 B_cell_barcodes <- tibble(
   "label_cellbarcode" = CLLProj$cellNames,
@@ -489,18 +492,6 @@ saveRDS(dotplot_surfacemarker, file.path(RDS_dir, "Dotplot_surfacemarker.RDS"))
 #        height = 4)
 ```
 
-```{r fig.width=10, fig.height=4}
-cowplot::plot_grid(volcanoplot_summary_TSA+
-                     theme(legend.position = "bottom"), 
-                   dotplot_surfacemarker,
-                   rel_widths = c(1,2)) %>% 
-  ggsave(.,
-       file=file.path(plotting_dir, "Surfacemarker_figure.png"), 
-       width = 10, 
-       height = 4, 
-       dpi = "print")
-```
-
 ## Celltype quantification
 ```{r}
 cell_annotation <- all_TSA_data %>%
@@ -566,3 +557,146 @@ ggsave(plot = cell_type_counts_plot,
        bg = "white")
 ```
 
+## Integration
+```{r}
+pool2label <- metadata_tsa %>%
+  dplyr::filter(
+    !(technology == "multiome kit"),
+    MBL_subtype == "LC"
+  ) %>%
+  select(pool, label) %>%
+  deframe()
+
+label2pool <- metadata_tsa %>%
+  dplyr::filter(
+    !(technology == "multiome kit"),
+    MBL_subtype == "LC"
+  ) %>%
+  select(label, pool) %>%
+  deframe()
+
+import_kite_counts <- function(dir) {
+  mtx <- readMM(file.path(dir, "featurecounts.mtx"))
+  colnames(mtx) <- readLines(file.path(dir, "featurecounts.genes.txt"))
+  rownames(mtx) <- readLines(file.path(dir, "featurecounts.barcodes.txt"))
+  return(t(mtx))
+}
+
+seurat_tsa <- list()
+for (lib in pool2label) {
+  print(lib)
+  print(label2pool[lib])
+  TSA_raw <- import_kite_counts(file.path(data_dir, label2pool[lib], "featurecounts"))
+
+  TSA_so <- CreateSeuratObject(TSA_raw, assay = "ADT")
+  # TSA_so <- NormalizeData(TSA_so, assay = "ADT", normalization.method = "CLR")
+  # TSA_so <- ScaleData(TSA_so, assay = "ADT")
+
+  # TSA_values <- as_tibble(t(GetAssayData(TSA_so)), rownames = NA) %>%
+  #   rownames_to_column("cellbarcode") %>%
+  #   dplyr::mutate(cellbarcode = paste0(lib, "#", cellbarcode, "-1")) %>%
+  #   column_to_rownames("cellbarcode")
+
+  seurat_tsa[[lib]] <- TSA_so
+}
+
+seurat_tsa_merged <- merge(
+  x = seurat_tsa[[1]], y = seurat_tsa[2:6],
+  add.cell.ids = names(seurat_tsa)
+)
+```
+
+```{r}
+# Add Sample id as metaata
+label_annotation <- tibble("label_cellbarcode" = colnames(seurat_tsa_merged)) %>%
+  dplyr::mutate("label" = str_split_i(string = label_cellbarcode, pattern = "_", i = 1))
+
+seurat_tsa_merged <- AddMetaData(
+  object = seurat_tsa_merged,
+  metadata = deframe(label_annotation),
+  col.name = "label")
+
+celltype_annotation <- tibble(
+  "label_cellbarcode" = CLLProj@cellColData@rownames,
+  "My_annotation" = CLLProj@cellColData$My_annotation
+) %>%
+  dplyr::mutate(
+    label_cellbarcode = str_replace(label_cellbarcode, "#", "_"),
+    label_cellbarcode = str_remove(label_cellbarcode, "-1"))
+
+# Add Celltype as metadata
+seurat_tsa_merged <- AddMetaData(
+  object = seurat_tsa_merged,
+  metadata = deframe(celltype_annotation),
+  col.name = "My_annotation"
+)
+
+# saveRDS(seurat_tsa_merged, file.path(RDS_dir, "seurat_tsa_merged.RDS"))
+# seurat_tsa_merged <- readRDS(file.path(RDS_dir, "seurat_tsa_merged.RDS"))
+
+# filter for all annotated cells
+idx_keep <- which(!is.na(seurat_tsa_merged$My_annotation))
+seurat_tsa_merged_filtered <- subset(x = seurat_tsa_merged, cells = idx_keep)
+
+# Integrate
+seurat_tsa_merged_filtered <- SplitObject(seurat_tsa_merged_filtered,
+  split.by = "label"
+)
+
+seurat_tsa_merged_filtered <- lapply(X = seurat_tsa_merged_filtered, FUN = function(x) {
+  x <- NormalizeData(x, assay = "ADT", normalization.method = "CLR")
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+features <- SelectIntegrationFeatures(object.list = seurat_tsa_merged_filtered)
+anchors <- FindIntegrationAnchors(object.list = seurat_tsa_merged_filtered, anchor.features = features)
+seurat_tsa_combined <- IntegrateData(anchorset = anchors)
+DefaultAssay(seurat_tsa_combined) <- "integrated"
+
+# Scale
+seurat_tsa_scaled <- ScaleData(seurat_tsa_combined, assay = "integrated")
+```
+
+## WNN ATAC+Protein
+
+```{r}
+idxADT <- BiocGenerics::which(CLLProj@cellColData@rownames %in% paste0(str_replace(colnames(seurat_tsa_scaled), pattern = "_", replacement = "#"), "-1"))
+ADT_ATAC <- CLLProj$cellNames[idxADT]
+
+CLLProj_ADT <- subsetArchRProject(
+  ArchRProj = CLLProj,
+  cells = ADT_ATAC,
+  outputDirectory = ArchR_dir_ADT,
+  dropCells = TRUE
+)
+
+CLLProj_ADT <- loadArchRProject(ArchR_dir_ADT)
+```
+
+```{r LSI_Dimensionality_Reduction}
+CLLProj_ADT <- addImputeWeights(CLLProj_ADT)
+
+CLLProj_ADT <- addIterativeLSI(
+  seed = 1,
+  ArchRProj = CLLProj_ADT,
+  useMatrix = "TileMatrix",
+  name = "ADT_IterativeLSI",
+  iterations = 2,
+  clusterParams = list( # See Seurat::FindClusters
+    resolution = c(0.2),
+    sampleCells = 10000,
+    n.start = 10
+  ),
+  varFeatures = 25000,
+  dimsToUse = 1:30,
+  threads = 8,
+  force = TRUE
+)
+
+saveArchRProject(
+  ArchRProj = CLLProj_ADT,
+  outputDirectory = ArchR_dir_ADT,
+  load = FALSE,
+  overwrite = TRUE
+)
+```

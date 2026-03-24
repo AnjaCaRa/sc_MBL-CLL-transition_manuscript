@@ -62,6 +62,9 @@ plotting_dir <- file.path(analysis_dir, "Plots")
 RDS_dir <- file.path(analysis_dir, "RDS_objects")
 tsv_dir <- file.path(analysis_dir, "tsv_data") 
 
+IGHV_analysis_dir <- file.path(result_dir, "IGHV_analysis")
+IGHV_analysis_tsv_dir <- file.path(IGHV_analysis_dir, "tsv_data")
+
 ArchR_project_subset <- file.path("ArchR_all_samples_subsetted")
 ArchR_project_patients <- file.path("ArchR_all_patients_peaks")
 
@@ -76,12 +79,18 @@ source(file.path(project_dir, "scripts/my_plotMarkerHeatmap.R"))
 ```
 
 ```{r }
-metadata <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv"))%>% 
+metadata <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata.tsv"))%>% 
   tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE)
 
 patient_id2plotting_id <- metadata %>%
   dplyr::select(patient_id, plotting_id) %>%
   unique() %>%
+  deframe()
+
+patient2IGHV_inferred <- metadata %>% 
+    dplyr::filter(data_type == "ATAC") %>%
+  dplyr::select(patient_id, IGHV_inferred) %>% 
+  unique() %>% 
   deframe()
 ```
 
@@ -183,6 +192,7 @@ top_annotation_col_anno <- HeatmapAnnotation(
   Condition= anno_simple(patient_order, col=patient2condition, border=TRUE),
   Patient = anno_simple(colnames(markerPeaks_oi), col=c(my_unpaired_colours_named, my_paired_colours_named),
   border = TRUE),
+  IGHV=anno_simple(patient2IGHV_inferred[patient_order], col=IGHV_colours, border=TRUE),
   annotation_height = unit(4, "mm"),
   gap = unit(0.5, "mm"),
   annotation_name_side = "left",

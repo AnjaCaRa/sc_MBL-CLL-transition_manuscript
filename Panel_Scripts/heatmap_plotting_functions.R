@@ -204,12 +204,12 @@ build_celltype_heatmap <- function(bcs_per_celltype, # named list with celltype 
   barcodes2IGHV <- bcs_per_celltype %>%
     map2(patients_ordered, ~ left_join(.x, metadata_all %>%
                                          dplyr::filter(data_type == modality) %>%
-                                         dplyr::select("label", "IGHV")) %>%
+                                         dplyr::select("label", "IGHV_inferred")) %>%
            dplyr::mutate(
              label = factor(label, levels = .y),
              IGHV = if_else(is.na(IGHV), "NA", IGHV)
            ) %>%
-           dplyr::select(label_cellbarcode, IGHV) %>%
+           dplyr::select(label_cellbarcode, IGHV_inferred) %>%
            deframe())
   
   barcode2processing_date <- bcs_per_celltype %>%

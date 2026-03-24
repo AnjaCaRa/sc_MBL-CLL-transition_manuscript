@@ -1,0 +1,87 @@
+---
+title: "Infer IGHV mutational status"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 4
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# GOAL
+The aim of this script is to infer the IGHV mutational status for all patients of our cohort.
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(cowplot)
+library(ggsignif)
+library(RColorBrewer)
+library(scales)
+library(ggrepel)
+library(ggpubr)
+library(ggrastr)
+```
+# Set paths
+
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+result_dir <- file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "IGHV_analysis")
+plotting_dir <- file.path(analysis_dir, "plots")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+```
+
+# Load data
+
+```{r}
+metadata_all <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata.tsv"))
+metadata_BCR <- metadata_all %>% dplyr::filter(data_type == "BCR")
+
+label2pool <- metadata_BCR %>% dplyr::select(label, pool) %>% deframe()
+consensus_ann <- map(label2pool, ~read_csv(file.path(data_dir, "BCR", .x, "consensus_annotations.csv")))
+```
+
+# Reconstruct IGHV sequence
+
+```{r}
+IGHV_sequences <- consensus_ann %>% 
+  map(~dplyr::select(.x, clonotype_id, chain, v_gene, fwr1_nt, cdr1_nt, fwr2_nt, cdr2_nt, fwr3_nt, cdr3_nt, fwr4_nt) %>% 
+  dplyr::filter(clonotype_id =="clonotype1",
+                chain =="IGH"                ) %>% 
+  tidyr::unite(col = "IGH_nt", fwr1_nt:fwr4_nt, remove = TRUE, sep = "")) %>% 
+  bind_rows(.id = "label")
+
+write_tsv(IGHV_sequences, file = file.path(tsv_dir, "20251009_IGHV_sequences.tsv"))
+```
+
+Manually BLAST results for nt sequences.
+
+# Infer IGHV status
+```{r}
+IGHV_identity <- readxl::read_xlsx(file.path(analysis_dir, "20251010_BLAST_results.xlsx")) %>% 
+  dplyr::mutate(`Total identity (%)`=as.numeric(`Total identity (%)`),
+                IGHV=if_else(IGHV =="NA", NA, IGHV))
+```
+
+```{r}
+IGHV_inferred <- IGHV_identity %>% 
+  dplyr::mutate(IGHV_inferred=case_when(!is.na(IGHV) ~ IGHV,
+                                        is.na(IGHV) & 100-`Total identity (%)` >=2 ~ "mutated",
+                                        is.na(IGHV) & 100-`Total identity (%)` <2 ~ "unmutated" ))
+
+write_tsv(IGHV_inferred, file = file.path(tsv_dir, "20251010_IGHV_status_inferred.tsv"))
+
+label2IGHV_inferred <- IGHV_inferred %>% 
+  dplyr::select(label, IGHV_inferred) %>% 
+  unique() %>% 
+  deframe
+```
+

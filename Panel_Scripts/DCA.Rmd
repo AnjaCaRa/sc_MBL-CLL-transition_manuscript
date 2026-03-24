@@ -94,6 +94,16 @@ patient_id2plotting_id <- metadata %>%
   dplyr::select(patient_id, plotting_id) %>%
   unique() %>%
   deframe()
+
+label2plotting_id <- metadata %>%
+  dplyr::filter(data_type == "ATAC") %>%
+  dplyr::select(label, plotting_id) %>%
+  deframe()
+
+label2IGHV_inferred <- metadata %>% 
+    dplyr::filter(data_type == "ATAC") %>%
+  dplyr::select(label, IGHV_inferred) %>% 
+  deframe()
 ```
 
 ## Reference data set Hao and Hao et al 2021
@@ -1141,11 +1151,6 @@ celltype_abundance_per_patient
 # Combination cell type counts per sample
 
 ```{r fig.width=12, fig.height=5}
-label2plotting_id <- metadata %>%
-  dplyr::filter(data_type == "ATAC") %>%
-  dplyr::select(label, plotting_id) %>%
-  deframe()
-
 all_b_cell_plot <- CLLProj@cellColData %>%
   as_tibble(rownames = NA) %>%
   rownames_to_column("label_cellbarcode") %>%

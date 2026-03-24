@@ -108,6 +108,11 @@ patient_id2plotting_id <- metadata %>%
   dplyr::filter(data_type=="ATAC") %>% 
   dplyr::select(patient_id, plotting_id) %>%
   deframe()
+
+patient2IGHV <- metadata %>% 
+  dplyr::select(patient_id, IGHV_inferred) %>% 
+  unique() %>% 
+  deframe
 ```
 
 # Analysis
@@ -322,6 +327,7 @@ top_annotation_col_anno <- HeatmapAnnotation(
   Condition= anno_simple(patient_order, col=patient2condition, border=TRUE),
   Patient = anno_simple(patient_order, col=c(my_unpaired_colours_named, my_paired_colours_named),
   border = TRUE),
+  IGHV = anno_simple(patient2IGHV[patient_order], col=IGHV_colours, border=TRUE),
   annotation_height = unit(4, "mm"),
   annotation_name_side = "left",
   annotation_name_gp = gpar(fontsize = 10,
@@ -374,57 +380,171 @@ saveRDS(hm_grob, file.path(RDS_dir, "mtDNA_mutation_patient_heatmap.RDS"))
 ## mtDNA mutations per celltype
 
 ```{r}
-pseudobulk_heteroplasmy <- clonal_mt_VAFs %>% 
+#Which mutations have pseudobulk heteroplasmy >0.1% per cell type
+mean_clonal_mt_VAFs <- clonal_mt_VAFs %>% 
   left_join(celltype_annotation %>% 
-                               dplyr::select(label_cellbarcode, My_annotation_healthy)) %>% 
+                               dplyr::select(label_cellbarcode, My_annotation_healthy), by = join_by(label_cellbarcode)) %>% 
   filter(!(is.na(My_annotation_healthy))) %>% 
-  dplyr::filter(VAF != 0) %>%
   group_by(variant_id, patient_id, My_annotation_healthy) %>% 
-  dplyr::summarize(pseudobulk_heteroplasmy=mean(VAF)) %>% 
-  dplyr::filter(pseudobulk_heteroplasmy > 0.01)
+  dplyr::summarize(mean_VAF=mean(VAF)) %>% 
+  dplyr::filter(mean_VAF > 0.001)
 
-#filtering for >1% pseudobulk heteroplasmy of mt variant in celltype in non-zero values
-variant_counts_celltype <- clonal_mt_VAFs %>% 
+#Filtering for >0.1% pseudobulk heteroplasmy of mt variant in cell type 
+variant_counts_celltype <- clonal_mt_VAFs %>%
   left_join(celltype_annotation %>% 
-                               dplyr::select(label_cellbarcode, My_annotation_healthy)) %>% 
+                               dplyr::select(label_cellbarcode, My_annotation_healthy),
+            by = join_by(label_cellbarcode)) %>% 
   filter(!(is.na(My_annotation_healthy))) %>% 
-  dplyr::filter(VAF != 0) %>% 
-  dplyr::select(variant_id, patient_id, My_annotation_healthy) %>% 
-  semi_join(pseudobulk_heteroplasmy, by = c("variant_id", "patient_id", "My_annotation_healthy")) %>% 
+  dplyr::select(variant_id, patient_id, My_annotation_healthy, label_cellbarcode) %>% 
+  semi_join(mean_clonal_mt_VAFs, by = c("variant_id", "patient_id", "My_annotation_healthy")) %>% 
   unique() %>% 
   group_by(patient_id, My_annotation_healthy) %>% 
   dplyr::summarize(variant_counts=n()) %>% 
   dplyr::mutate(My_annotation_healthy=factor(My_annotation_healthy, levels=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells", "T", "NK", "Mono", "DC", "other")))
+
+celltype_counts_per_sample <- clonal_mt_VAFs %>%
+  left_join(celltype_annotation %>% 
+                               dplyr::select(label_cellbarcode, My_annotation_healthy)) %>% 
+  filter(!(is.na(My_annotation_healthy))) %>% 
+  dplyr::select(label_cellbarcode, patient_id, My_annotation_healthy) %>% 
+  unique() %>% 
+  dplyr::group_by(My_annotation_healthy, patient_id) %>% 
+  dplyr::summarize(cell_counts=n())
 ```
 
-```{r, fig.width=5, fig.height=4}
-n_fun <- function(x){
-  return(data.frame(y = 140,
-                    label = paste0(
-                      length(x))))
-}
+```{r}
+# normalize by cell counts per sample
+variant_counts_celltype_norm <- variant_counts_celltype %>%
+  dplyr::left_join(celltype_counts_per_sample) %>% 
+  dplyr::filter(My_annotation_healthy != "other") %>% 
+  dplyr::mutate(variant_counts_norm=variant_counts/cell_counts)
 
-variant_counts_celltype_plot <- variant_counts_celltype %>%
-dplyr::filter(My_annotation_healthy != "other") %>% 
-ggplot(aes(x=My_annotation_healthy, y=variant_counts, colour=My_annotation_healthy))+
-  geom_boxplot(colour = "black", aes(fill = My_annotation_healthy), outlier.shape = NA)+
-geom_jitter(width = 0.2, colour = "black", aes(fill = My_annotation_healthy), pch = 21, size=0.5) +
-  geom_signif(comparisons = list(c('B', 'LC_MBL_B_Cells'), 
-                                 c('B', 'HC_MBL_B_Cells'), 
-                                 c('B', "CLL_B_Cells"),
-                                 c("B", "T")), 
-              step_increase = 0.1, textsize = 3, colour="black") + 
-  scale_colour_manual("Cell type", values=c(annotation_colours_named),labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="Dendritic", "other"="Other cell types"))+
-  scale_fill_manual("Cell type", values=c(annotation_colours_named),labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="Dendritic", "other"="Other cell types"))+
-  scale_x_discrete(labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="Dendritic", "other"="Other cell types"))+
-  scale_y_continuous(breaks=seq(0, 150, 50), limits = c(0, 150))+
-  labs(x="Cell type", y= "mtDNA mutation counts\n Pseudobulk heteroplasmy > 1%")+
+variant_counts_celltype_norm_plot <- variant_counts_celltype_norm %>%
+dplyr::filter(!(My_annotation_healthy %in% c("other"))) %>%
+dplyr::mutate(My_annotation_healthy=factor(My_annotation_healthy, levels=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells", "T", "NK", "Mono", "DC", "other"))) %>% 
+ggplot(aes(x=My_annotation_healthy, y=variant_counts_norm, colour=My_annotation_healthy))+
+  geom_boxplot(colour = "black", aes(fill = My_annotation_healthy), outliers = FALSE)+
+  geom_jitter(width = 0.2, colour = "black", aes(fill = My_annotation_healthy), pch = 21, size=0.5) +
+  # geom_signif(comparisons = list(c('B', 'LC_MBL_B_Cells'),
+  #                                c('B', 'HC_MBL_B_Cells'),
+  #                                c('B', "CLL_B_Cells"),
+  #                                c("B", "T")),
+  #             step_increase = 0.1, textsize = 3, colour="black") +
+  scale_colour_manual("Cell type", 
+                      values=c(annotation_colours_named),
+                      labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="Dendritic", "other"="Other cell types"))+
+  scale_fill_manual("Cell type", 
+                    values=c(annotation_colours_named),
+                    labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="Dendritic", "other"="Other cell types"))+
+  scale_x_discrete(labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL", "T"="T", "NK"= "NK", "Mono" = "Monocytes", "DC"="Dendritic", "other"="Other cell types"), 
+                   breaks=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells", "T", "NK", "Mono", "DC", "other"))+
+  # scale_y_continuous(breaks=seq(0, 150, 50), limits = c(0, 150))+
+  labs(x="Cell type", y= "Normalized\nmtDNA mutations counts\n> 0.1% mean heteroplasmy")+
   theme_pub()+
   theme(axis.text.x = element_text(angle=45, hjust=1, vjust=1),
         axis.title.x = element_blank(),
         legend.position = "none")
+variant_counts_celltype_norm_plot
 
-write_tsv(variant_counts_celltype_plot$data, file.path(tsv_dir, "variant_counts_celltype_data.tsv"))
+write_tsv(variant_counts_celltype_norm_plot$data, file.path(tsv_dir, "variant_counts_celltype_data.tsv"))
+```
+
+## Downsampling of cells per celltype depth norm
+
+```{r}
+# how many cells are available per patient and cell type?
+patient_celltype_counts <- clonal_mt_VAFs %>%
+  left_join(celltype_annotation %>% 
+                               dplyr::select(label_cellbarcode, My_annotation_healthy),
+            by = join_by(label_cellbarcode)) %>% 
+  filter(!(is.na(My_annotation_healthy))) %>% 
+  dplyr::select(variant_id, patient_id, My_annotation_healthy, label_cellbarcode) %>% 
+  semi_join(mean_clonal_mt_VAFs, by = c("variant_id", "patient_id", "My_annotation_healthy")) %>% 
+  group_by(patient_id, My_annotation_healthy) %>% 
+  dplyr::select(-variant_id) %>% 
+  unique() %>% 
+  dplyr::summarize(cell_counts=n()) 
+
+patient_celltype_counts %>% 
+  dplyr::mutate(My_annotation_healthy=factor(My_annotation_healthy, levels=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells", "T", "NK", "Mono", "DC", "other"))) %>% 
+  ggplot(aes(x=My_annotation_healthy, y=cell_counts, fill=patient_id))+
+  geom_bar(stat = "identity", position = position_dodge2(preserve = "single"))+
+  geom_hline(yintercept = 100, linetype = "dashed")+
+  scale_y_log10(expand=c(0,0))+
+  scale_fill_manual(name="", values = c(my_paired_colours_named, my_unpaired_colours_named), 
+                    labels=patient_id2plotting_id)+
+  theme_pub()+
+  theme(axis.text.x = element_text(angle=45, hjust=1),
+        axis.title.x = element_blank(
+          ))
+```
+
+```{r}
+# Which patients have more than 100 cells available and for which cell types does a comparison make sense?
+patient_celltype_counts <- patient_celltype_counts %>% 
+  dplyr::mutate(My_annotation_healthy=factor(My_annotation_healthy, levels=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells", "T", "NK", "Mono", "DC", "other"))) %>% 
+  dplyr::filter(cell_counts >=100 & My_annotation_healthy %in% c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells"))
+
+set.seed(123)
+bcs_sampled <- clonal_mt_VAFs %>%
+  left_join(celltype_annotation %>% 
+                               dplyr::select(label_cellbarcode, My_annotation_healthy),
+            by = join_by(label_cellbarcode)) %>% 
+  dplyr::filter(My_annotation_healthy %in% c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")) %>% 
+  dplyr::select(variant_id, patient_id, My_annotation_healthy, label_cellbarcode) %>% 
+  semi_join(mean_clonal_mt_VAFs, by = c("variant_id", "patient_id", "My_annotation_healthy")) %>% 
+  unique() %>% 
+  right_join(patient_celltype_counts) %>%
+  distinct(patient_id, My_annotation_healthy, label_cellbarcode) %>%
+  group_by(patient_id, My_annotation_healthy) %>%
+  slice_sample(n = 100) %>%  
+  ungroup()
+```
+
+```{r}
+downsampled_variant_counts_norm_celltype <- clonal_mt_VAFs %>%
+  left_join(celltype_annotation %>% 
+                               dplyr::select(label_cellbarcode, My_annotation_healthy),
+            by = join_by(label_cellbarcode)) %>% 
+  dplyr::filter(My_annotation_healthy %in% c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")) %>% 
+  dplyr::select(variant_id, patient_id, My_annotation_healthy, label_cellbarcode) %>% 
+  semi_join(mean_clonal_mt_VAFs, by = c("variant_id", "patient_id", "My_annotation_healthy")) %>% 
+  distinct() %>% 
+  semi_join(bcs_sampled, by = c("patient_id", "My_annotation_healthy", "label_cellbarcode")) %>%
+  group_by(label_cellbarcode, patient_id, My_annotation_healthy) %>%
+  dplyr::summarize(n=n(), .groups = "drop") %>%
+  left_join(mtDNA_depth %>% bind_rows()) %>%
+  dplyr::mutate(norm_n=n/depth) %>% 
+  group_by(patient_id, My_annotation_healthy) %>% 
+  dplyr::summarize(norm_n_celltype=mean(norm_n)) %>% 
+  dplyr::mutate(My_annotation_healthy=factor(My_annotation_healthy, levels=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells")))
+```
+
+```{r}
+downsampled_variant_counts_depthnorm_celltype_plot <- downsampled_variant_counts_norm_celltype %>%
+ggplot(aes(x=My_annotation_healthy, y=norm_n_celltype, colour=My_annotation_healthy))+
+  geom_boxplot(colour = "black", aes(fill = My_annotation_healthy), outliers = FALSE)+
+  geom_jitter(width = 0.2, colour = "black", aes(fill = My_annotation_healthy), pch = 21, size=0.5) +
+  geom_signif(comparisons = list(c('B', 'LC_MBL_B_Cells'),
+                                 c('B', 'HC_MBL_B_Cells'),
+                                 c('B', "CLL_B_Cells")),
+             step_increase = 0.1, textsize = 3, colour="black", test = "wilcox.test") +
+  scale_colour_manual("Cell type", 
+                      values=c(annotation_colours_named),
+                      labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL"))+
+  scale_fill_manual(name="Cell type", 
+                    values=c(annotation_colours_named),
+                    labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL"))+
+  scale_x_discrete(labels=c("B"="B", "LC_MBL_B_Cells"="LC-MBL", "HC_MBL_B_Cells"="HC-MBL", "CLL_B_Cells"="CLL"), 
+                   breaks=c("B", "LC_MBL_B_Cells", "HC_MBL_B_Cells", "CLL_B_Cells"))+
+  scale_y_continuous(expand=c(0,0),breaks=seq(0, 2, 1), limits = c(0, 2.6))+
+  labs(x="Cell type", y= "mtDNA mutation counts\n> 0.1% mean heteroplasmy")+
+  theme_pub()+
+  theme(axis.text.x = element_text(angle=0, hjust=1, vjust=1),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+write_tsv(downsampled_variant_counts_depthnorm_celltype_plot$data, file.path(tsv_dir, "downsampled_variant_counts_depthnorm_celltype_data.tsv"))
 ```
 
 ## mtDNA mutation coverage per celltype

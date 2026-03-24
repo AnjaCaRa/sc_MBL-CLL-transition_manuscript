@@ -1930,47 +1930,48 @@ summary_scatterplot_1_5_fc_heteroplasmy_B_unpaired_HC_MBL %>%
 ```
 
 ### All MBLs
-```{r}
-minimum_VAF_all_HC_MBL <- min(minimum_VAF_HC_MBL_progressive, minimum_VAF_unpaired_HC_MBL)
-
+```{r, fig.width=6, fig.height=6}
 summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL <- c(statistics_heteroplasmy_B_paired_HC_MBL[paste0("CLL", c(1:5, 7:10))],
-                                                                       statistics_heteroplasmy_B_unpaired_HC_MBL) %>%
+                                                                       statistics_heteroplasmy_B_unpaired_HC_MBL)  %>%
   imap(~ mutate(.x,
       `Change MBL/B` = (`Heteroplasmy mean MBL cells` / `Heteroplasmy mean B cells`),
-      threshold_1_5_FC = `Change MBL/B` >= 1.5 & significance_B_vs_HC_MBL == TRUE | `Change MBL/B` <= 1 / 1.5 & significance_B_vs_HC_MBL == TRUE,
-      `variant_patient_id` = case_when(threshold_1_5_FC == TRUE ~ .y, 
-                                       .default = NA))) %>%
+      `threshold_1_5_FC` = case_when(`Change MBL/B` >= 1.5 & significance_B_vs_HC_MBL == TRUE ~ "HC-MBL",
+                                     `Change MBL/B` <= 1 / 1.5 & significance_B_vs_HC_MBL == TRUE ~ "B", .default = NA),
+      `variant_patient_id` = case_when(threshold_1_5_FC == TRUE ~ .y, .default = NA),
+    )) %>%
   bind_rows() %>%
   dplyr::left_join(metadata_all %>% 
                      dplyr::filter(data_type=="ATAC") %>% 
                      dplyr::select(patient_id, plotting_id) %>% 
-                     unique(), 
-                   by = join_by(patient_id)) %>% 
-  dplyr::mutate(`Heteroplasmy mean B cells percent`=`Heteroplasmy mean B cells`*100,
-                `Heteroplasmy mean B cells percent`=if_else(`Heteroplasmy mean B cells`==0.000000e+00,
-                                                      minimum_VAF_all_HC_MBL * 10^-1, 
-                                                      `Heteroplasmy mean B cells percent`),
-                `Heteroplasmy mean MBL cells percent`=`Heteroplasmy mean MBL cells`*100,
-                `Heteroplasmy mean MBL cells percent`=if_else(`Heteroplasmy mean MBL cells`== 0.000000e+00, 
-                                                        minimum_VAF_all_HC_MBL * 10^-1, 
-                                                        `Heteroplasmy mean MBL cells percent`),
-                variant_label = if_else(!is.na(variant_patient_id), 
-                                        paste0(plotting_id, " ", variant_id),
-                                        variant_patient_id)) %>%
+                     unique(), by = join_by(patient_id)) %>% 
+  dplyr:: mutate(`Heteroplasmy mean B cells percent`=`Heteroplasmy mean B cells`*100,
+         `Heteroplasmy mean B cells percent` = if_else(`Heteroplasmy mean B cells percent` == 0.000000e+00,
+                                                       minimum_VAF_all_HC_MBL * 10^-1, 
+                                                       `Heteroplasmy mean B cells percent`),
+         
+         `Heteroplasmy mean MBL cells percent`=`Heteroplasmy mean MBL cells`*100,
+         `Heteroplasmy mean MBL cells percent`=if_else(`Heteroplasmy mean MBL cells percent` == 0.000000e+00,
+                                                       minimum_VAF_all_HC_MBL * 10^-1, 
+                                                       `Heteroplasmy mean MBL cells percent`),
+         variant_label_B_vs_MBL = if_else(!is.na(threshold_1_5_FC), 
+                                 paste0(plotting_id, " ", variant_label_B_vs_MBL), 
+                                 NA)) %>%
   arrange(threshold_1_5_FC) %>%
   ggplot2::ggplot(aes(
     x = `Heteroplasmy mean B cells percent`,
     y = `Heteroplasmy mean MBL cells percent`,
-    colour = threshold_1_5_FC, 
-    label=variant_label
-  )) +
+    colour = threshold_1_5_FC,
+    label=variant_label_B_vs_MBL)) +
   geom_abline(colour = "lightgrey", intercept = 0, linewidth = 0.2) +
   geom_point(size = 1) +
   geom_function(fun = function(x) 1.5 * x, colour = "darkgrey", linetype = "dashed") +
   geom_function(fun = function(x) x / 1.5, colour = "darkgrey", linetype = "dashed") +
-  geom_text_repel(nudge_x = -0.8, nudge_y = 0, colour="black", max.overlaps = Inf)+
-  scale_colour_manual(name = "Stability", values = c("TRUE"="#956A77", "FALSE"="lightgrey"), labels=c("TRUE"="Instable", "FALSE"="Stable")) +
-  scale_x_log10(name="Mean heteroplasmy B [%]", 
+  geom_text_repel(colour="black", max.overlaps = Inf,)+
+  scale_colour_manual(name = "Enrichment", 
+                      values=my_MBL_CLL_colours_named, 
+                      na.value = "lightgrey", 
+                      labels = function(breaks) {breaks[is.na(breaks)] <- "not significant"; breaks}) +
+scale_x_log10(name="Mean heteroplasmy B [%]", 
                 limits = c(0.001, 100), 
                 labels = scales::label_comma(), 
                 oob=scales::squish_infinite, 
@@ -1986,6 +1987,7 @@ summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL <- c(statistics_heteroplasmy_B_
     panel.grid.major = NULL,
     panel.grid.minor = element_blank()
   )
+
 summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL
 
 summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL %>%
@@ -1996,7 +1998,8 @@ summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL %>%
     unit = "cm"
   )
 
-saveRDS(summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL, file.path(RDS_dir, "summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL.RDS"))
+saveRDS(summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL, 
+        file.path(RDS_dir, "summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL.RDS"))
 ```
 
 ### CLL
@@ -2111,45 +2114,49 @@ minimum_VAF_CLL <- statistics_heteroplasmy_B_paired_HC_MBL[c(paste0("CLL", c(1:5
   mutate(min_nonzero = min(c(`Heteroplasmy mean B cells`, `Heteroplasmy mean CLL cells`)[c(`Heteroplasmy mean B cells`, `Heteroplasmy mean CLL cells`) != 0], na.rm = TRUE)) %>%
   ungroup() %>% 
   pull(min_nonzero) %>% unique()
+```
 
+```{r, fig.width=6, fig.height=6}
 summary_scatterplot_1.5_fc_heteroplasmy_B_HC_MBL_CLL <- statistics_heteroplasmy_B_paired_HC_MBL[c(paste0("CLL", c(1:5, 7:10)), "MBL4")] %>%
   imap(~ mutate(.x,
       `Change CLL/B` = (`Heteroplasmy mean CLL cells` / `Heteroplasmy mean B cells`),
-      threshold_1_5_FC = `Change CLL/B` >= 1.5 & significance_B_vs_CLL == TRUE | `Change CLL/B` <= 1 / 1.5 & significance_B_vs_CLL == TRUE,
-      `variant_patient_id` = case_when(threshold_1_5_FC == TRUE ~ .y, 
-                                       .default = NA))) %>%
+      `threshold_1_5_FC` = case_when(`Change CLL/B` >= 1.5 & significance_B_vs_CLL == TRUE ~ "CLL",
+                                     `Change CLL/B` <= 1 / 1.5 & significance_B_vs_CLL == TRUE ~ "B", 
+                                     .default = NA),
+      `variant_patient_id` = case_when(threshold_1_5_FC == TRUE ~ .y, .default = NA),
+    )) %>%
   bind_rows() %>%
   dplyr::left_join(metadata_all %>% 
                      dplyr::filter(data_type=="ATAC") %>% 
                      dplyr::select(patient_id, plotting_id) %>% 
-                     unique(), 
-                   by = join_by(patient_id)) %>% 
-  dplyr::mutate(`Heteroplasmy mean B cells percent`=`Heteroplasmy mean B cells`*100,
-                `Heteroplasmy mean B cells percent`=if_else(`Heteroplasmy mean B cells`==0.000000e+00,
-                                                      minimum_VAF_CLL * 10^-1, 
-                                                      `Heteroplasmy mean B cells percent`),
-                `Heteroplasmy mean CLL cells percent`=`Heteroplasmy mean CLL cells`*100,
-                `Heteroplasmy mean CLL cells percent`=if_else(`Heteroplasmy mean CLL cells`== 0.000000e+00, 
-                                                        minimum_VAF_CLL * 10^-1, 
-                                                        `Heteroplasmy mean CLL cells percent`),
-                variant_label = if_else(!is.na(variant_patient_id), 
-                                        paste0(plotting_id, " ", variant_id),
-                                        variant_patient_id)) %>%
-  arrange(threshold_1_5_FC) %>%
+                     unique(), by = join_by(patient_id)) %>% 
+  dplyr:: mutate(`Heteroplasmy mean B cells percent`=`Heteroplasmy mean B cells`*100,
+         `Heteroplasmy mean B cells percent` = if_else(`Heteroplasmy mean B cells percent` == 0.000000e+00,
+                                                       minimum_VAF_CLL * 10^-1, 
+                                                       `Heteroplasmy mean B cells percent`),
+         
+         `Heteroplasmy mean CLL cells percent`=`Heteroplasmy mean CLL cells`*100,
+         `Heteroplasmy mean CLL cells percent`=if_else(`Heteroplasmy mean CLL cells percent` == 0.000000e+00,
+                                                       minimum_VAF_CLL * 10^-1, 
+                                                       `Heteroplasmy mean CLL cells percent`),
+         variant_label_B_vs_CLL = if_else(!is.na(threshold_1_5_FC), 
+                                 paste0(plotting_id, " ", variant_label_B_vs_CLL), 
+                                 NA)) %>%
+  dplyr::arrange(threshold_1_5_FC) %>%
   ggplot2::ggplot(aes(
     x = `Heteroplasmy mean B cells percent`,
     y = `Heteroplasmy mean CLL cells percent`,
-    colour = threshold_1_5_FC, 
-    label=variant_label
-  )) +
+    colour = threshold_1_5_FC,
+    label=variant_label_B_vs_CLL)) +
   geom_abline(colour = "lightgrey", intercept = 0, linewidth = 0.2) +
   geom_point(size = 1) +
   geom_function(fun = function(x) 1.5 * x, colour = "darkgrey", linetype = "dashed") +
   geom_function(fun = function(x) x / 1.5, colour = "darkgrey", linetype = "dashed") +
-  geom_text_repel(nudge_x = -0.8, nudge_y = 0, colour="black", max.overlaps = Inf)+
-  scale_colour_manual(name = "Stability", 
-                      values = c("TRUE"="#956A77", "FALSE"="lightgrey"), 
-                      labels=c("TRUE"="Instable", "FALSE"="Stable")) +
+  geom_text_repel(colour="black", max.overlaps = Inf)+
+  scale_colour_manual(name = "Enrichment", 
+                      values=my_MBL_CLL_colours_named, 
+                      na.value = "lightgrey", 
+                      labels = function(breaks) {breaks[is.na(breaks)] <- "not significant"; breaks}) +
   scale_x_log10(name="Mean heteroplasmy B [%]", 
                 limits = c(0.001, 100), 
                 labels = scales::label_comma(), 
@@ -2161,12 +2168,11 @@ summary_scatterplot_1.5_fc_heteroplasmy_B_HC_MBL_CLL <- statistics_heteroplasmy_
                 oob=scales::squish_infinite, 
                 expand=expansion(mult = c(0.07, 0.05))) +
   theme_pub() +
-  theme(legend.position = c(0.8, 0.6),
+  theme(legend.position =c(0.8, 0.6),
         legend.direction = "vertical",
     panel.grid.major = NULL,
     panel.grid.minor = element_blank()
   )
-
 
 summary_scatterplot_1.5_fc_heteroplasmy_B_HC_MBL_CLL
 
@@ -2179,7 +2185,7 @@ summary_scatterplot_1.5_fc_heteroplasmy_B_HC_MBL_CLL %>%
 )
 
 saveRDS(summary_scatterplot_1.5_fc_heteroplasmy_B_HC_MBL_CLL, 
-        file.path(RDS_dir, "summary_scatterplot_1_5_fc_heteroplasmy_B_HC_MBL_CLL.RDS"))
+        file.path(RDS_dir, "summary_scatterplot_1.5_fc_heteroplasmy_B_HC_MBL_CLL.RDS"))
 ```
 
 ### LC-MBL
@@ -2337,7 +2343,9 @@ scatterplot_heteroplasmy_B_MBL
 summary_scatterplot_1_5_fc_heteroplasmy_B_LC_MBL <- statistics_heteroplasmy_LC_variant_celltype %>%
   imap(~ mutate(.x,
       `Change MBL/B` = (`Heteroplasmy mean MBL cells` / `Heteroplasmy mean B cells`),
-      `threshold_1_5_FC` = `Change MBL/B` >= 1.5 & significance_B_vs_LC_MBL == TRUE | `Change MBL/B` <= 1 / 1.5 & significance_B_vs_LC_MBL == TRUE,
+      # `threshold_1_5_FC` = `Change MBL/B` >= 1.5 & significance_B_vs_LC_MBL == TRUE | `Change MBL/B` <= 1 / 1.5 & significance_B_vs_LC_MBL == TRUE,
+      `threshold_1_5_FC` = case_when(`Change MBL/B` >= 1.5 & significance_B_vs_LC_MBL == TRUE ~ "LC-MBL",
+                                     `Change MBL/B` <= 1 / 1.5 & significance_B_vs_LC_MBL == TRUE ~ "B", .default = NA),
       `variant_patient_id` = case_when(threshold_1_5_FC == TRUE ~ .y, .default = NA),
     )) %>%
   bind_rows() %>%
@@ -2354,21 +2362,24 @@ summary_scatterplot_1_5_fc_heteroplasmy_B_LC_MBL <- statistics_heteroplasmy_LC_v
          `Heteroplasmy mean MBL cells percent`=if_else(`Heteroplasmy mean MBL cells percent` == 0.000000e+00,
                                                        minimum_VAF_B_LC_MBL * 10^-1, 
                                                        `Heteroplasmy mean MBL cells percent`),
-         variant_label = if_else(!is.na(variant_patient_id), 
-                                 paste0(plotting_id, " ", variant_id), 
-                                 variant_patient_id)) %>%
+         variant_label_B_vs_MBL = if_else(!is.na(variant_label_B_vs_MBL), 
+                                 paste0(plotting_id, " ", variant_label_B_vs_MBL), 
+                                 variant_label_B_vs_MBL)) %>%
   arrange(threshold_1_5_FC) %>%
   ggplot2::ggplot(aes(
     x = `Heteroplasmy mean B cells percent`,
     y = `Heteroplasmy mean MBL cells percent`,
     colour = threshold_1_5_FC,
-    label=variant_label)) +
+    label=variant_label_B_vs_MBL)) +
   geom_abline(colour = "lightgrey", intercept = 0, linewidth = 0.2) +
   geom_point(size = 1) +
   geom_function(fun = function(x) 1.5 * x, colour = "darkgrey", linetype = "dashed") +
   geom_function(fun = function(x) x / 1.5, colour = "darkgrey", linetype = "dashed") +
-  # geom_text_repel(nudge_x = -0.8, nudge_y = 0,  colour="black", max.overlaps = Inf)+
-  scale_colour_manual(name = "Stability", values = c("TRUE"="#956A77", "FALSE"="lightgrey"), labels=c("TRUE"="Instable", "FALSE"="Stable")) +
+  geom_text_repel(colour="black", max.overlaps = Inf)+
+  scale_colour_manual(name = "Enrichment", 
+                      values=my_MBL_CLL_colours_named, 
+                      na.value = "lightgrey", 
+                      labels = function(breaks) {breaks[is.na(breaks)] <- "not significant"; breaks}) +
   scale_x_log10(name="Mean heteroplasmy B [%]", 
                 limits = c(0.0001, 100),
                 labels = scales::label_comma(), 
@@ -2380,7 +2391,7 @@ summary_scatterplot_1_5_fc_heteroplasmy_B_LC_MBL <- statistics_heteroplasmy_LC_v
                 oob=scales::squish_infinite, 
                 expand=expansion(mult = c(0.07, 0.05))) +
   theme_pub() +
-  theme(legend.position = c(0.8, 0.6),
+  theme(legend.position = c(0.8, 0.4),
         legend.direction = "vertical",
     panel.grid.major = NULL,
     panel.grid.minor = element_blank()
@@ -4140,7 +4151,40 @@ clonotype_quantification_plots <- clonotypes_cell_counts_all_paired %>%
   facet_wrap(~plotting_id, scales = "free_x", nrow = 1, strip.position = "bottom")
 ```
 
+### Sankey diagrams 
+```{r fig.width=30, fig.height=10}
+set.seed(125)
+sankey_diagrams <- clonotypes[names(clonotypes) %in% paste0("CLL", c(1:5, 7:10))] %>% 
+  imap(~as_tibble(.x, rownames="label_cellbarcode") %>% 
+  dplyr::rename("mtDNA_clone"="value") %>% 
+  dplyr::left_join(my_annotation_df) %>% 
+  dplyr::mutate(disease=disease_annotation[label_cellbarcode],
+                disease=if_else(disease=="MBL", 0, 1),
+                disease=as.numeric(disease)) %>% 
+  dplyr::filter(My_annotation %in% c("MBL_B_Cells", "CLL_B_Cells")) %>% 
+  dplyr::group_by(mtDNA_clone, disease) %>% 
+  dplyr::summarize(counts=n()) %>% 
+  dplyr::group_by(disease) %>% 
+  dplyr::mutate(percentage=counts/sum(counts)*100) %>% 
+  ggplot(aes(x=disease, y=percentage, fill=mtDNA_clone))+
+  geom_area(alpha=0.6)+
+  geom_col(colour="black", width=0.3 )+
+  labs(y="Frequency [%]", fill="mtDNA clone", title=patient_id2plotting_id[.y])+
+  scale_y_continuous(expand = c(0,0))+
+  scale_x_continuous(expand = c(0,0), breaks=c(0,1), labels=c("MBL", "CLL"))+
+  scale_fill_manual(values = sample(getPalette(91), replace = FALSE)) +
+  theme_pub()+
+  theme(axis.title.x = element_blank()))
 
+sankey_diagrams%>% 
+  plot_grid(plotlist = ., nrow=2, ncol=5)
+
+sankey_diagrams %>% 
+  imap(~.x$data %>% 
+  write_tsv(file.path(tsv_dir, paste0(.y, "_sankey_diagram_data.tsv"))))
+```
+
+### Stacked barplots frequency
 ```{r}
 clonotype_quantification_individual_plots <- clonotypes_cell_counts_all[c("MBL13", "MBL12", "MBL11", "MBL15", "MBL14", "MBL10",
                                                                           "MBL6", "MBL1", "MBL7", "MBL3", "MBL8", "MBL2", "MBL9", "MBL4")] %>%
@@ -4351,6 +4395,8 @@ clonotype_counts_plot <- clonotypes_cell_counts_all %>%
         axis.text.x = element_text(angle=30, hjust=1))
 ```
 
+
+
 ### Chi2 scatterplots clonotype frequency
 Perform chi2 test to find out if clonotype is associated with disease state
 ```{r, fig.width=9, fig.height=12}
@@ -4389,7 +4435,6 @@ build_coningency_tables <- function(clono_cll_cnts, ptnt_label) {
 }
 ```
 
-
 ```{r, fig.width=9, fig.height=12}
 # Apply function to all samples and clonotypes
 ch2_stat <- clonotypes_cell_counts_all_paired %>%
@@ -4400,7 +4445,6 @@ ch2_stat <- clonotypes_cell_counts_all_paired %>%
     )) %>%
     build_coningency_tables())
 ```
-
 
 ```{r, fig.width=9, fig.height=12}
 # Apply Benjamini Hochberg Correction for multiple testing
@@ -4430,7 +4474,6 @@ saveRDS(clonotypes_cell_counts_all_paired_stats, file.path(RDS_dir, "clonotypes_
 
 clonotypes_cell_counts_all_paired_stats <- readRDS(file.path(RDS_dir, "clonotypes_cell_counts_all_paired_stats.RDS"))
 ```
-
 
 ```{r Plot_scatterplot_clonotype_freq, fig.width=9, fig.height=9}
 scatterplot_clonotype_frequency <- clonotypes_cell_counts_all_paired_stats[names(clonotypes_cell_counts_all_paired_stats) != "CLL6"] %>% 
@@ -4508,7 +4551,6 @@ scatterplot_clonotype_frequency_summary <- clonotypes_cell_counts_all_paired_sta
 
 scatterplot_clonotype_frequency_summary
 ```
-
 
 ```{r, fig.width=5, fig.height=4}
 # Filter more stringent with 50% change threshold
@@ -4646,7 +4688,6 @@ clonotypes_cell_counts_all_paired_stats[names(clonotypes_cell_counts_all_paired_
   dplyr::summarize(count=n())
   
 ```
-
 
 ### Stability subclone histogram
 ```{r, fig.width=6, fig.height=4}

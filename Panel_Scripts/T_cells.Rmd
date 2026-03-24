@@ -522,7 +522,6 @@ quantification_l2_Tcells <- gex_integrated_T_10X_seurat_all@meta.data %>%
   ungroup()
 ```
 
-
 ```{r}
 quantification_plot_l2_Tcells <- quantification_l2_Tcells %>% 
     ggplot(aes(x=MBL_CLL_subtype, y=percentage, fill=predicted.celltype.l2, label=percentage_label))+
@@ -541,3 +540,28 @@ saveRDS(quantification_plot_l2_Tcells, file.path(RDS_dir, "quantification_plot_l
 quantification_plot_l2_Tcells
 ```
 
+```{r}
+T_cell_lineage <- c("CD3E","CD4E", "CD4", "CD8A", "CD3D")
+naive_memory_markers <- c("SELL", "IL7R", "CD8", "FAS", "CD27", "ITGAE", "ITGAL", "ITGAM", "ITGAX")
+T_cell_activation <- c("CD38", "ENTPD1", "NT5E", "CD69", "IL2RA", "ICOS", "TNFRSF4", "TNFRSF9","HLA-DRA", "CD40LG", "CTLA4")
+effector_molecules <- c("GZMA", "GZMB", "GZMK", "GZMM", "PRF1", "NKG7", "GNLY", "IFNG", "FASLG", "TNF", "IL17A", "IL2")
+T_cell_identity <- c("LEF1", "TCF7", "EOMES", "TBX21", "PRDM1", "TOX", "GATA3", "ID2", "ID3", "NR4A1", "ZNF683", "FOXP3")
+
+Tmarkers <- c(T_cell_lineage, naive_memory_markers, T_cell_activation, effector_molecules, T_cell_identity)
+
+Tmarkers_filtered <- Tmarkers[Tmarkers %in% rownames(gex_integrated_T_10X_seurat_all@assays[["SCT"]]@scale.data)]
+
+Tmarker_heatmap <- DoHeatmap(gex_integrated_T_10X_seurat_all,
+                             raster = TRUE,
+          group.by = "predicted.celltype.l2",
+          features = Tmarkers_filtered,
+          cells = T_cell_barcodes, 
+          group.colors =T_cell_annotation_colours_named, 
+          size = 3, #lines.width = 0.01,
+          group.bar.height = 0.05 )+
+    guides(color = "none")+
+  scale_fill_distiller(name="Expression", palette = "RdBu")
+
+ggsave(plot=Tmarker_heatmap, filename=file.path(plotting_dir, "Tmarker_heatmap.pdf"), width=6.28, height=3.24, bg="white")
+saveRDS(Tmarker_heatmap, file.path(RDS_dir, "Tmarker_heatmap.RDS"))
+```

@@ -1,0 +1,442 @@
+---
+title: "B-cell subtype annotation"
+author: "Anja_Rathgeber"
+date: "`r Sys.Date()`"
+output: html_document
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+# GOAL
+The aim of this script is to investigate which different B-cell subtypes we have present in our data set.
+ 
+# Load libraries
+
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(readr)
+library(dplyr)
+library(tibble)
+library(ggpubr)
+library(ggrepel)
+library(Seurat)
+library(SeuratDisk)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(circlize)
+library(ggrastr)
+library(cowplot)
+library(tidyverse)
+```
+
+# Set paths
+
+```{r}
+source("config_paths.R")
+data_dir <- file.path(project_dir, "data")
+library_path <- file.path(data_dir, "GEX")
+result_dir <-file.path(project_dir, "results")
+analysis_dir <- file.path(result_dir, "GEX_analysis")
+plotting_dir <- file.path(analysis_dir, "plots")
+tsv_dir <- file.path(analysis_dir, "tsv_data")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+```
+
+# Load data
+
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r}
+metadata_gex <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata_gex.tsv"))%>% 
+    tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE) %>%  
+  dplyr::filter(patient_id !="MBL7dup")
+
+metadata_gex_healthy <-   read_tsv(file.path(data_dir, "20250812_Healthy_controls_scRNAseq.tsv"))
+
+reference <- LoadH5Seurat(file.path(data_dir, "reference_genomes/pbmc_multimodal.h5seurat"))
+
+patient_id2plotting_id <- metadata_gex %>%
+  bind_rows(metadata_gex_healthy) %>% 
+  dplyr::select(patient_id, plotting_id) %>%
+  deframe()
+
+label2plotting_id <- metadata_gex %>% 
+  dplyr::select(label, plotting_id) %>% 
+  deframe()
+
+label2disease <- metadata_gex %>% 
+  dplyr::select(label, disease) %>% 
+  unique() %>% 
+  deframe
+
+label2ighv <- metadata_gex %>% 
+  dplyr::select(label, IGHV_inferred) %>% 
+  unique() %>% 
+  deframe
+
+gex_scaled_10X_seurat_all_noIG <- readRDS(file = file.path(RDS_dir, "gex_scaled_10X_seurat_all_noIG.RDS"))
+```
+
+# Subset to only B cells
+
+```{r}
+gex_10X_noIG_B <- subset(x = gex_scaled_10X_seurat_all_noIG, subset=My_annotation_LC =="B")
+gex_10X_noIG_B_scaled <- SCTransform(gex_10X_noIG_B, verbose = TRUE)
+gex_10X_noIG_B_scaled <- RunPCA(gex_10X_noIG_B_scaled, features = VariableFeatures(object = gex_10X_noIG_B_scaled))
+ElbowPlot(gex_10X_noIG_B_scaled)
+gex_10X_noIG_B_scaled <- FindNeighbors(gex_10X_noIG_B_scaled, dims = 1:10)
+gex_10X_noIG_B_scaled <- FindClusters(gex_10X_noIG_B_scaled, resolution = 0.2)
+gex_10X_noIG_B_scaled <- RunUMAP(gex_10X_noIG_B_scaled, dims = 1:10)
+```
+
+```{r fig.width=8 , fig.height=10}
+# # find markers for every cluster compared to all remaining cells, report only the positive
+# gex.markers_noIG <- FindAllMarkers(gex_10X_noIG_B_scaled, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+# 
+# group_by(gex.markers_noIG, cluster) %>%
+#   slice_max(n = 2, order_by = avg_log2FC)
+# 
+# gex.markers_noIG %>%
+#   group_by(cluster) %>%
+#   top_n(n = 10, wt = avg_log2FC) -> top10
+# 
+# marker_heatmap_noIG <- DoHeatmap(gex_10X_noIG_B_scaled, features = top10$gene) +
+#   theme_pub() +
+#   theme(legend.position = "right")
+```
+
+# Label transfer
+
+```{r FindTransferAnchors}
+anchors_noIG <- FindTransferAnchors(
+  reference = reference,
+  query = gex_10X_noIG_B_scaled,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+```{r MapReference_to_data}
+gex_10X_noIG_B_scaled <- MapQuery(
+  anchorset = anchors_noIG,
+  query = gex_10X_noIG_B_scaled,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    celltype.l3 = "celltype.l3",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca",
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r}
+gex_10X_noIG_B_scaled <- readRDS(file.path(RDS_dir, "gex_10X_noIG_B_scaled.RDS"))
+```
+
+# Visualisation
+
+## Samples and Clusters
+
+```{r fig.width=10, fig.height=5}
+Bcell_barcodes <- tibble("label_cellbarcode"=colnames(gex_10X_noIG_B_scaled), 
+                         "predicted.celltype.l2"=gex_10X_noIG_B_scaled$predicted.celltype.l2) %>% 
+  dplyr::filter(predicted.celltype.l2 %in% c("B intermediate", "B memory", "B naive", "Plasmablast"),
+                !(str_starts(label_cellbarcode, "MBL7dup"))) %>% 
+  pull(label_cellbarcode)
+
+umap_noIG_sample_plot <- DimPlot(gex_10X_noIG_B_scaled, cells = Bcell_barcodes,
+                                 reduction = "umap", 
+                     pt.size = 1.5,
+                     raster = TRUE, 
+                     group.by = "orig.ident", 
+                     cols=c(my_paired_colours_named, my_unpaired_colours_named))+
+  labs(title="Sample")+
+  theme(axis.ticks = element_blank(), 
+        aspect.ratio = 1,
+        axis.text = element_blank(),
+        legend.position = "none")
+
+umap_noIG_cluster_plot <- DimPlot(gex_10X_noIG_B_scaled, cells = Bcell_barcodes,
+                     reduction = "umap", 
+                     pt.size =2,
+                     raster = TRUE, 
+                     group.by = "seurat_clusters")+
+ labs(title="Cluster")+
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(),
+        aspect.ratio = 1,
+        legend.position = "none")
+```
+
+## Cell type annotation
+
+```{r fig.width=10}
+umap_noIG_l1_annotation <- DimPlot(gex_10X_noIG_B_scaled,  cells = Bcell_barcodes,
+  reduction = "umap",
+  pt.size = 2,
+  group.by = "predicted.celltype.l1",
+  raster = TRUE,
+  cols = annotation_colours_named
+) +
+  theme_pub() +
+  labs(title="Cell type")+
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(),
+    aspect.ratio = 1,
+    legend.position = "right"
+  )
+
+umap_noIG_l1_score_annotation <- FeaturePlot(gex_10X_noIG_B_scaled, cells = Bcell_barcodes,
+  pt.size = 2,
+  reduction = "umap",
+  raster = TRUE,
+  features = "predicted.celltype.l1.score") +
+  theme_pub() +
+  scale_colour_distiller(palette = "YlGnBu", direction = 1)+
+  labs(title="Prediction score")+
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(),
+    aspect.ratio = 1,
+    legend.position = "right"
+  )
+```
+
+```{r fig.width=10}
+umap_noIG_l2_annotation <- DimPlot(gex_10X_noIG_B_scaled, cells = Bcell_barcodes,
+  pt.size = 2,
+  raster = TRUE,
+  reduction = "umap",
+  group.by = "predicted.celltype.l2") +
+  scale_colour_manual( values = c("B intermediate"="plum3", 
+                                                      "B memory"="mediumpurple4", 
+                                                      "B naive"="indianred", 
+                                                      "Plasmablast"="hotpink4") )+
+  theme_pub() +
+  labs(title="Cell type")+
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(),
+    aspect.ratio = 1,
+    legend.position = "right"
+  )
+
+umap_noIG_l2_score_annotation <- FeaturePlot(gex_10X_noIG_B_scaled, cells = Bcell_barcodes,
+  pt.size = 2,
+  reduction = "umap",
+  raster = TRUE,
+  features = "predicted.celltype.l2.score") +
+  theme_pub() +
+  scale_colour_distiller(palette = "YlGnBu", direction = 1)+
+  labs(title="Prediction score")+
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(),
+    aspect.ratio = 1,
+    legend.position = "right"
+  )
+```
+
+## IGHV and condition
+
+```{r}
+umap_noIG_condition_annotation <- DimPlot(gex_10X_noIG_B_scaled,cells = Bcell_barcodes,
+  reduction = "umap",
+  pt.size = 2,
+  group.by = "MBL_CLL_subtype",
+  raster = TRUE,
+  cols = c(my_MBL_CLL_colours_named, "Healthy"="azure4")
+) +
+  theme_pub() +
+  labs(title="Condition")+
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(),
+    aspect.ratio = 1,
+    legend.position = "right"
+  )
+
+ighv_annotation <- tibble("label_cellbarcode"=colnames(gex_10X_noIG_B_scaled)) %>% 
+  tidyr::separate("label_cellbarcode", into = c("label", NA), sep = "_", remove=FALSE) %>% 
+  dplyr::mutate("IGHV_inferred"=label2ighv[label]) %>% 
+  dplyr::select(label_cellbarcode, IGHV_inferred) %>% 
+  deframe()
+
+gex_10X_noIG_B_scaled <- AddMetaData(object = gex_10X_noIG_B_scaled, metadata = ighv_annotation, col.name = "IHGV_inferred")
+
+umap_noIG_IGHV_annotation <- DimPlot(gex_10X_noIG_B_scaled,cells = Bcell_barcodes,
+  reduction = "umap",
+  pt.size = 2,
+  group.by = "IHGV_inferred",
+  raster = TRUE,
+  cols =IGHV_colours, na.value = "lightgrey"
+) +
+  theme_pub() +
+  labs(title="IGHV")+
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(),
+    aspect.ratio = 1,
+    legend.position = "right"
+  )
+
+# write_tsv(left_join(umap_noIG_sample_plot[[1]]$data %>% rownames_to_column("label_cellbarcode"), umap_noIG_l2_annotation[[1]]$data %>% rownames_to_column("label_cellbarcode")) %>% left_join(umap_noIG_condition_annotation[[1]]$data %>% rownames_to_column("label_cellbarcode")) %>% left_join(umap_noIG_IGHV_annotation[[1]]$data %>% rownames_to_column("label_cellbarcode")), file = file.path(tsv_dir, "GEX_Bcell_umap_data.tsv"))
+```
+
+## Cell type proportions
+
+```{r, fig.width=12, fig.height=3}
+celltype_proportions_noIG <- gex_10X_noIG_B_scaled@meta.data %>% 
+  dplyr::select(orig.ident, predicted.celltype.l2, patient_id, MBL_CLL_subtype) %>%
+  dplyr::rename(label=orig.ident) %>% 
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::filter(label_cellbarcode %in% Bcell_barcodes) %>% 
+  dplyr::mutate("plotting_id"=patient_id2plotting_id[patient_id],
+                MBL_CLL_subtype=factor(MBL_CLL_subtype, levels=c("LC","HC", "CLL")),
+                plotting_id=factor(plotting_id, levels=c(paste0("H", 3:4), paste0("P", 1:24))),
+                predicted.celltype.l2=factor(predicted.celltype.l2, levels=c("B naive", "B intermediate",  "B memory", "Plasmablast"))) %>%
+  dplyr::filter(!(patient_id %in% c("CLL6", "MBL7dup"))) %>% 
+  count(MBL_CLL_subtype, plotting_id, predicted.celltype.l2) %>%       
+  group_by(plotting_id, MBL_CLL_subtype) %>%
+  dplyr::mutate(pct= prop.table(n) * 100) %>%
+  ggplot(aes(x=MBL_CLL_subtype, y=pct, fill=predicted.celltype.l2))+
+  geom_bar(position = "stack", stat = "identity") +
+  scale_y_continuous(expand=c(0,0))+
+  scale_fill_manual(name="B cell subtype", values = c("B intermediate"="plum3", "B memory"="mediumpurple4", "B naive"="indianred", "Plasmablast"="hotpink4"), na.value = "lightgrey" )+
+  labs(y="Frequency [%]")+
+  theme_pub()+
+  theme(axis.title.x =element_blank())+
+        theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x=element_blank(),
+        strip.text = element_text(face = "plain")) +
+      facet_wrap(~plotting_id,scales = "free_x",
+        nrow = 1, 
+        strip.position = "bottom"
+      )
+
+# write_tsv(celltype_proportions_noIG$data, file.path(tsv_dir, "GEX_celltype_proportions_noIG.tsv"))
+```
+
+```{r}
+# Export seurat object for celltype composition analysis in python and add patients age at sample time point
+metadata_gex <- metadata_gex %>% dplyr::mutate(age_at_sample=floor(lubridate::time_length(difftime(sample_date, date_of_birth), "years")))
+metadata_gex_healthy <- metadata_gex_healthy %>% dplyr::mutate(age_at_sample=case_when(label=="pbmc3" ~ 27,
+                                                                                       label=="pbmc4" ~ round(mean(c(30, 35)))))
+
+label2ageatsample <- bind_rows(metadata_gex, metadata_gex_healthy) %>% dplyr::select(label, age_at_sample) %>% deframe()
+
+age_at_sample_annotation <- tibble("label_cellbarcode"=colnames(gex_10X_noIG_B_scaled)) %>% 
+  tidyr::separate("label_cellbarcode", into = c("label", NA), sep = "_", remove=FALSE) %>% 
+  dplyr::mutate("age_at_sample"=label2ageatsample[label]) %>% 
+  dplyr::select(label_cellbarcode, age_at_sample) %>% 
+  deframe()
+
+gex_10X_noIG_B_scaled <- AddMetaData(object = gex_10X_noIG_B_scaled, metadata = age_at_sample_annotation, col.name = "age_at_sample")
+
+gex_10X_noIG_B_scaled_subset <- subset(x = gex_10X_noIG_B_scaled, cells=Bcell_barcodes)
+
+B_celltype_composition_counts <- gex_10X_noIG_B_scaled_subset@meta.data %>% 
+  as_tibble(rownames = NA) %>% rownames_to_column(var = "label_cellbarcode") %>% 
+  dplyr::select(label_cellbarcode, orig.ident, predicted.celltype.l2, disease, MBL_CLL_subtype, age_at_sample)# %>%
+  # dplyr::group_by(orig.ident, predicted.celltype.l2, disease, MBL_CLL_subtype, age_at_sample) %>% 
+  # dplyr::summarize(counts=n()) %>% 
+  # pivot_wider(id_cols = c(orig.ident, disease, MBL_CLL_subtype, age_at_sample), names_from = predicted.celltype.l2, values_from = counts, values_fill = 0) %>% 
+write_tsv(B_celltype_composition_counts, file.path(tsv_dir, "B_celltype_composition_counts.tsv"))
+```
+
+```{r}
+Bmem_plot <- B_celltype_composition_counts %>% 
+  group_by(orig.ident, predicted.celltype.l2, MBL_CLL_subtype) %>% 
+  dplyr::summarize(n=n(), .groups="drop") %>% 
+  dplyr::mutate(MBL_CLL_subtype = factor(MBL_CLL_subtype, 
+                                         levels = c('Healthy', 'LC', 'HC', 'CLL'))) %>% 
+  group_by(orig.ident) %>% 
+  mutate(
+    total = sum(n),
+    percent = n / total * 100) %>%
+  dplyr::filter(predicted.celltype.l2=="B memory") %>% 
+  ggplot(aes(x=MBL_CLL_subtype, y=percent, colour = MBL_CLL_subtype)) + 
+  stat_summary(geom='crossbar', 
+               width=0.5, 
+               fun = median, 
+               fun.min = median, 
+               fun.max = median, colour="black") + 
+  geom_jitter(width = 0.2, colour = "black", aes(fill = MBL_CLL_subtype), pch = 21) +
+  geom_signif(comparisons = list( c('LC', 'HC'), c('HC', 'CLL'),c('LC', 'CLL')), 
+              test = 't.test',
+            step_increase = 0.1, textsize = 3, colour="black") +
+  scale_x_discrete(labels = c("LC" = "LC-MBL", "HC" = "HC-MBL", "CLL" = "CLL")) +
+  scale_y_continuous('B memory [%]') + 
+  scale_fill_manual(
+    name = "'Condition", 
+    values = my_MBL_CLL_colours_named,
+    labels = c("LC_MBL" = "LC MBL", "HC_MBL" = "HC MBL", "CLL" = "CLL")
+  ) +
+  theme_pub() + 
+  theme(legend.position = 'none', 
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle=45, hjust=1, vjust=1))
+
+write_tsv(Bmem_plot$data, file.path(tsv_dir, "Bmem_plot_data.tsv"))
+```
+
+```{r}
+summary_celltype_proportions_noIG <- celltype_proportions_noIG$data %>% 
+  dplyr::mutate(MBL_CLL_subtype=factor(if_else(is.na(MBL_CLL_subtype), "Healthy", MBL_CLL_subtype), levels=c("Healthy", "LC", "HC", "CLL"))) %>% 
+  dplyr::group_by(MBL_CLL_subtype, predicted.celltype.l2) %>% 
+  dplyr::summarize(median=median(n)) %>% 
+  ggplot(aes(x=MBL_CLL_subtype, y=median, fill=predicted.celltype.l2))+
+  geom_bar(position = "fill", stat = "identity") +
+  scale_x_discrete(labels=c("LC"="LC-MBL", "HC"="HC-MBL"))+
+  scale_y_continuous(expand=c(0,0), labels=seq(0,100,25))+
+  scale_fill_manual(name="B cell subtype", values = c("B intermediate"="plum3", "B memory"="mediumpurple4", "B naive"="indianred", "Plasmablast"="hotpink4"), na.value = "lightgrey" )+
+  labs(y="Frequency [%]")+
+  theme_pub()+
+  theme(axis.title.x =element_blank())+
+        theme(plot.title = element_text(hjust = 0.5))
+
+write_tsv(summary_celltype_proportions_noIG$data, file.path(tsv_dir, "GEX_summary_celltype_proportions_noIG.tsv"))
+```
+
+## Cell type marker expression
+
+```{r}
+Intermediate_B_cell <- c("MS4A1", "TNFRSF13B", 
+                         "AIM2", "CD79A", "LINC01857", "RALGPS2", "BANK1", "CD79B")
+B_memory <- c("MS4A1", "COCH", "AIM2", "BANK1", "SSPN", "CD79A", "TEX9", "RALGPS2", "TNFRSF13C", "LINC01781")
+B_naïve <- c("CD79A", "IL4R", "MS4A1", "CXCR4", "BTG1", "TCL1A", "CD79B", "YBX3")
+Plasmablast <- c("MZB1", "TNFRSF17", "DERL3", "TXNDC5", "TNFRSF13B", "POU2AF1", "CPNE5",
+  "NT5DC2")
+```
+
+```{r, fig.width=10, fig.height=5}
+Idents(gex_10X_noIG_B_scaled) <- "predicted.celltype.l2"
+levels_predicted.celltype.l2 <- levels(Idents(gex_10X_noIG_B_scaled))
+gex_10X_noIG_B_scaled$predicted.celltype.l2 <- factor(gex_10X_noIG_B_scaled$predicted.celltype.l2, levels=c("B naive", "B intermediate",  "B memory","Plasmablast", setdiff(levels_predicted.celltype.l2, c("B naive", "B intermediate",  "B memory","Plasmablast"))))
+
+markerheatmap_noIG <- DoHeatmap(object = gex_10X_noIG_B_scaled, 
+          group.by = "predicted.celltype.l2",
+          draw.lines = FALSE, 
+          raster = FALSE,
+          cells = Bcell_barcodes,
+          features = c(B_naïve, 
+                       Intermediate_B_cell, 
+                       B_memory,
+                       Plasmablast),  
+                        size = 3, 
+          group.colors = c("B intermediate"="plum3", "B memory"="mediumpurple4", "B naive"="indianred", "Plasmablast"="hotpink4") )+
+  scale_fill_gradientn(name="Expression", colors = rev(brewer.pal(9, "YlGnBu")))
+
+#saveRDS(markerheatmap_noIG, file.path(RDS_dir, "GEX_Bcell_markerheatmap_noIG.RDS"))
+```
+
+```{r}
+saveRDS(gex_10X_noIG_B_scaled, file.path(RDS_dir, "gex_10X_noIG_B_scaled.RDS"))
+```

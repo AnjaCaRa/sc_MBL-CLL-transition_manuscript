@@ -60,6 +60,10 @@ patient_id2plotting_id <- metadata %>%
 label2plotting_id <- metadata %>% 
   dplyr::select(label, plotting_id) %>% 
   deframe()
+
+label2IGHV_inferred <- metadata %>% 
+  dplyr::select(label, IGHV_inferred) %>% 
+  deframe()
 ```
 
 # Analysis
@@ -194,9 +198,16 @@ patient_condition <- metadata %>% dplyr::filter(data_type=="GEX") %>%
 patient2condition <- my_MBL_CLL_colours_named[patient_condition]
 names(patient2condition) <- names(patient_condition)
 
+patient_IGHV <- metadata %>%
+  dplyr::select(patient_id, IGHV_inferred) %>%
+  unique() %>%
+  deframe()
+patient2IGHV <- IGHV_colours[patient_IGHV]
+
 top_annotation_col_anno <- HeatmapAnnotation(
   Condition= anno_simple(patient_order, col=patient2condition, border=TRUE),
   Patient = anno_simple(patient_order, col=c(my_unpaired_colours_named, my_paired_colours_named), border = TRUE),
+  IGHV = anno_simple(patient_IGHV[patient_order], col=IGHV_colours, border=TRUE),
   annotation_height = unit(4, "mm"),
   gap = unit(0.5, "mm"),
   annotation_name_side = "left",

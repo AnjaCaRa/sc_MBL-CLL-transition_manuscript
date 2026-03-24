@@ -1,0 +1,128 @@
+---
+title: "Differential TF activity analysis"
+author: "Anja Rathgeber"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+email: anja.rathgeber@mdc-berlin.de
+---
+
+# Goal 
+As I could identify differentially accessible TF motifs in my scATAC data, I now want to see if the RNA data also reflects matched activity of those TFs or if it implies other TFs to be more differentially active
+
+# Load libraries
+```{r Load_libraries, warning=FALSE, message=FALSE, echo=FALSE}
+library(tidyverse)
+library(pheatmap)
+library(ggpubr)
+library(Seurat)
+```
+
+# Set paths
+```{r define_directories }
+source("config_paths.R")
+data_dir <- file.path(project_dir_remote, "data")
+result_dir <- file.path(project_dir_remote, "results")
+analysis_dir <- file.path(result_dir, "TF_analysis")
+plotting_dir <- file.path(analysis_dir, "Plots")
+RDS_dir <- file.path(analysis_dir, "RDS_objects")
+GEX_RDS_dir <- file.path(result_dir, "GEX_analysis/RDS_objects")
+GEX_tsv_dir <- file.path(result_dir, "GEX_analysis(tsv_data")
+```
+
+# Load data
+```{r}
+source(file.path(project_dir, "scripts/publication_theme.R"))
+```
+
+```{r}
+metadata_all <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata.tsv")) 
+gex_scaled_all <- readRDS(file.path(GEX_RDS_dir, "gex_scaled_all.RDS"))
+RNA_celltype_annotation <- readr::read_tsv(file.path(GEX_tsv_dir, "20250523_RNA_celltype_annotation_malignant.tsv"))
+
+TF_activity_all <- c(readRDS(file.path(RDS_dir, "TF_activity.RDS")),
+                     readRDS(file.path(RDS_dir, "TF_activity_18.RDS")),
+                     readRDS(file.path(RDS_dir, "TF_activity_LC_MBL.RDS")))
+
+patient_id2plotting_id <- metadata_all %>%
+  dplyr::filter(data_type=="GEX") %>% 
+  dplyr::select(patient_id, plotting_id) %>%
+  deframe()
+```
+
+Add celltype annotation
+```{r}
+TF_activity_all <- TF_activity_all %>%
+  map(~left_join(.x, RNA_celltype_annotation, by = join_by("condition"=="label_cellbarcode")))
+```
+
+```{r fig.width=14, fig.height=5}
+new_ATAC_genes <- c("SMARCC1", "FOSL1", "JUNB", "FOSL2", "JUN",
+                    "JUND", "FOSB", "BACH1", "BACH2", "JDP2", "NFE2", "NFE2L2", 
+                    "MAFK", "MAFF", "BATF", "POU2F2", "SPIB", "SPIC", "SPI1", "CTCF", 
+                    "NFATC2", "NFATC3", "TCF4")
+
+#depletion in (pre-)malignant
+depleted <- c("EBF1", "SMARCC1", "FOSL1", "JUNB", "FOSL2", "JUND", "FOS", "JUN", "FOSB", "BACH1", "BACH2", "JDP2", "NFE2", "NFE2L2", "MAFK", "MAFF", "BATF", "POU2F2") 
+
+#enrichment in (pre-)malignant
+enriched <- c("SPIB", "SPIC", "SPI1", "CTCF", "NFATC2", "NFATC3" , "TCF4")
+```
+
+Check for patterns across whole cohort
+```{r fig.height=10, fig.width=10}
+mean_TF_activity_all <- TF_activity_all %>% 
+  map(~dplyr::filter(.x, My_annotation_LC %in% c("LC-MBL B Cell", "HC-MBL B Cell", "CLL B Cell", "B"),
+                     source %in% new_ATAC_genes) %>% 
+        dplyr::group_by(My_annotation_LC, source) %>%
+        dplyr::summarize(mean_activity=mean(score)))
+```
+
+## Bulked approach
+```{r fig.width=6.28, fig.height=8}
+all_mean_TF_activities_df <- mean_TF_activity_all %>% 
+  bind_rows(.id="patient_id") %>% 
+  dplyr::mutate(My_annotation_LC=factor(My_annotation_LC, levels=c("B", "LC-MBL B Cell", "HC-MBL B Cell", "CLL B Cell")))
+
+ref <- "B"
+my_comparisons <- lapply(setdiff(unique(all_mean_TF_activities_df$My_annotation_LC), ref),
+                         function(x) c(ref, x))
+
+TF_mean_violinplot_summary <- all_mean_TF_activities_df %>% 
+  dplyr::mutate(source=factor(source, levels=c(depleted, enriched))) %>% 
+  arrange(source) %>% 
+ggplot(aes(x=My_annotation_LC, y=mean_activity, colour=My_annotation_LC))+
+geom_boxplot(outlier.shape = NA)+
+geom_jitter(size = 0.1)+
+stat_compare_means(label = "p.signif",
+                   method = "wilcox.test",
+                   comparisons = my_comparisons, size=3, )+
+scale_y_continuous(expand = expansion(mult=c(0.05, 0.1)))+
+scale_colour_manual(name= "Celltype", values =annotation_colours_named)+
+labs(y="Mean TF activity")+
+theme_pub()+
+theme(axis.text.x = element_blank(),
+      axis.ticks.x=element_blank(),
+      axis.title.x=element_blank(),
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      strip.text = element_text(face = "italic", colour="black", 
+                                size = 7))+
+facet_wrap(~source, 
+           scales = "free",
+           nrow=4, 
+           strip.position="top")
+TF_mean_violinplot_summary
+
+ggsave(plot = TF_mean_violinplot_summary, filename = file.path(plotting_dir, "TF_mean_violinplot_summary.png"), width=6.28, height=8, dpi=200, bg="white")
+ggsave(plot = TF_mean_violinplot_summary, filename = file.path(plotting_dir, "TF_mean_violinplot_summary.pdf"), width=6.28, height=8, bg="white")
+saveRDS(TF_mean_violinplot_summary, file.path(RDS_dir, "TF_mean_violinplot_summary.RDS"))
+```
+

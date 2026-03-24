@@ -41,7 +41,7 @@ source(file.path(project_dir, "scripts/publication_theme.R"))
 ```{r Load_data}
 reference <- LoadH5Seurat(file.path(data_dir, "reference_genomes/Hao_and_Hao_et_al_2021_PBMC/pbmc_multimodal.h5seurat"))
 
-metadata_malignant <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata_gex.tsv")) %>%
+metadata_malignant <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata_gex.tsv")) %>%
   tidyr::unite("MBL_CLL_subtype", c(MBL_subtype, disease), sep = "_", remove = FALSE, na.rm = TRUE)
 
 metadata_healthy <- read_tsv(file = file.path(data_dir, "20250812_Healthy_controls_scRNAseq.tsv")) # https://www.10xgenomics.com/datasets/human-pbmc-from-a-healthy-donor-10-k-cells-v-2-2-standard-5-0-0, https://www.10xgenomics.com/datasets/10-k-human-pbm-cs-5-v-2-0-chromium-controller-2-standard-6-1-0
@@ -69,7 +69,6 @@ seurat_paths <- c(
   file.path(library_path, library_names[1:35], "filtered_feature_bc_matrix"), # malignant libraries
   file.path(library_path_10X, library_names[36:37], "filtered_feature_bc_matrix") # , # 10X pbmc
 )
-
 
 gex_scaled_all <- readRDS(file.path(RDS_dir, "gex_scaled_all.RDS"))
 ```
@@ -813,6 +812,59 @@ Find transfer anchors
 # )
 ```
 
+#### Inferred IGHV
+```{r}
+# # add inferred IGHV status
+inferred_IGHV_annot <- as_tibble(gex_scaled_10X_seurat_all$orig.ident, rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::rename("label" = "value") %>%
+  left_join(metadata %>%
+    dplyr::select(label, IGHV_inferred)) %>%
+  dplyr::select(label_cellbarcode, IGHV_inferred) %>%
+  deframe()
+
+gex_scaled_10X_seurat_all <- AddMetaData(
+  object = gex_scaled_10X_seurat_all,
+  metadata = inferred_IGHV_annot,
+  col.name = "IGHV_inferred"
+)
+```
+
+```{r}
+umap_inferred_IGHV_MBL_CLL_subtype_split <- DimPlot(subset(x=gex_scaled_10X_seurat_all, cells=nonMBL7dup_cells),
+  reduction = "umap",
+  split.by = "MBL_CLL_subtype",
+  group.by = "IGHV_inferred",
+  label = FALSE,
+  repel = TRUE,
+  raster = FALSE,
+  cols = IGHV_colours,
+  shuffle = TRUE
+) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    colour = "IGHV",
+    title = "Inferred IGHV mutational status"
+  ) +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    legend.position = "none",
+    aspect.ratio = 1
+  )
+
+ggsave(umap_inferred_IGHV_MBL_CLL_subtype_split,
+  file = file.path(plotting_dir, "UMAP_10X_seurat_all_inferred_IGHV_MBL_CLL_subtype_split.png"),
+  height = 4,
+  width = 16
+)
+
+write_tsv(umap_inferred_IGHV_MBL_CLL_subtype_split[[1]]$data, file = file.path(tsv_dir, "UMAP_10X_seurat_all_inferred_IGHV_MBL_CLL_subtype_split_data.tsv"))
+```
+
 ## Non integrated IG genes removed
 ```{r}
 # gex_scaled_10X_seurat_all <- readRDS(file = file.path(RDS_dir, "gex_scaled_10X_seurat_all.RDS"))
@@ -1428,6 +1480,60 @@ umap_celltype_no_IG_MBL_CLL_subtype_split_noB <- DimPlot(subset(x=gex_scaled_10X
 write_tsv(umap_celltype_no_IG_MBL_CLL_subtype_split_noB[[1]]$data, file = file.path(tsv_dir, "20250326_UMAP_10X_seurat_all_no_IG_celltypes_MBL_CLL_subtype_split_noB_data.tsv"))
 
 umap_celltype_no_IG_MBL_CLL_subtype_split_noB
+```
+
+#### Inferred IGHV
+```{r}
+# # add inferred IGHV status
+inferred_IGHV_annot_no_IG <- as_tibble(gex_scaled_10X_seurat_all_noIG$orig.ident, rownames = NA) %>%
+  rownames_to_column("label_cellbarcode") %>%
+  dplyr::rename("label" = "value") %>%
+  left_join(metadata %>%
+    dplyr::select(label, IGHV_inferred)) %>%
+  dplyr::select(label_cellbarcode, IGHV_inferred) %>%
+  deframe()
+
+gex_scaled_10X_seurat_all_noIG <- AddMetaData(
+  object = gex_scaled_10X_seurat_all_noIG,
+  metadata = inferred_IGHV_annot_no_IG,
+  col.name = "IGHV_inferred"
+)
+```
+
+
+```{r}
+umap_inferred_IGHV_no_IG_MBL_CLL_subtype_split <- DimPlot(subset(x=gex_scaled_10X_seurat_all_noIG, cells=nonMBL7dup_cells),
+  reduction = "umap",
+  split.by = "MBL_CLL_subtype",
+  group.by = "IGHV_inferred",
+  label = FALSE,
+  repel = TRUE,
+  raster = FALSE,
+  cols = IGHV_colours,
+  shuffle = TRUE
+) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    colour = "IGHV",
+    title = "Inferred IGHV mutational status"
+  ) +
+  theme_pub() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_blank(),
+    legend.position = "none",
+    aspect.ratio = 1
+  )
+
+ggsave(umap_inferred_IGHV_no_IG_MBL_CLL_subtype_split,
+  file = file.path(plotting_dir, "UMAP_10X_seurat_all_no_IG_inferred_IGHV_MBL_CLL_subtype_split.png"),
+  height = 4,
+  width = 16
+)
+
+write_tsv(umap_inferred_IGHV_no_IG_MBL_CLL_subtype_split[[1]]$data, file = file.path(tsv_dir, "UMAP_10X_seurat_all_no_IG_inferred_IGHV_MBL_CLL_subtype_split_data.tsv"))
 ```
 
 ## Combined IG genes removal with scVI technology integration

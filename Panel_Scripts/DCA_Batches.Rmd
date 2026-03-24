@@ -56,6 +56,9 @@ plotting_dir <- file.path(analysis_dir, "Plots")
 RDS_dir <- file.path(analysis_dir, "RDS_objects")
 tsv_dir <- file.path(analysis_dir, "tsv_data")
 
+IGHV_analysis_dir <- file.path(result_dir, "IGHV_analysis")
+IGHV_analysis_tsv_dir <- file.path(IGHV_analysis_dir, "tsv_data")
+
 ArchR_project_Blike <- "ArchR_35_samples/ArchR_Blike"
 ArchR_dir_Blike <- file.path(result_dir, ArchR_project_Blike)
 plotting_dir_Blike <- file.path(ArchR_dir_Blike, "Plots")
@@ -71,7 +74,7 @@ source(file.path(project_dir, "scripts/heatmap_plotting_functions.R"))
 ## Metadata
 
 ```{r }
-metadata <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv"))
+metadata <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata.tsv"))
 
 patient_id2plotting_id <- metadata %>%
   dplyr::select(patient_id, plotting_id) %>%
@@ -81,6 +84,11 @@ patient_id2plotting_id <- metadata %>%
 label2plotting_id <- metadata %>%
   dplyr::filter(data_type == "ATAC") %>%
   dplyr::select(label, plotting_id) %>%
+  deframe()
+
+label2IGHV_inferred <- metadata %>% 
+    dplyr::filter(data_type == "ATAC") %>%
+  dplyr::select(label, IGHV_inferred) %>% 
   deframe()
 ```
 
@@ -1380,7 +1388,8 @@ colours <- barcodes %>% map(~ list(
     dplyr::select(B_like_annotation, Colour) %>%
     unique() %>%
     deframe(),
-  "Patient" = plottingid2colours
+  "Patient" = plottingid2colours,
+    "IGHV" = IGHV_colours
 ))
 
 anno_df <- list(
@@ -2257,6 +2266,18 @@ barcodes2plottingid <- barcodes %>%
   )) %>%
   dplyr::select(label_cellbarcode, plotting_id) %>%
   dplyr::mutate(plotting_id = factor(plotting_id, levels = paste0("P", 1:24))) %>%
+  deframe()
+
+barcodes2IGHV_inferred <- barcodes %>% 
+  left_join(tibble(
+    "label_cellbarcode" = colnames(zscore_matrix_combat_hm_input),
+    "IGHV" = label2IGHV_inferred[colnames(zscore_matrix_combat_hm_input) %>%
+      as_tibble() %>%
+      dplyr::rename("label_cellbarcode" = value) %>%
+      tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "#", remove = FALSE) %>%
+      pull(label)]
+  )) %>%
+  dplyr::select(label_cellbarcode, IGHV) %>%
   deframe()
 
 plottingid2colours <- c(

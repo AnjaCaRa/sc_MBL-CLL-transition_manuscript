@@ -75,6 +75,10 @@ label2plotting_id <- metadata_all %>%
   dplyr::select(label, plotting_id) %>%
   deframe()
 
+label2IGHV_inferred <- metadata %>% 
+  dplyr::select(label, IGHV_inferred) %>% 
+  deframe()
+
 library_paths <- file.path(BCR_data_dir, library_names) %>%
   set_names(names(library_names))
 
@@ -973,8 +977,8 @@ write_tsv(clonotype_split_plot[[1]][["data"]], file=file.path(tsv_dir, "BCR_clon
 IGHV_annotation <- tibble("label_cellbarcode"=colnames(gex_scaled_all_noIG)) %>% 
   tidyr::separate(label_cellbarcode, into = c("label", "cellbarcode"), sep = "_", remove = FALSE) %>% 
   dplyr::left_join(metadata %>% 
-                     dplyr::select(label, IGHV)) %>% 
-  dplyr::select(label_cellbarcode, IGHV) %>% 
+                     dplyr::select(label, IGHV_inferred)) %>% 
+  dplyr::select(label_cellbarcode, IGHV_inferred) %>% 
   deframe()
 
 

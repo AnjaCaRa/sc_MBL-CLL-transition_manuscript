@@ -14,9 +14,10 @@ output:
 email: anja.rathgeber@mdc-berlin.de
 ---
 
-GOAL: The aim of this script is to find out if there are differentially expressed genes between LC-MBL, HC-MBL and CLL cases across patients in comparison to physiologic B cells. We use pseudobulk analysis here adapted from https://hbctraining.github.io/scRNA-seq/lessons/pseudobulk_DESeq2_scrnaseq.html 
+# GOAL
+The aim of this script is to find out if there are differentially expressed genes between LC-MBL, HC-MBL and CLL cases across patients in comparison to physiologic B cells. We use pseudobulk analysis here adapted from https://hbctraining.github.io/scRNA-seq/lessons/pseudobulk_DESeq2_scrnaseq.html 
 
-## Load libraries
+# Load libraries
 
 ```{r Load_libraries}
 library(DESeq2)
@@ -40,6 +41,7 @@ library(ComplexHeatmap)
 ```
 
 # Set paths
+
 ```{r}
 source("config_paths.R")
 data_dir <- file.path(project_dir, "data")
@@ -51,7 +53,7 @@ tsv_dir <- file.path(analysis_dir, "tsv_data")
 GEX_RDS_dir <- file.path(result_dir, "GEX_Analysis/RDS_Objects")
 ```
 
-## Load data
+# Load data
 ```{r}
 source(file.path(project_dir, "scripts/publication_theme.R"))
 source(file.path(project_dir, "scripts/heatmap_plotting_functions.R"))
@@ -59,7 +61,7 @@ source(file.path(project_dir, "scripts/heatmap_plotting_functions.R"))
 
 ```{r}
 gex_scaled_all <- readRDS(file.path(GEX_RDS_dir, "gex_scaled_all.RDS"))
-metadata_all <- read_tsv(file = file.path(data_dir, "20250403_Tidy_MBL_CLL_metadata.tsv")) %>%
+metadata_all <- read_tsv(file = file.path(data_dir, "20260309_Tidy_MBL_CLL_metadata.tsv")) %>%
   dplyr::mutate(MBL_CLL_subtype = if_else(is.na(MBL_subtype), "CLL", MBL_subtype))
 gex_data_scvi <- readRDS(file = file.path(project_dir_ext, "scVI\ expression\ data/scvi_expression.RDS"))
 c2_data <- read_tsv(file.path(c2_data_dir, "c2.all.v2024.1.Hs.symbols.gmt.txt"), col_names = FALSE) %>%
@@ -70,6 +72,7 @@ c2_data <- read_tsv(file.path(c2_data_dir, "c2.all.v2024.1.Hs.symbols.gmt.txt"),
 ```
 
 ## Add Seurat metadata
+
 ```{r}
 sequencing_annot <- tibble("label_cellbarcode" = WhichCells(gex_scaled_all)) %>%
   tidyr::separate(label_cellbarcode, c("label", "cellbarcode"), sep = "_", remove = FALSE) %>%
@@ -112,6 +115,7 @@ gex_scaled_all <- AddMetaData(object = gex_scaled_all, metadata = celltype_subty
 ```
 
 # Analysis
+
 ```{r Calculate_celltype_condition_numbers}
 celltype_condition_counts <- gex_scaled_all@meta.data %>%
   dplyr::select(orig.ident, patient_id, MBL_CLL_subtype, My_annotation_LC, celltype_subtype) %>%
@@ -401,6 +405,7 @@ res_tbl <- readRDS(file = file.path(RDS_dir, "res_tbl.RDS"))
 ```
 
 ### Volcanoplots
+
 ```{r Volcanoplot, fig.width=15, fig.height=5}
 res_table_thres <- res_tbl %>% 
   map(~mutate(., threshold = if_else(-log10(padj) >= 10 & abs(log2FoldChange) >= 1, TRUE, NA)) %>%
@@ -433,6 +438,7 @@ res_table_thres %>%
 ```
 
 ### Venn Diagram between conditions
+
 ```{r fig.width=6, fig.height=6}
 venn_input <- res_table_thres[1:3] %>%
   map(~ dplyr::filter(., threshold == "TRUE") %>%
@@ -449,6 +455,7 @@ ggvenn(
 ```
 
 ### Highlight Disgenet genes
+
 ```{r}
 # register at disgnet and retrive api key https://disgenet.com/Profile-area#apiKey
 
@@ -529,6 +536,7 @@ res_table_thres_disgenet %>%
 ```
 
 ### Highlight Reactome genes in addition
+
 ```{r fig.width=10, fig.height=5}
 # Reoccuring pathways and genes in disease progression from GSEA of Pseudobulk_GeneSetEnrichmenb_MBL_CLL.Rmd
 c2 <- c2_data %>%
@@ -571,6 +579,7 @@ res_table_reactome %>%
 
 
 ### Highlight B and CLL cell marker genes in addition
+
 ```{r fig.width=10, fig.height=5}
 B_markers <- c("MS4A1", "EBF1", "PAX5", "MME", "CD19")
 CLL_markers <- c("CD19", "CD5", "FCER2", "CD79b")
@@ -609,6 +618,7 @@ res_table_marker %>%
 ```
 
 ### Individual volcanoplots correct colouring
+
 ```{r}
 LC_MBL_pb_volcano <- res_table_marker$`B_LC_vs_LC-MBL B Cell_LC` %>%
   dplyr::mutate(significant = case_when(threshold == TRUE & log2FoldChange > 0 ~ "upregulated",
@@ -673,7 +683,6 @@ HC_MBL_pb_volcano <- res_table_marker$`B_HCCLL_vs_HC-MBL B Cell_HC` %>%
 
 saveRDS(HC_MBL_pb_volcano, file.path(RDS_dir, "HC_MBL_pb_volcano.RDS"))
 
-
 CLL_pb_volcano <- res_table_marker$`B_HCCLL_vs_CLL B Cell_CLL` %>%
   dplyr::mutate(significant = case_when(threshold == TRUE & log2FoldChange > 0 ~ "upregulated",
     threshold == TRUE & log2FoldChange < 0 ~ "downregulated",
@@ -704,7 +713,6 @@ CLL_pb_volcano <- res_table_marker$`B_HCCLL_vs_CLL B Cell_CLL` %>%
   theme(legend.position = "bottom")
 
 saveRDS(CLL_pb_volcano, file.path(RDS_dir, "CLL_pb_volcano.RDS"))
-
 
 HC_CLL_pb_volcano <- res_table_marker$`HC-MBL B Cell_HC_vs_CLL B Cell_CLL` %>%
   dplyr::mutate(significant = case_when(threshold == TRUE & log2FoldChange > 0 ~ "upregulated",
@@ -778,7 +786,6 @@ DEGs_disgenet_reactome_marker <- res_table_marker %>%
 
 saveRDS(DEGs_disgenet_reactome_marker, file = file.path(RDS_dir , "DEGs_disgenet_reactome_marker_pseudobulk.RDS"))
 
-
 # union of all significant disgenet, reactome and marker genes WITH immunoglobulins
 DEGs_disgenet_reactome_marker_IG <- res_table_marker %>%
   map(~ dplyr::filter(., !is.na(threshold) & !is.na(disgenet_reactome_marker_gene_IG)) %>%
@@ -833,7 +840,6 @@ heatmap_input_b_like_scaled <- t(scale(gex_data_scvi[barcodes$label_cellbarcode,
 saveRDS(heatmap_input_b_like_scaled, file.path(RDS_dir, "expression_heatmap_DEGs_batch_corrected_input.RDS"))
 ```
 
-
 ```{r fig.width=20, fig.height=10}
 hm_downsampled <- build_celltype_heatmap(
   bcs_per_celltype = celltype_barcodes,
@@ -859,6 +865,7 @@ saveRDS(hm_downsampled_grob, file.path(RDS_dir, "expression_heatmaps_DEGs_batch_
 ```
 
 #### Clustered heatmap
+
 ```{r fig.width=20, fig.height=10}
 hm_downsampled_clustered <- build_clustered_heatmap(
   bcs_cells_df = bind_rows(celltype_barcodes),
@@ -884,6 +891,7 @@ saveRDS(hm_downsampled_grob_clustered, file.path(RDS_dir, "expression_heatmaps_D
 ```
 
 ## DEG Scheme
+
 ```{r, fig.width=9, fig.height=4}
 WBC_summary <- metadata_all %>%
   dplyr::filter(data_type == "GEX") %>%
@@ -1022,7 +1030,6 @@ rect_data <- tibble(
 
 write_tsv(scheme_input, file = file.path(tsv_dir, "GEX_motif_scheme_input.tsv"))
 ```
-
 
 ```{r, fig.width=9, fig.height=4}
 scheme <- scheme_input %>%
