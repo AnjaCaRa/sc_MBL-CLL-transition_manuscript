@@ -45,5 +45,5 @@ Supplementary Figure 18 ( [here](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) [ an
 Supplementary Figure 19 ( [A](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [B](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [C](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [D](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [E](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd))\
 
 ## Data availability
-Raw data has been made accessible on NCBI GEO (GSE295489, GSE295490, GSE295491).\
-Nanoranger data can be found on SRA (PRJNA1254962).
+Raw data has been made accessible on NCBI GEO ([GSE295489](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE295489), [GSE295490](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE295490), [GSE295491](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE295491)).\
+Nanoranger data can be found on SRA ([PRJNA1254962](https://submit.ncbi.nlm.nih.gov/subs/sra/SUB15548585/overview)).
