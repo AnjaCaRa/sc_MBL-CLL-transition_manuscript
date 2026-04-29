@@ -1,5 +1,6 @@
 # Single cell epigenetic and transcriptomic states across the MBL/CLL continuum
-This repository contains all code to reproduce the analysis from [Rathgeber *et al.* Single cell epigenetic and transcriptomic states across the MBL/CLL continuum (2026)](https://).
+This repository contains all code to reproduce the analysis from Rathgeber *et al.* (2026)\
+[Single-cell epigenetic and transcriptomic states across the continuum of monoclonal B cell lymphocytosis to chronic lymphocytic leukemia](https://doi.org/10.1186/s13059-026-04072-4).
 
 
 
@@ -11,7 +12,7 @@ To view the assembled figures and their respective code for assembly, first view
 To view the figure's input of the individual panels, view:
 
 Figure 1 ( [A](Panel_Scripts/Cohort_Characterisation_Metadata.Rmd) | [B left](Panel_Scripts/mtDNA_Mutation_Statistics.Rmd) [ right](Panel_Scripts/mtDNA_Mutation_Statistics.Rmd)) \
-Figure 2 (| [A](Panel_Scripts/ATAC_Healthy_Clustering.Rmd) | [B left](Panel_Scripts/ATAC_Healthy_Clustering.Rmd) [ right](Panel_Scripts/DCA.Rmd) | [C](Panel_Scripts/DPA.Rmd) | [D](Panel_Scripts/GEX_Healthy_Clustering.Rmd) | [E left](Panel_Scripts/GEX_Healthy_Clustering.Rmd) [ right](Panel_Scripts/DEGA.Rmd) | [F](Panel_Scripts/DEGA_Patients.Rmd))\
+Figure 2 ( [A](Panel_Scripts/ATAC_Healthy_Clustering.Rmd) | [B left](Panel_Scripts/ATAC_Healthy_Clustering.Rmd) [ right](Panel_Scripts/DCA.Rmd) | [C](Panel_Scripts/DPA.Rmd) | [D](Panel_Scripts/GEX_Healthy_Clustering.Rmd) | [E left](Panel_Scripts/GEX_Healthy_Clustering.Rmd) [ right](Panel_Scripts/DEGA.Rmd) | [F](Panel_Scripts/DEGA_Patients.Rmd))\
 Figure 3 ( A | [B](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) | [C left](Panel_Scripts/WBCC_Development_Penter_Gohil.Rmd) [ rigth](Panel_Scripts/Heteroplasmy_Distributions_Penter_Gohil.Rmd) | [D left](Panel_Scripts/WBCC_Development.Rmd) [ right](Panel_Scripts/Heteroplasmy_Distributions.Rmd) | [E](Panel_Scripts/Heteroplasmy_Distributions.Rmd))\
 Figure 4 ( A | [B left](Panel_Scripts/DCA_Batches.Rmd) [ right](Panel_Scripts/Pseudobolk_DESeq2.Rmd) | [C](Panel_Scripts/DCA_Batches.Rmd) | [D](Panel_Scripts/DCA_Batches.Rmd) | [E](Panel_Scripts/Pseudobulk_DESeq2.Rmd) | [F](Panel_Scripts/Pseudobulk_DESeq2.Rmd))\
 Figure 5 ( [A](Panel_Scripts/Compare_BCR_mtDNA_Clones.Rmd) | [B](Panel_Scripts/Compare_BCR_mtDNA_Clones.Rmd) | [C](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) | D | [E](Panel_Scripts/Compare_BCR_mtDNA_Clones_Nanoranger.Rmd) | [F](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) | [G](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) | H )\
@@ -42,7 +43,7 @@ Supplementary Figure 15 ( [A](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) )\
 Supplementary Figure 16 ( [A](Panel_Scripts/Compare_BCR_mtDNA_Clones_Nanoranger.Rmd) )\
 Supplementary Figure 17 ( [A](Panel_Scripts/VDJseq_BCR_Profiling.Rmd) | [B](Panel_Scripts/VDJseq_BCR_Profiling.Rmd) | [C](Panel_Scripts/FACS_Data.Rmd) | [D](Panel_Scripts/Alternative_Clonotype_Definition.Rmd) | [E](Panel_Scripts/Alternative_Clonotype_Definition.Rmd) | [F](Panel_Scripts/Alternative_Clonotype_Definition.Rmd))\
 Supplementary Figure 18 ( [here](Panel_Scripts/Analyse_mtDNA_Mutations.Rmd) [ and there](Panel_Scripts/Alternative_Clonotype_Definition.Rmd))\
-Supplementary Figure 19 ( [A](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [B](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [C](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [D](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [E](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd))\
+Supplementary Figure 19 ( [A](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [B](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [C](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [D](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd) | [E](Panel_Scripts/Pseudobulk_DESeq2_MBL_Progression.Rmd))
 
 ## Data availability
 Raw data has been made accessible on NCBI GEO ([GSE295489](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE295489), [GSE295490](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE295490), [GSE295491](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE295491)).\
